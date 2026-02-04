@@ -1,0 +1,9 @@
+import io
+func main(): int {
+    var name: str = "Gobol"
+    io.print(@"Hello from {name}")
+    for i in range(0, 10, 1) {
+        io.print(@"Number {i}: {name}\n")
+    }
+    return 0
+}

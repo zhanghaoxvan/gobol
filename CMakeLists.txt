@@ -7,6 +7,12 @@ add_executable(Gobol main.cpp
         Lexer/Lexer.cpp
         Lexer/Lexer.hpp
         Lexer/Token.hpp
-        AST/AST.cpp
-        AST/AST.hpp
+        AST/ASTBuilder.cpp
+        AST/ASTBuilder.hpp
+        Lexer/Token.cpp
 )
+include_directories(${CMAKE_SOURCE_DIR})
+
+if (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+    add_compile_definitions(DEBUG)
+endif ()

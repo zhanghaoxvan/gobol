@@ -2,6 +2,17 @@ BasedOnStyle: LLVM
 Language: Cpp
 Standard: c++17
 BreakBeforeBraces: Attach
+AlignConsecutiveAssignments:
+    Enabled: false
+    AcrossEmptyLines: false
+    AcrossComments: false
+    AlignCompound: false
+    PadOperators: true
+AlignEscapedNewlines: Right
+BraceWrapping:
+    SplitEmptyFunction: false
+    SplitEmptyRecord: false
+    SplitEmptyNamespace: false
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never

@@ -24,12 +24,12 @@ namespace lexer::token {
         case TokenType::END_OF_FILE:
             return "END_OF_FILE";
         default:
-        case TokenType::WRONG_TOKEN:
-            return "WRONG_TOKEN";
+        case TokenType::UNKNOWN:
+            return "UNKNOWN";
         }
     }
 
-    Token::Token(TokenType type, std::string value) : type(type), value(std::move(value)) {
+    Token::Token(const TokenType type, std::string value) : type(type), value(std::move(value)) {
     }
 
     TokenType Token::getType() const {
@@ -40,12 +40,11 @@ namespace lexer::token {
         return value;
     }
 
-    void Token::setType(TokenType newType) {
+    void Token::setType(const TokenType newType) {
         type = newType;
     }
 
     void Token::setValue(std::string newValue) {
         value = std::move(newValue);
     }
-
 } // namespace lexer::token

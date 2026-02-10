@@ -4,4 +4,4 @@
 
 #include "ASTBuilder.hpp"
 
-namespace ast {} // namespace ast
+namespace AST {} // namespace AST

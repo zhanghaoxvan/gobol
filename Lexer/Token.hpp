@@ -1,6 +1,10 @@
 //
 // Created by 35921 on 2026/1/14.
 //
+/**
+ * @file token.hpp
+ * @brief Defines token types and Token class for the Gobol lexer
+ */
 
 #ifndef GOBOL_TOKEN_HPP
 #define GOBOL_TOKEN_HPP
@@ -8,10 +12,6 @@
 #include <string>
 
 /**
- * @file token.hpp
- * @brief Defines token types and Token class for the Gobol lexer
- * @author 35921
- * @date 2026/1/14
  * @namespace lexer::token
  * @brief Contains all token-related definitions for Gobol lexer
  */
@@ -30,7 +30,7 @@ namespace lexer::token {
         OPERATOR,      ///< Operator
         END_OF_LINE,   ///< End of line delimiter: \n
         END_OF_FILE,   ///< End of file marker: \0
-        WRONG_TOKEN,   ///< Invalid/unknown token (error type)
+        UNKNOWN,       ///< Invalid/unknown token (error type)
     };
 #ifdef DEBUG
     /**
@@ -48,8 +48,8 @@ namespace lexer::token {
      *          Default initializes to WRONG_TOKEN with empty value
      */
     class Token {
-        TokenType type = TokenType::WRONG_TOKEN; ///< Type of the token
-        std::string value;                       ///< String value/literal of the token
+        TokenType type = TokenType::UNKNOWN; ///< Type of the token
+        std::string value;                   ///< String value/literal of the token
 
     public:
         /**

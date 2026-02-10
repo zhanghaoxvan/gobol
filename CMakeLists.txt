@@ -10,6 +10,8 @@ add_executable(Gobol main.cpp
         AST/ASTBuilder.cpp
         AST/ASTBuilder.hpp
         Lexer/Token.cpp
+        AST/AST.cpp
+        AST/AST.hpp
 )
 include_directories(${CMAKE_SOURCE_DIR})
 

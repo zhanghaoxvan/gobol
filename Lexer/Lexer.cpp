@@ -171,13 +171,13 @@ namespace lexer {
         case '@':
             consume();
             if (peek() != '"') {
-                return {token::TokenType::WRONG_TOKEN, "@"};
+                return {token::TokenType::UNKNOWN, "@"};
             }
             return {token::TokenType::FORMAT_STRING, parseString().getValue()};
         default:
-            // Mark unrecognized characters as WRONG_TOKEN (fault-tolerant parsing)
+            // Mark unrecognized characters as UNKNOWN (fault-tolerant parsing)
             const std::string unknown(1, consume());
-            return {token::TokenType::WRONG_TOKEN, unknown};
+            return {token::TokenType::UNKNOWN, unknown};
         }
     }
 
@@ -220,7 +220,7 @@ namespace lexer {
         // Fallback validation: ensure at least one character was parsed
         if (currentPosition == start) {
             const std::string wrong(1, consume());
-            return {token::TokenType::WRONG_TOKEN, wrong};
+            return {token::TokenType::UNKNOWN, wrong};
         }
 
         const std::string number(source.substr(start, currentPosition - start));
@@ -252,7 +252,7 @@ namespace lexer {
             return {token::TokenType::STRING, str};
         }
         // Mark unclosed string as invalid token
-        return {token::TokenType::WRONG_TOKEN, str};
+        return {token::TokenType::UNKNOWN, str};
     }
 
 } // namespace lexer

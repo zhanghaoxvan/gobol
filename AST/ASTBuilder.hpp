@@ -5,9 +5,11 @@
 #ifndef GOBOL_AST_BUILDER_HPP
 #define GOBOL_AST_BUILDER_HPP
 
-namespace ast {
-    class ASTBuilder {};
+namespace AST {
+    class ASTBuilder {
 
-} // namespace ast
+    };
+
+} // namespace AST
 
 #endif // GOBOL_AST_BUILDER_HPP

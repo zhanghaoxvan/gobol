@@ -1,5 +1,5 @@
 Checks: '-*,
-bugprone-argument-comment,
+ bugprone-argument-comment,
 bugprone-assert-side-effect,
 bugprone-bad-signal-to-kill-thread,
 bugprone-branch-clone,

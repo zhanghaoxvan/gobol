@@ -1,9 +1,6 @@
-//
-// Created by 35921 on 2026/1/14.
-//
 /**
  * @file token.hpp
- * @brief Defines token types and Token class for the Gobol lexer
+ * 为Gobol词法分析器定义令牌（Token）类型及Token类
  */
 
 #ifndef GOBOL_TOKEN_HPP
@@ -13,79 +10,78 @@
 
 /**
  * @namespace lexer::token
- * @brief Contains all token-related definitions for Gobol lexer
+ * @brief Gobol的Token声明与实现均存放于此命名空间
  */
 namespace lexer::token {
     /**
      * @enum TokenType
-     * @brief Enumerates all valid token types for the Gobol programming language
-     * @note WRONG_TOKEN is the default type for uninitialized/invalid tokens
+     * @brief 枚举Gobol编程语言中所有合法的令牌类型
+     * @note WRONG_TOKEN（错误令牌）是未初始化/无效令牌的默认类型
      */
     enum class TokenType {
-        IDENTIFIER,    ///< Identifiers (variables, functions, classes, etc.)
-        KEYWORD,       ///< The keyword of Gobol(int, if, for, etc.)
-        NUMBER,        ///< Numeric literals (integers, e.g., 1, 114514)
-        STRING,        ///< String literals (double-quoted, e.g., "Hello world!")
-        FORMAT_STRING, ///< String literals to be formatted(e.g., @"Hello {114514}!")
-        OPERATOR,      ///< Operator
-        END_OF_LINE,   ///< End of line delimiter: \n
-        END_OF_FILE,   ///< End of file marker: \0
-        UNKNOWN,       ///< Invalid/unknown token (error type)
+        IDENTIFIER,    ///< 标识符（变量、函数、类等）
+        KEYWORD,       ///< Gobol关键字（int、if、for等）
+        NUMBER,        ///< 数值字面量（整数，例如 1、114514）
+        STRING,        ///< 字符串字面量（双引号包裹，例如 "Hello world!"）
+        FORMAT_STRING, ///< 待格式化的字符串字面量（例如 @"Hello {114514}!"）
+        OPERATOR,      ///< 运算符
+        END_OF_LINE,   ///< 行结束分隔符：\n
+        END_OF_FILE,   ///< 文件结束标记：\0
+        UNKNOWN,       ///< 无效/未知令牌（错误类型）
     };
 #ifdef DEBUG
     /**
-     *
-     * @param type the TokenType which will be converted
-     * @return the converted string of type
+     * @param type 待转换的TokenType类型
+     * @return 转换后的类型字符串
      */
     std::string tokenTypeToString(TokenType type);
 #endif
 
     /**
-     * @struct Token
-     * @brief Represents a single lexical token for the Gobol language
-     * @details Stores the type and string value of a token, with full getter/setter methods
-     *          Default initializes to WRONG_TOKEN with empty value
+     * @struct Token （注：代码中实际是class，按代码修正）
+     * @brief 表示Gobol语言的单个词法令牌
+     * @details 存储令牌的类型和字符串值，提供完整的获取/设置方法
+     *          默认初始化为类型WRONG_TOKEN、值为空字符串的令牌
      */
     class Token {
-        TokenType type = TokenType::UNKNOWN; ///< Type of the token
-        std::string value;                   ///< String value/literal of the token
+        TokenType type = TokenType::UNKNOWN; ///< 令牌类型
+        std::string value;                   ///< 令牌的字符串值/字面量
 
     public:
         /**
-         * @brief Default constructor
-         * @details Initializes token type to WRONG_TOKEN and value to empty string
+         * @brief 默认构造函数
+         * @details 将令牌类型初始化为WRONG_TOKEN，值初始化为空字符串
          */
         Token() = default;
 
         /**
-         * @brief Parameterized constructor
-         * @param type Type of the token (TokenType)
-         * @param value String literal/value of the token (moved for efficiency)
+         * @brief 带参数的构造函数
+         * @param type 令牌类型（TokenType）
+         * @param value 令牌的字符串字面量/值（移动语义以提升效率）
          */
         Token(TokenType type, std::string value);
 
         /**
-         * @brief Get the token type
-         * @return Const reference to TokenType (immutable)
+         * @brief 获取令牌类型
+         * @return TokenType的常量引用（不可修改）
          */
         [[nodiscard]] TokenType getType() const;
 
         /**
-         * @brief Get the token string value
-         * @return Const reference to std::string (avoids copy)
+         * @brief 获取令牌的字符串值
+         * @return std::string的常量引用（避免拷贝）
          */
         [[nodiscard]] const std::string &getValue() const;
 
         /**
-         * @brief Set a new type for the token
-         * @param newType New TokenType to assign
+         * @brief 为令牌设置新类型
+         * @param newType 要赋值的新TokenType类型
          */
         void setType(TokenType newType);
 
         /**
-         * @brief Set a new string value for the token
-         * @param newValue New string value (moved for efficiency)
+         * @brief 为令牌设置新的字符串值
+         * @param newValue 新的字符串值（移动语义以提升效率）
          */
         void setValue(std::string newValue);
     };

@@ -1,6 +1,12 @@
-//
-// Created by 35921 on 2026/1/14.
-//
+/**
+ * @file Lexer.cpp
+ * @brief 词法分析器（Lexer）的核心实现文件
+ *
+ * 该文件实现了 Lexer 类的所有成员函数，包括字符读取、注释跳过、各类 Token
+ * （标识符、关键字、数字、字符串、运算符等）的解析逻辑，是词法分析阶段的核心实现。
+ * @author （可补充作者信息）
+ * @date （可补充日期信息）
+ */
 
 #include "Lexer.hpp"
 #include <cctype>
@@ -42,11 +48,11 @@ namespace lexer {
     }
 
     bool Lexer::skipBlockComment() {
-        consume(); // Skip the '*' in "/*"
+        consume(); // 跳过 "/*" 中的 '*'
         while (!isSourceEnd()) {
             if (peek() == '*' && peekNext() == '/') {
-                consume(); // Skip the '*' in "*/"
-                consume(); // Skip the '/' in "*/"
+                consume(); // 跳过 "*/" 中的 '*'
+                consume(); // 跳过 "*/" 中的 '/'
                 return true;
             }
             consume();
@@ -58,57 +64,57 @@ namespace lexer {
     }
 
     token::Token Lexer::getNextToken() {
-        // Loop to skip non-lexical content (whitespace and comments)
+        // 循环跳过非词法内容（空白字符和注释）
         while (!isSourceEnd()) {
             const char c = peek();
-            // Skip whitespace (space/tab/cr) but preserve newlines for line tracking
+            // 跳过空白字符（空格/制表符/回车），但保留换行符用于行号跟踪
             if (std::isspace(static_cast<unsigned char>(c)) && c != '\n') {
                 consume();
                 continue;
             }
-            // Detect and skip single-line comment "//"
+            // 检测并跳过单行注释 "//"
             if (c == '/' && peekNext() == '/') {
                 skipLineComment();
                 continue;
             }
-            // Detect and skip multi-line comment "/* */"
+            // 检测并跳过多行注释 "/* */"
             if (c == '/' && peekNext() == '*') {
                 skipBlockComment();
                 continue;
             }
-            // Exit loop when a valid lexical character is found
+            // 找到有效词法字符时退出循环
             break;
         }
 
-        // Return EOF if source is exhausted after skipping non-lexical content
+        // 跳过非词法内容后若到达末尾，返回文件结束 Token
         if (isSourceEnd()) {
             return {token::TokenType::END_OF_FILE, ""};
         }
 
-        // Get current valid character (safe read via peek())
+        // 获取当前有效字符（通过 peek() 安全读取）
         const char currentChar = peek();
 
-        // Process newline as independent END_OF_LINE token (updates line/col via consume())
+        // 将换行符处理为独立的 END_OF_LINE Token（通过 consume() 更新行号/列号）
         if (currentChar == '\n') {
             consume();
             return {token::TokenType::END_OF_LINE, "\n"};
         }
 
-        // Dispatch to composite token parsers based on leading character
-        // Parse identifiers/keywords (starts with letter or underscore)
+        // 根据首字符分发到复合 Token 解析器
+        // 解析标识符/关键字（以字母或下划线开头）
         if (std::isalpha(static_cast<unsigned char>(currentChar)) || currentChar == '_') {
             return parseIdentifier();
         }
-        // Parse numeric literals (integer/floating-point, starts with digit)
+        // 解析数字字面量（整数/浮点数，以数字开头）
         if (std::isdigit(static_cast<unsigned char>(currentChar))) {
             return parseNumber();
         }
-        // Parse double-quoted string literals (supports basic escape sequences)
+        // 解析双引号包裹的字符串字面量（支持基础转义序列）
         if (currentChar == '"') {
             return parseString();
         }
 
-        // Parse single-character operators and delimiters
+        // 解析单字符运算符和分隔符
         switch (currentChar) {
         case '+':
             consume();
@@ -175,7 +181,7 @@ namespace lexer {
             }
             return {token::TokenType::FORMAT_STRING, parseString().getValue()};
         default:
-            // Mark unrecognized characters as UNKNOWN (fault-tolerant parsing)
+            // 将无法识别的字符标记为 UNKNOWN（容错性解析）
             const std::string unknown(1, consume());
             return {token::TokenType::UNKNOWN, unknown};
         }
@@ -183,14 +189,14 @@ namespace lexer {
 
     token::Token Lexer::parseIdentifier() {
         const size_t start = currentPosition;
-        // Consume all valid identifier characters
+        // 消费所有有效标识符字符
         while (!isSourceEnd() && (std::isalnum(peek()) || peek() == '_')) {
             consume();
         }
-        // Extract the raw identifier string from source
+        // 从源代码中提取原始标识符字符串
         const std::string identifier(source.substr(start, currentPosition - start));
-        // Check if the identifier is a language keyword
-        if (keywords.contains(identifier)) {
+        // 检查标识符是否为语言关键字
+        if (keywords.find(identifier) != keywords.end()) {
             return {token::TokenType::KEYWORD, identifier};
         }
         return {token::TokenType::IDENTIFIER, identifier};
@@ -198,26 +204,26 @@ namespace lexer {
 
     token::Token Lexer::parseNumber() {
         const size_t start = currentPosition;
-        bool hasDecimal = false; // Track single decimal point for floating-point numbers
+        bool hasDecimal = false; // 跟踪浮点数的单个小数点
 
         while (!isSourceEnd()) {
             const char c = peek();
             if (std::isdigit(c)) {
                 consume();
             } else if (c == '.' && !hasDecimal) {
-                // Validate decimal point: must be followed by a digit and not at EOF
+                // 验证小数点：必须后跟数字且不在文件末尾
                 if (peekNext() == '\0' || !std::isdigit(peekNext())) {
                     break;
                 }
                 hasDecimal = true;
                 consume();
             } else {
-                // Stop parsing at non-numeric/illegal characters
+                // 遇到非数字/非法字符时停止解析
                 break;
             }
         }
 
-        // Fallback validation: ensure at least one character was parsed
+        // 兜底验证：确保至少解析了一个字符
         if (currentPosition == start) {
             const std::string wrong(1, consume());
             return {token::TokenType::UNKNOWN, wrong};
@@ -228,7 +234,7 @@ namespace lexer {
     }
 
     token::Token Lexer::parseString() {
-        consume(); // Skip the opening double quote
+        consume(); // 跳过开头的双引号
         const size_t start = currentPosition;
         bool isClosed = false;
 
@@ -238,20 +244,20 @@ namespace lexer {
                 isClosed = true;
                 break;
             }
-            // Handle basic escape sequences (\", \\)
+            // 处理基础转义序列（\"、\\）
             if (c == '\\' && peekNext() != '\0') {
-                consume(); // Skip the backslash
+                consume(); // 跳过反斜杠
             }
             consume();
         }
 
-        // Extract string content (excludes enclosing quotes)
+        // 提取字符串内容（排除首尾引号）
         const std::string str(source.substr(start, currentPosition - start));
         if (isClosed) {
-            consume(); // Skip the closing double quote
+            consume(); // 跳过结尾的双引号
             return {token::TokenType::STRING, str};
         }
-        // Mark unclosed string as invalid token
+        // 将未闭合的字符串标记为无效 Token
         return {token::TokenType::UNKNOWN, str};
     }
 

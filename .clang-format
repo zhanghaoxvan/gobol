@@ -13,6 +13,8 @@ BraceWrapping:
     SplitEmptyFunction: false
     SplitEmptyRecord: false
     SplitEmptyNamespace: false
+    AfterControlStatement: false
+    IndentBraces: false
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never
@@ -26,3 +28,4 @@ AllowShortLoopsOnASingleLine: false
 AccessModifierOffset: -4
 ConstructorInitializerIndentWidth: 4
 NamespaceIndentation: All
+ContinuationIndentWidth: 4

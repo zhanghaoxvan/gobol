@@ -179,7 +179,7 @@ namespace lexer {
             if (peek() != '"') {
                 return {token::TokenType::UNKNOWN, "@"};
             }
-            return {token::TokenType::FORMAT_STRING, parseString().getValue()};
+            return {token::TokenType::FORMAT_STRING, parseString().value};
         default:
             // 将无法识别的字符标记为 UNKNOWN（容错性解析）
             const std::string unknown(1, consume());

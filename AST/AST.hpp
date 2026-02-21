@@ -1,192 +1,632 @@
-/**
- * @file AST.hpp
- * @brief GOBOL 语言抽象语法树（AST）核心头文件
- *
- * 该文件仅声明 AST 节点类型枚举、基础 ASTNode 结构体、各类具体节点及 AST 访问者接口，
- * 实现代码统一放在 AST.cpp 中，遵循“声明与实现分离”原则。
- * @author 35921
- * @date 2026/2/5
- */
+//
+// Created by 35921 on 2026/1/16.
+//
 
 #ifndef AST_HPP
 #define AST_HPP
 
-#include <Lexer/Token.hpp>
+#include <Lexer/Lexer.hpp>
+#include <string>
 #include <vector>
 
 namespace AST {
 
-    // 前向声明访问者接口
-    class ASTVisitor;
+    // 前向声明
+    class ASTNode;
+    class Program;
+    class Statement;
+    class Expression;
+    class Block;
+    class Function;
+    class Parameter;
+    class Type;
+    class IfStatement;
+    class WhileStatement;
+    class ForStatement;
+    class ForInStatement;
+    class ReturnStatement;
+    class BreakStatement;
+    class ContinueStatement;
+    class Declaration;
+    class ExpressionStatement;
+    class ImportStatement;
+    class BinaryExpression;
+    class UnaryExpression;
+    class FunctionCall;
+    class MemberAccess;
+    class ArrayIndex;
+    class GroupedExpression;
+    class Identifier;
+    class NumberLiteral;
+    class StringLiteral;
+    class BooleanLiteral;
+    class FormatString;
+    class RangeExpression;
 
-    // AST 节点类型枚举
-    enum class ASTNodeType {
-        PROGRAM, ///< 程序根节点（整个 AST 的入口）
-
-        IMPORT_DECL,   ///< 导入声明节点（import 语句）
-        FUNCTION_DECL, ///< 函数声明节点（函数定义）
-        VAR_DECL,      ///< 变量声明节点（变量定义）
-        MODULE_DECL,   ///< 模块声明节点（module 定义）
-
-        RETURN_STMT, ///< 返回语句节点（return 语句）
-        EXPR_STMT,   ///< 表达式语句节点（单独的表达式作为语句）
-        BLOCK_STMT,  ///< 代码块节点（{} 包裹的语句块）
-        IF_STMT,     ///< 条件语句节点（if 语句）
-        WHILE_STMT,  ///< 循环语句节点（while 语句）
-        FOR_STMT,    ///< 循环语句节点（for 语句）
-
-        IDENTIFIER,    ///< 标识符节点（变量名、函数名等）
-        KEYWORD,       ///< 关键字节点（语言保留字）
-        NUMBER,        ///< 数字字面量节点（整数/浮点数）
-        STRING,        ///< 普通字符串字面量节点
-        FORMAT_STRING, ///< 格式化字符串字面量节点
-        OPERATOR,      ///< 运算符节点（+、-、*、/ 等）
-        END_OF_LINE,   ///< 行结束节点
-        END_OF_FILE,   ///< 文件结束节点
-
-        UNKNOWN ///< 未知节点（语法分析失败的节点）
-    };
-
-    // AST 基础节点结构体（仅声明）
-    struct ASTNode {
-        ASTNode *parent;
-        std::vector<ASTNode *> children;
-        lexer::token::Token token;
-        ASTNodeType type;
-
-        // 构造函数声明
-        ASTNode(ASTNode *parent, lexer::token::Token token);
-        ASTNode(ASTNode *parent, lexer::token::Token token, ASTNodeType type);
-
-        // 虚析构函数声明
-        virtual ~ASTNode();
-
-        // 禁用拷贝语义（仅声明）
-        ASTNode(const ASTNode &) = delete;
-        ASTNode &operator=(const ASTNode &) = delete;
-
-        // 启用移动语义（仅声明）
-        ASTNode(ASTNode &&) = default;
-        ASTNode &operator=(ASTNode &&) = default;
-
-        // 纯虚方法声明
-        virtual void accept(ASTVisitor &visitor) = 0;
-    };
-
-    // 各类具体节点的声明（仅保留构造函数和 accept 方法声明）
-    struct ImportDeclNode : ASTNode {
-        ImportDeclNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct FunctionDeclNode : ASTNode {
-        FunctionDeclNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct VarDeclNode : ASTNode {
-        VarDeclNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct ReturnStmtNode : ASTNode {
-        ReturnStmtNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct ExprStmtNode : ASTNode {
-        ExprStmtNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct BlockStmtNode : ASTNode {
-        BlockStmtNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct IfStmtNode : ASTNode {
-        IfStmtNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct WhileStmtNode : ASTNode {
-        WhileStmtNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct ForStmtNode : ASTNode {
-        ForStmtNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct IdentifierNode : ASTNode {
-        IdentifierNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct KeywordNode : ASTNode {
-        KeywordNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct NumberNode : ASTNode {
-        NumberNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct StringNode final : ASTNode {
-        StringNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct FormatStringNode final : ASTNode {
-        FormatStringNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct OperatorNode final : ASTNode {
-        OperatorNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct EndOfLineNode final : ASTNode {
-        EndOfLineNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct EndOfFileNode final : ASTNode {
-        EndOfFileNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    struct UnknownNode final : ASTNode {
-        UnknownNode(ASTNode *parent, lexer::token::Token token);
-        void accept(ASTVisitor &visitor) override;
-    };
-
-    // AST 访问者接口声明
-    class ASTVisitor {
+    /**
+     * @class ASTNode
+     * @brief AST节点的基类
+     */
+    class ASTNode {
     public:
-        virtual ~ASTVisitor() = default;
+        virtual ~ASTNode() = default;
+    };
 
-        virtual void visit(ImportDeclNode &node) = 0;
-        virtual void visit(FunctionDeclNode &node) = 0;
-        virtual void visit(VarDeclNode &node) = 0;
-        virtual void visit(ReturnStmtNode &node) = 0;
-        virtual void visit(ExprStmtNode &node) = 0;
-        virtual void visit(BlockStmtNode &node) = 0;
-        virtual void visit(IfStmtNode &node) = 0;
-        virtual void visit(WhileStmtNode &node) = 0;
-        virtual void visit(ForStmtNode &node) = 0;
-        virtual void visit(IdentifierNode &node) = 0;
-        virtual void visit(KeywordNode &node) = 0;
-        virtual void visit(NumberNode &node) = 0;
-        virtual void visit(StringNode &node) = 0;
-        virtual void visit(FormatStringNode &node) = 0;
-        virtual void visit(OperatorNode &node) = 0;
-        virtual void visit(EndOfLineNode &node) = 0;
-        virtual void visit(EndOfFileNode &node) = 0;
-        virtual void visit(UnknownNode &node) = 0;
+    /**
+     * @class Program
+     * @brief 程序根节点
+     */
+    class Program : public ASTNode {
+    private:
+        ::std::vector<Statement *> statements;
+
+    public:
+        Program() = default;
+        ~Program() override;
+
+        void addStatement(Statement *stmt);
+        const ::std::vector<Statement *> &getStatements() const {
+            return statements;
+        }
+    };
+
+    /**
+     * @class Statement
+     * @brief 语句基类
+     */
+    class Statement : public ASTNode {
+    public:
+        ~Statement() override = default;
+    };
+
+    /**
+     * @class Expression
+     * @brief 表达式基类
+     */
+    class Expression : public ASTNode {
+    public:
+        ~Expression() override = default;
+    };
+
+    /**
+     * @class Block
+     * @brief 代码块
+     */
+    class Block : public Statement {
+    private:
+        ::std::vector<Statement *> statements;
+
+    public:
+        Block() = default;
+        ~Block() override;
+
+        void addStatement(Statement *stmt);
+        const ::std::vector<Statement *> &getStatements() const {
+            return statements;
+        }
+    };
+
+    /**
+     * @class Type
+     * @brief 类型节点
+     */
+    class Type : public ASTNode {
+    private:
+        ::std::string name;
+
+    public:
+        explicit Type(::std::string name);
+        ~Type() override = default;
+
+        const ::std::string &getName() const {
+            return name;
+        }
+    };
+
+    /**
+     * @class ArrayType
+     * @brief 数组类型
+     */
+    class ArrayType : public Type {
+    private:
+        Expression *size;
+
+    public:
+        ArrayType(const ::std::string &elementType, Expression *size);
+        ~ArrayType() override;
+
+        Expression *getSize() const {
+            return size;
+        }
+    };
+
+    /**
+     * @class Parameter
+     * @brief 函数参数
+     */
+    class Parameter : public ASTNode {
+    private:
+        ::std::string name;
+        Type *type;
+
+    public:
+        Parameter(::std::string name, Type *type);
+        ~Parameter() override;
+
+        const ::std::string &getName() const {
+            return name;
+        }
+        Type *getType() const {
+            return type;
+        }
+    };
+
+    /**
+     * @class Function
+     * @brief 函数定义
+     */
+    class Function : public Statement {
+    private:
+        ::std::string name;
+        ::std::vector<Parameter *> *parameters;
+        Type *returnType;
+        Block *body;
+
+    public:
+        Function(::std::string name, ::std::vector<Parameter *> *parameters, Type *returnType, Block *body);
+        ~Function() override;
+
+        const ::std::string &getName() const {
+            return name;
+        }
+        ::std::vector<Parameter *> *getParameters() const {
+            return parameters;
+        }
+        Type *getReturnType() const {
+            return returnType;
+        }
+        Block *getBody() const {
+            return body;
+        }
+    };
+
+    /**
+     * @class ImportStatement
+     * @brief 导入语句
+     */
+    class ImportStatement : public Statement {
+    private:
+        ::std::string moduleName;
+
+    public:
+        explicit ImportStatement(::std::string moduleName);
+        ~ImportStatement() override = default;
+
+        const ::std::string &getModuleName() const {
+            return moduleName;
+        }
+    };
+
+    /**
+     * @class IfStatement
+     * @brief if语句
+     */
+    class IfStatement : public Statement {
+    private:
+        Expression *condition;
+        Statement *thenBranch;
+        Statement *elseBranch;
+
+    public:
+        IfStatement(Expression *condition, Statement *thenBranch, Statement *elseBranch = nullptr);
+        ~IfStatement() override;
+
+        Expression *getCondition() const {
+            return condition;
+        }
+        Statement *getThenBranch() const {
+            return thenBranch;
+        }
+        Statement *getElseBranch() const {
+            return elseBranch;
+        }
+    };
+
+    /**
+     * @class WhileStatement
+     * @brief while循环
+     */
+    class WhileStatement : public Statement {
+    private:
+        Expression *condition;
+        Statement *body;
+
+    public:
+        WhileStatement(Expression *condition, Statement *body);
+        ~WhileStatement() override;
+
+        Expression *getCondition() const {
+            return condition;
+        }
+        Statement *getBody() const {
+            return body;
+        }
+    };
+
+    /**
+     * @class ForStatement
+     * @brief for循环
+     */
+    class ForStatement : public Statement {
+    private:
+        Statement *init;
+        Expression *condition;
+        Expression *increment;
+        Statement *body;
+
+    public:
+        ForStatement(Statement *init, Expression *condition, Expression *increment, Statement *body);
+        ~ForStatement() override;
+
+        Statement *getInit() const {
+            return init;
+        }
+        Expression *getCondition() const {
+            return condition;
+        }
+        Expression *getIncrement() const {
+            return increment;
+        }
+        Statement *getBody() const {
+            return body;
+        }
+    };
+
+    /**
+     * @class ForInStatement
+     * @brief for...in循环
+     */
+    class ForInStatement : public Statement {
+    private:
+        ::std::string loopVariable;
+        Expression *iterable;
+        Block *body;
+
+    public:
+        ForInStatement(::std::string loopVariable, Expression *iterable, Block *body);
+        ~ForInStatement() override;
+
+        const ::std::string &getLoopVariable() const {
+            return loopVariable;
+        }
+        Expression *getIterable() const {
+            return iterable;
+        }
+        Block *getBody() const {
+            return body;
+        }
+    };
+
+    /**
+     * @class ReturnStatement
+     * @brief return语句
+     */
+    class ReturnStatement : public Statement {
+    private:
+        Expression *value;
+
+    public:
+        explicit ReturnStatement(Expression *value = nullptr);
+        ~ReturnStatement() override;
+
+        Expression *getValue() const {
+            return value;
+        }
+    };
+
+    /**
+     * @class BreakStatement
+     * @brief break语句
+     */
+    class BreakStatement : public Statement {
+    public:
+        BreakStatement() = default;
+        ~BreakStatement() override = default;
+    };
+
+    /**
+     * @class ContinueStatement
+     * @brief continue语句
+     */
+    class ContinueStatement : public Statement {
+    public:
+        ContinueStatement() = default;
+        ~ContinueStatement() override = default;
+    };
+
+    /**
+     * @class Declaration
+     * @brief 变量声明
+     */
+    class Declaration : public Statement {
+    private:
+        ::std::string keyword; // var, let, const
+        ::std::string name;
+        Type *type;
+        Expression *initializer;
+
+    public:
+        Declaration(::std::string keyword, ::std::string name, Type *type, Expression *initializer);
+        ~Declaration() override;
+
+        const ::std::string &getKeyword() const {
+            return keyword;
+        }
+        const ::std::string &getName() const {
+            return name;
+        }
+        Type *getType() const {
+            return type;
+        }
+        Expression *getInitializer() const {
+            return initializer;
+        }
+    };
+
+    /**
+     * @class ExpressionStatement
+     * @brief 表达式语句
+     */
+    class ExpressionStatement : public Statement {
+    private:
+        Expression *expression;
+
+    public:
+        explicit ExpressionStatement(Expression *expression);
+        ~ExpressionStatement() override;
+
+        Expression *getExpression() const {
+            return expression;
+        }
+    };
+
+    /**
+     * @class BinaryExpression
+     * @brief 二元表达式
+     */
+    class BinaryExpression : public Expression {
+    private:
+        Expression *left;
+        ::std::string op;
+        Expression *right;
+
+    public:
+        BinaryExpression(Expression *left, ::std::string op, Expression *right);
+        ~BinaryExpression() override;
+
+        Expression *getLeft() const {
+            return left;
+        }
+        const ::std::string &getOperator() const {
+            return op;
+        }
+        Expression *getRight() const {
+            return right;
+        }
+    };
+
+    /**
+     * @class UnaryExpression
+     * @brief 一元表达式
+     */
+    class UnaryExpression : public Expression {
+    private:
+        ::std::string op;
+        Expression *operand;
+
+    public:
+        UnaryExpression(::std::string op, Expression *operand);
+        ~UnaryExpression() override;
+
+        const ::std::string &getOperator() const {
+            return op;
+        }
+        Expression *getOperand() const {
+            return operand;
+        }
+    };
+
+    /**
+     * @class FunctionCall
+     * @brief 函数调用
+     */
+    class FunctionCall : public Expression {
+    private:
+        Expression *callee;
+        ::std::vector<Expression *> *arguments;
+
+    public:
+        FunctionCall(Expression *callee, ::std::vector<Expression *> *arguments);
+        ~FunctionCall() override;
+
+        Expression *getCallee() const {
+            return callee;
+        }
+        ::std::vector<Expression *> *getArguments() const {
+            return arguments;
+        }
+    };
+
+    /**
+     * @class MemberAccess
+     * @brief 成员访问
+     */
+    class MemberAccess : public Expression {
+    private:
+        Expression *object;
+        ::std::string member;
+
+    public:
+        MemberAccess(Expression *object, ::std::string member);
+        ~MemberAccess() override;
+
+        Expression *getObject() const {
+            return object;
+        }
+        const ::std::string &getMember() const {
+            return member;
+        }
+    };
+
+    /**
+     * @class ArrayIndex
+     * @brief 数组索引
+     */
+    class ArrayIndex : public Expression {
+    private:
+        Expression *array;
+        Expression *index;
+
+    public:
+        ArrayIndex(Expression *array, Expression *index);
+        ~ArrayIndex() override;
+
+        Expression *getArray() const {
+            return array;
+        }
+        Expression *getIndex() const {
+            return index;
+        }
+    };
+
+    /**
+     * @class GroupedExpression
+     * @brief 括号分组表达式
+     */
+    class GroupedExpression : public Expression {
+    private:
+        Expression *expression;
+
+    public:
+        explicit GroupedExpression(Expression *expression);
+        ~GroupedExpression() override;
+
+        Expression *getExpression() const {
+            return expression;
+        }
+    };
+
+    /**
+     * @class Identifier
+     * @brief 标识符
+     */
+    class Identifier : public Expression {
+    private:
+        ::std::string name;
+
+    public:
+        explicit Identifier(::std::string name);
+        ~Identifier() override = default;
+
+        const ::std::string &getName() const {
+            return name;
+        }
+    };
+
+    /**
+     * @class NumberLiteral
+     * @brief 数字字面量
+     */
+    class NumberLiteral : public Expression {
+    private:
+        double value;
+
+    public:
+        explicit NumberLiteral(double value);
+        ~NumberLiteral() override = default;
+
+        double getValue() const {
+            return value;
+        }
+    };
+
+    /**
+     * @class StringLiteral
+     * @brief 字符串字面量
+     */
+    class StringLiteral : public Expression {
+    private:
+        ::std::string value;
+
+    public:
+        explicit StringLiteral(::std::string value);
+        ~StringLiteral() override = default;
+
+        const ::std::string &getValue() const {
+            return value;
+        }
+    };
+
+    /**
+     * @class BooleanLiteral
+     * @brief 布尔字面量
+     */
+    class BooleanLiteral : public Expression {
+    private:
+        bool value;
+
+    public:
+        explicit BooleanLiteral(bool value);
+        ~BooleanLiteral() override = default;
+
+        bool getValue() const {
+            return value;
+        }
+    };
+
+    /**
+     * @class FormatString
+     * @brief 格式化字符串
+     */
+    class FormatString : public Expression {
+    public:
+        struct VariablePosition {
+            int posInValue = 0;
+            Expression *value;
+        };
+
+    private:
+        ::std::string value;
+
+        ::std::vector<VariablePosition> variables;
+
+    public:
+        explicit FormatString(::std::string value);
+        ~FormatString() override = default;
+
+        const ::std::string &getValue() const {
+            return value;
+        }
+        const ::std::vector<VariablePosition> &getVariables() const {
+            return variables;
+        }
+    };
+
+    /**
+     * @class RangeExpression
+     * @brief range表达式
+     */
+    class RangeExpression : public Expression {
+    private:
+        ::std::vector<Expression *> arguments;
+
+    public:
+        explicit RangeExpression(const ::std::vector<Expression *> &args);
+        ~RangeExpression() override;
+
+        const ::std::vector<Expression *> &getArguments() const {
+            return arguments;
+        }
     };
 
 } // namespace AST

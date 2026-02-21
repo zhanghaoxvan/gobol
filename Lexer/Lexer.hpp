@@ -5,16 +5,17 @@
 
 #ifndef LEXER_HPP
 #define LEXER_HPP
-
+// iamsotired
 #include <Lexer/Token.hpp>
 #include <string_view>
 #include <unordered_set>
-
+// The Animation is not working.
+// Check for it or ?OK
 /**
  * @namespace lexer
  * @brief 词法分析器（Lexer）相关逻辑归属此命名空间
  */
-namespace lexer {
+namespace lexer { // how many applications in your debian?
 
     /**
      * @class Lexer

@@ -8,18 +8,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 file(GLOB SOURCE
-    "${CMAKE_SOURCE_DIR}/*.cpp"
-    "${CMAKE_SOURCE_DIR}/*.ixx"
+    "${CMAKE_SOURCE_DIR}/*/*.cpp"
+    "${CMAKE_SOURCE_DIR}/main.cpp"
 )
 
-add_executable(Gobol ${SOURCE})
+add_executable(gobol ${SOURCE})
 
-target_include_directories(Gobol 
+target_include_directories(gobol 
     PUBLIC ${CMAKE_SOURCE_DIR}
 )
 
 if (CMAKE_BUILD_TYPE MATCHES "^[Dd]ebug$")
-    target_compile_definitions(Gobol 
+    target_compile_definitions(gobol 
         PRIVATE DEBUG
     )
 endif ()

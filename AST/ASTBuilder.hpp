@@ -160,12 +160,6 @@ namespace AST {
         Statement *parseReturnStatement();
 
         /**
-         * @brief 解析for...in循环
-         * @return for...in语句节点
-         */
-        Statement *parseForInStatement();
-
-        /**
          * @brief 解析if语句
          * @return if语句节点
          */

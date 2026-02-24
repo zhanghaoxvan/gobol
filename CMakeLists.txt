@@ -18,10 +18,19 @@ target_include_directories(gobol
     PUBLIC ${CMAKE_SOURCE_DIR}
 )
 
+# 干掉注释警告
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    add_compile_options(-Wno-comment)
+elseif(MSVC)
+    add_compile_options(/wd4138)
+endif()
+
 if (CMAKE_BUILD_TYPE MATCHES "^[Dd]ebug$")
     target_compile_definitions(gobol 
         PRIVATE DEBUG
     )
+    
 endif ()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")

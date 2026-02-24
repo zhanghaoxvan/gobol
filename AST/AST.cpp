@@ -4,6 +4,8 @@
 
 namespace AST {
 
+    // NOLINTBEGIN
+
     // Program
     Program::~Program() {
         for (auto stmt : statements) {
@@ -91,23 +93,11 @@ namespace AST {
     }
 
     // ForStatement
-    ForStatement::ForStatement(Statement *init, Expression *condition, Expression *increment, Statement *body)
-        : init(init), condition(condition), increment(increment), body(body) {
-    }
-
-    ForStatement::~ForStatement() {
-        delete init;
-        delete condition;
-        delete increment;
-        delete body;
-    }
-
-    // ForInStatement
-    ForInStatement::ForInStatement(std::string loopVariable, Expression *iterable, Block *body)
+    ForStatement::ForStatement(std::string loopVariable, Expression *iterable, Block *body)
         : loopVariable(std::move(loopVariable)), iterable(iterable), body(body) {
     }
 
-    ForInStatement::~ForInStatement() {
+    ForStatement::~ForStatement() {
         delete iterable;
         delete body;
     }
@@ -163,7 +153,7 @@ namespace AST {
 
     FunctionCall::~FunctionCall() {
         delete callee;
-        if (arguments) { // why the cursor ...?
+        if (arguments) {
             for (auto arg : *arguments) {
                 delete arg;
             }
@@ -225,5 +215,7 @@ namespace AST {
             delete arg;
         }
     }
+
+    // NOLINTEND
 
 } // namespace AST

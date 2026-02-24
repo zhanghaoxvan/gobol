@@ -139,18 +139,7 @@ namespace AST {
             } else if (keyword == "var" || keyword == "let" || keyword == "const") {
                 return parseDeclaration();
             } else if (keyword == "for") {
-                // 检查是普通for还是for...in
-                size_t savedPos = currentPosition;
-                advance(); // 消费'for'
-
-                // 检查下一个token是否是标识符且再下一个是'in'
-                if (match(lexer::token::TokenType::IDENTIFIER) && peekNextToken().value == "in") {
-                    currentPosition = savedPos; // 回退
-                    return parseForInStatement();
-                } else {
-                    currentPosition = savedPos; // 回退
-                    return parseForStatement();
-                }
+                return parseForStatement();
             } else if (keyword == "return") {
                 return parseReturnStatement();
             } else if (keyword == "if") {
@@ -369,8 +358,8 @@ namespace AST {
         return new ReturnStatement(value);
     }
 
-    // For...in循环解析
-    Statement *ASTBuilder::parseForInStatement() {
+    // For循环解析
+    Statement *ASTBuilder::parseForStatement() {
         advance(); // 消费 'for'
 
         // 循环变量
@@ -401,7 +390,7 @@ namespace AST {
         consumeValue("}", "Expected '}' at end of loop body");
         consumeEndOfLine();
 
-        return new ForInStatement(loopVar, rangeExpr, body);
+        return new ForStatement(loopVar, rangeExpr, body);
     }
 
     // Range表达式解析
@@ -650,28 +639,26 @@ namespace AST {
         return args;
     }
 
-    // 暂未实现的语句解析函数
     Statement *ASTBuilder::parseIfStatement() {
+        // TODO
         logError("If statement not yet implemented");
         return nullptr;
     }
 
     Statement *ASTBuilder::parseWhileStatement() {
+        // TODO
         logError("While statement not yet implemented");
         return nullptr;
     }
 
-    Statement *ASTBuilder::parseForStatement() {
-        logError("For statement not yet implemented");
-        return nullptr;
-    }
-
     Statement *ASTBuilder::parseBreakStatement() {
+        // TODO
         logError("Break statement not yet implemented");
         return nullptr;
     }
 
     Statement *ASTBuilder::parseContinueStatement() {
+        // TODO
         logError("Continue statement not yet implemented");
         return nullptr;
     }

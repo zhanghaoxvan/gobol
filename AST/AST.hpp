@@ -1,6 +1,7 @@
-//
-// Created by 35921 on 2026/1/16.
-//
+/**
+ * @file AST.hpp
+ * 定义所有关于AST的类，如ASTNode及其衍生类，ASTVisitor及其衍生类
+ */
 
 #ifndef AST_HPP
 #define AST_HPP
@@ -9,9 +10,21 @@
 #include <string>
 #include <vector>
 
+#define ACCEPT_VISITOR(className)                                                                                      \
+    void accept(ASTVisitor *visitor) override {                                                                        \
+        visitor->visit(this);                                                                                          \
+    }
+
+// NOLINTBEGIN
+
+#define VISIT_ASTNODE(className) void visit(className *node) override;
+
+#define __BASE_VISIT_ASTNODE(className) virtual void visit(className *node) = 0;
+
+// NOLINTEND
+
 namespace AST {
 
-    // 前向声明
     class ASTNode;
     class Program;
     class Statement;
@@ -23,7 +36,6 @@ namespace AST {
     class IfStatement;
     class WhileStatement;
     class ForStatement;
-    class ForInStatement;
     class ReturnStatement;
     class BreakStatement;
     class ContinueStatement;
@@ -44,12 +56,50 @@ namespace AST {
     class RangeExpression;
 
     /**
+     * @class ASTVisitor
+     * @brief AST访问者基类
+     */
+    class ASTVisitor {
+    public:
+        __BASE_VISIT_ASTNODE(ASTNode)
+        __BASE_VISIT_ASTNODE(Program)
+        __BASE_VISIT_ASTNODE(Statement)
+        __BASE_VISIT_ASTNODE(Expression)
+        __BASE_VISIT_ASTNODE(Block)
+        __BASE_VISIT_ASTNODE(Function)
+        __BASE_VISIT_ASTNODE(Parameter)
+        __BASE_VISIT_ASTNODE(Type)
+        __BASE_VISIT_ASTNODE(IfStatement)
+        __BASE_VISIT_ASTNODE(WhileStatement)
+        __BASE_VISIT_ASTNODE(ForStatement)
+        __BASE_VISIT_ASTNODE(ReturnStatement)
+        __BASE_VISIT_ASTNODE(BreakStatement)
+        __BASE_VISIT_ASTNODE(ContinueStatement)
+        __BASE_VISIT_ASTNODE(Declaration)
+        __BASE_VISIT_ASTNODE(ExpressionStatement)
+        __BASE_VISIT_ASTNODE(ImportStatement)
+        __BASE_VISIT_ASTNODE(BinaryExpression)
+        __BASE_VISIT_ASTNODE(UnaryExpression)
+        __BASE_VISIT_ASTNODE(FunctionCall)
+        __BASE_VISIT_ASTNODE(MemberAccess)
+        __BASE_VISIT_ASTNODE(ArrayIndex)
+        __BASE_VISIT_ASTNODE(GroupedExpression)
+        __BASE_VISIT_ASTNODE(Identifier)
+        __BASE_VISIT_ASTNODE(NumberLiteral)
+        __BASE_VISIT_ASTNODE(StringLiteral)
+        __BASE_VISIT_ASTNODE(BooleanLiteral)
+        __BASE_VISIT_ASTNODE(FormatString)
+        __BASE_VISIT_ASTNODE(RangeExpression)
+    };
+
+    /**
      * @class ASTNode
      * @brief AST节点的基类
      */
     class ASTNode {
     public:
         virtual ~ASTNode() = default;
+        virtual void accept(ASTVisitor *visitor) = 0;
     };
 
     /**
@@ -68,6 +118,8 @@ namespace AST {
         const ::std::vector<Statement *> &getStatements() const {
             return statements;
         }
+
+        ACCEPT_VISITOR(Program)
     };
 
     /**
@@ -77,6 +129,7 @@ namespace AST {
     class Statement : public ASTNode {
     public:
         ~Statement() override = default;
+        ACCEPT_VISITOR(Statement)
     };
 
     /**
@@ -86,6 +139,7 @@ namespace AST {
     class Expression : public ASTNode {
     public:
         ~Expression() override = default;
+        ACCEPT_VISITOR(Expression)
     };
 
     /**
@@ -104,6 +158,7 @@ namespace AST {
         const ::std::vector<Statement *> &getStatements() const {
             return statements;
         }
+        ACCEPT_VISITOR(BLOCK)
     };
 
     /**
@@ -121,6 +176,7 @@ namespace AST {
         const ::std::string &getName() const {
             return name;
         }
+        ACCEPT_VISITOR(Type)
     };
 
     /**
@@ -138,6 +194,7 @@ namespace AST {
         Expression *getSize() const {
             return size;
         }
+        ACCEPT_VISITOR(ArrayType)
     };
 
     /**
@@ -159,6 +216,8 @@ namespace AST {
         Type *getType() const {
             return type;
         }
+
+        ACCEPT_VISITOR(Parameter)
     };
 
     /**
@@ -188,6 +247,7 @@ namespace AST {
         Block *getBody() const {
             return body;
         }
+        ACCEPT_VISITOR(Function)
     };
 
     /**
@@ -205,6 +265,7 @@ namespace AST {
         const ::std::string &getModuleName() const {
             return moduleName;
         }
+        ACCEPT_VISITOR(ImportStatement)
     };
 
     /**
@@ -230,6 +291,7 @@ namespace AST {
         Statement *getElseBranch() const {
             return elseBranch;
         }
+        ACCEPT_VISITOR(IfStatement)
     };
 
     /**
@@ -251,6 +313,7 @@ namespace AST {
         Statement *getBody() const {
             return body;
         }
+        ACCEPT_VISITOR(WhileStatement)
     };
 
     /**
@@ -259,42 +322,13 @@ namespace AST {
      */
     class ForStatement : public Statement {
     private:
-        Statement *init;
-        Expression *condition;
-        Expression *increment;
-        Statement *body;
-
-    public:
-        ForStatement(Statement *init, Expression *condition, Expression *increment, Statement *body);
-        ~ForStatement() override;
-
-        Statement *getInit() const {
-            return init;
-        }
-        Expression *getCondition() const {
-            return condition;
-        }
-        Expression *getIncrement() const {
-            return increment;
-        }
-        Statement *getBody() const {
-            return body;
-        }
-    };
-
-    /**
-     * @class ForInStatement
-     * @brief for...in循环
-     */
-    class ForInStatement : public Statement {
-    private:
         ::std::string loopVariable;
         Expression *iterable;
         Block *body;
 
     public:
-        ForInStatement(::std::string loopVariable, Expression *iterable, Block *body);
-        ~ForInStatement() override;
+        ForStatement(::std::string loopVariable, Expression *iterable, Block *body);
+        ~ForStatement() override;
 
         const ::std::string &getLoopVariable() const {
             return loopVariable;
@@ -305,6 +339,7 @@ namespace AST {
         Block *getBody() const {
             return body;
         }
+        ACCEPT_VISITOR(ForStatement)
     };
 
     /**
@@ -322,6 +357,7 @@ namespace AST {
         Expression *getValue() const {
             return value;
         }
+        ACCEPT_VISITOR(Expression)
     };
 
     /**
@@ -332,6 +368,7 @@ namespace AST {
     public:
         BreakStatement() = default;
         ~BreakStatement() override = default;
+        ACCEPT_VISITOR(BreakStatement)
     };
 
     /**
@@ -342,6 +379,7 @@ namespace AST {
     public:
         ContinueStatement() = default;
         ~ContinueStatement() override = default;
+        ACCEPT_VISITOR(ContinueStatement)
     };
 
     /**
@@ -350,7 +388,7 @@ namespace AST {
      */
     class Declaration : public Statement {
     private:
-        ::std::string keyword; // var, let, const
+        ::std::string keyword; // var, val
         ::std::string name;
         Type *type;
         Expression *initializer;
@@ -371,6 +409,7 @@ namespace AST {
         Expression *getInitializer() const {
             return initializer;
         }
+        ACCEPT_VISITOR(Declaration)
     };
 
     /**
@@ -388,6 +427,7 @@ namespace AST {
         Expression *getExpression() const {
             return expression;
         }
+        ACCEPT_VISITOR(ExpressionStatement)
     };
 
     /**
@@ -413,6 +453,7 @@ namespace AST {
         Expression *getRight() const {
             return right;
         }
+        ACCEPT_VISITOR(BinaryExpression)
     };
 
     /**
@@ -434,6 +475,7 @@ namespace AST {
         Expression *getOperand() const {
             return operand;
         }
+        ACCEPT_VISITOR(UnaryExpression)
     };
 
     /**
@@ -455,6 +497,7 @@ namespace AST {
         ::std::vector<Expression *> *getArguments() const {
             return arguments;
         }
+        ACCEPT_VISITOR(FunctionCall)
     };
 
     /**
@@ -476,6 +519,7 @@ namespace AST {
         const ::std::string &getMember() const {
             return member;
         }
+        ACCEPT_VISITOR(MemberAccess)
     };
 
     /**
@@ -497,6 +541,7 @@ namespace AST {
         Expression *getIndex() const {
             return index;
         }
+        ACCEPT_VISITOR(ArrayIndex)
     };
 
     /**
@@ -514,6 +559,7 @@ namespace AST {
         Expression *getExpression() const {
             return expression;
         }
+        ACCEPT_VISITOR(GroupedExpression)
     };
 
     /**
@@ -531,6 +577,7 @@ namespace AST {
         const ::std::string &getName() const {
             return name;
         }
+        ACCEPT_VISITOR(Identifier)
     };
 
     /**
@@ -548,6 +595,7 @@ namespace AST {
         double getValue() const {
             return value;
         }
+        ACCEPT_VISITOR(NumberLiteral)
     };
 
     /**
@@ -565,6 +613,7 @@ namespace AST {
         const ::std::string &getValue() const {
             return value;
         }
+        ACCEPT_VISITOR(StringLiteral)
     };
 
     /**
@@ -582,6 +631,7 @@ namespace AST {
         bool getValue() const {
             return value;
         }
+        ACCEPT_VISITOR(BooleanLiteral)
     };
 
     /**
@@ -610,6 +660,7 @@ namespace AST {
         const ::std::vector<VariablePosition> &getVariables() const {
             return variables;
         }
+        ACCEPT_VISITOR(FormatString)
     };
 
     /**
@@ -618,7 +669,7 @@ namespace AST {
      */
     class RangeExpression : public Expression {
     private:
-        ::std::vector<Expression *> arguments;
+        ::std::vector<Expression *> arguments{};
 
     public:
         explicit RangeExpression(const ::std::vector<Expression *> &args);
@@ -627,6 +678,7 @@ namespace AST {
         const ::std::vector<Expression *> &getArguments() const {
             return arguments;
         }
+        ACCEPT_VISITOR(RangeExpression)
     };
 
 } // namespace AST

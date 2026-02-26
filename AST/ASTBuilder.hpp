@@ -24,10 +24,10 @@ namespace AST {
     class ASTBuilder {
     private:
         std::vector<lexer::token::Token> tokens;
-        ASTNode *root;
+        Program *root;
         size_t currentPosition;
         bool errorOccurred;
-        std::string errorMessage;
+        std::vector<std::string> errorMessage;
 
         /**
          * @brief 获取当前token
@@ -110,6 +110,13 @@ namespace AST {
          * @return 导入语句节点
          */
         Statement *parseImport();
+
+        /**
+         * @brief 解析模块申明语句
+         * @return 模块申明语句节点
+         */
+
+        Statement *parseModule();
 
         /**
          * @brief 解析函数定义
@@ -281,6 +288,13 @@ namespace AST {
          */
         std::vector<Expression *> *parseArgumentList();
 
+        /**
+         * @brief 解析数组类型
+         * @param elementTypeName 元素类型
+         * @return 数组类型节点指针
+         */
+        Type *parseArrayType(const std::string &elementTypeName);
+
     public:
         /**
          * @brief 构造函数
@@ -301,13 +315,13 @@ namespace AST {
          * @brief 构建AST
          * @return 构建的AST根节点指针
          */
-        ASTNode *build();
+        Program *build();
 
         /**
          * @brief 获取构建的AST根节点
          * @return AST根节点指针
          */
-        ASTNode *getRoot() const {
+        Program *getRoot() const {
             return root;
         }
 
@@ -328,7 +342,7 @@ namespace AST {
          * @brief 获取错误信息
          * @return 错误信息
          */
-        const std::string &getErrorMessage() const {
+        const std::vector<std::string> &getErrorMessage() const {
             return errorMessage;
         }
     };

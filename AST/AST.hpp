@@ -17,7 +17,10 @@
 
 // NOLINTBEGIN
 
-#define VISIT_ASTNODE(className) void visit(className *node) override;
+#define VISIT_ASTNODE(className) void visit(className *node) override
+
+#define VISIT_ASTNODEO(baseClass, className) void baseClass::visit(className *node)
+#define VISIT_ASTNODEI(className) void visit(className *node) override;
 
 #define __BASE_VISIT_ASTNODE(className) virtual void visit(className *node) = 0;
 
@@ -42,6 +45,7 @@ namespace AST {
     class Declaration;
     class ExpressionStatement;
     class ImportStatement;
+    class ModuleStatement;
     class BinaryExpression;
     class UnaryExpression;
     class FunctionCall;
@@ -49,6 +53,7 @@ namespace AST {
     class ArrayIndex;
     class GroupedExpression;
     class Identifier;
+    class ArrayType;
     class NumberLiteral;
     class StringLiteral;
     class BooleanLiteral;
@@ -78,6 +83,8 @@ namespace AST {
         __BASE_VISIT_ASTNODE(Declaration)
         __BASE_VISIT_ASTNODE(ExpressionStatement)
         __BASE_VISIT_ASTNODE(ImportStatement)
+        __BASE_VISIT_ASTNODE(ModuleStatement)
+        __BASE_VISIT_ASTNODE(ArrayType)
         __BASE_VISIT_ASTNODE(BinaryExpression)
         __BASE_VISIT_ASTNODE(UnaryExpression)
         __BASE_VISIT_ASTNODE(FunctionCall)
@@ -262,6 +269,23 @@ namespace AST {
         explicit ImportStatement(::std::string moduleName);
         ~ImportStatement() override = default;
 
+        const ::std::string &getModuleName() const {
+            return moduleName;
+        }
+        ACCEPT_VISITOR(ImportStatement)
+    };
+
+    /**
+     * @brief ModuleStatement
+     * @brief module语句
+     */
+    class ModuleStatement : public Statement {
+    private:
+        ::std::string moduleName;
+
+    public:
+        explicit ModuleStatement(::std::string moduleName);
+        ~ModuleStatement() override = default;
         const ::std::string &getModuleName() const {
             return moduleName;
         }

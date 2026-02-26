@@ -9,6 +9,8 @@ namespace AST {
     ASTBuilder::ASTBuilder(lexer::Lexer lexer) : root(nullptr), currentPosition(0), errorOccurred(false) {
         auto tk = lexer.getNextToken();
         while (tk.type != lexer::token::TokenType::END_OF_FILE) {
+            tokens.emplace_back(tk);
+            tk = lexer.getNextToken();
         }
     }
 
@@ -80,15 +82,12 @@ namespace AST {
 
     void ASTBuilder::logError(const std::string &message) {
         errorOccurred = true;
-        errorMessage = message;
-        std::cerr << "ASTBuilder Error: " << message << std::endl;
+        errorMessage.emplace_back(message);
     }
 
     // 主解析函数
-    ASTNode *ASTBuilder::build() {
-
+    Program *ASTBuilder::build() {
         delete root;
-
         root = parseProgram();
         return root;
     }
@@ -100,7 +99,7 @@ namespace AST {
         }
         currentPosition = 0;
         errorOccurred = false;
-        errorMessage = "";
+        errorMessage.clear();
     }
 
     // 程序解析
@@ -134,9 +133,11 @@ namespace AST {
 
             if (keyword == "import") {
                 return parseImport();
+            } else if (keyword == "module") {
+                return parseModule();
             } else if (keyword == "func") {
                 return parseFunction();
-            } else if (keyword == "var" || keyword == "let" || keyword == "const") {
+            } else if (keyword == "var" || keyword == "val") {
                 return parseDeclaration();
             } else if (keyword == "for") {
                 return parseForStatement();
@@ -183,6 +184,20 @@ namespace AST {
         consumeEndOfLine();
 
         return new ImportStatement(moduleName);
+    }
+
+    // 模块申明语句解析
+    Statement *ASTBuilder::parseModule() {
+        advance(); // 消费 'module'
+        if (!match(lexer::token::TokenType::IDENTIFIER)) {
+            logError("Expected identifier after 'module'");
+            return nullptr;
+        }
+        std::string moduleName = currentToken().value;
+        advance();
+
+        consumeEndOfLine();
+        return new ModuleStatement(moduleName);
     }
 
     // 函数解析
@@ -269,6 +284,7 @@ namespace AST {
 
     // 类型解析
     Type *ASTBuilder::parseType() {
+        // 检查是否是基本类型
         if (!match(lexer::token::TokenType::KEYWORD) && !match(lexer::token::TokenType::IDENTIFIER)) {
             logError("Expected type name");
             return nullptr;
@@ -277,6 +293,14 @@ namespace AST {
         std::string typeName = currentToken().value;
         advance();
 
+        // 检查是否是数组类型（后面跟着 [）
+        if (matchValue("[")) {
+            advance(); // 消费 '['
+            // 是数组类型，调用 parseArrayType 继续解析
+            return parseArrayType(typeName);
+        }
+
+        // 普通类型
         return new Type(typeName);
     }
 
@@ -301,9 +325,36 @@ namespace AST {
         return block;
     }
 
+    // 解析数组类型
+    /**
+     * @brief 解析数组类型（已经消费了类型名和 '['）
+     * @param elementTypeName 元素类型名
+     * @return 数组类型节点
+     */
+    Type *ASTBuilder::parseArrayType(const std::string &elementTypeName) {
+        // 此时 '[' 已经被消费，当前位置在 '[' 之后
+
+        // 解析大小表达式
+        Expression *sizeExpr = parseExpression();
+        if (!sizeExpr) {
+            logError("Expected size expression in array type");
+            return nullptr;
+        }
+
+        // 检查并消费 ']'
+        if (!matchValue("]")) {
+            logError("Expected ']' after array size");
+            delete sizeExpr;
+            return nullptr;
+        }
+        advance(); // 消费 ']'
+
+        return new ArrayType(elementTypeName, sizeExpr);
+    }
+
     // 变量声明解析
     Statement *ASTBuilder::parseDeclaration() {
-        std::string keyword = currentToken().value; // var, let, const
+        std::string keyword = currentToken().value; // var, val
         advance();
 
         // 变量名
@@ -513,7 +564,7 @@ namespace AST {
         return expr;
     }
 
-    Expression *ASTBuilder::parseMultiplicative() { // 成功了！！
+    Expression *ASTBuilder::parseMultiplicative() {
         Expression *expr = parseUnary();
 
         while (matchValue("*") || matchValue("/") || matchValue("%")) {
@@ -640,27 +691,99 @@ namespace AST {
     }
 
     Statement *ASTBuilder::parseIfStatement() {
-        // TODO
-        logError("If statement not yet implemented");
-        return nullptr;
+        consumeValue("if", "A If Statement's begin token must be token 'if'");
+        Expression *condition = parseExpression();
+        if (!condition) {
+            logError("No Condition");
+            return nullptr;
+        }
+
+        Statement *thenBranch = nullptr;
+
+        if (matchValue("{")) {
+            thenBranch = parseBlock();
+        } else {
+            thenBranch = parseStatement();
+        }
+
+        if (!thenBranch) {
+            logError("i");
+            delete condition;
+            return nullptr;
+        }
+
+        Statement *elseBranch = nullptr;
+        if (matchValue("else")) {
+            if (matchValue("{")) {
+                elseBranch = parseBlock();
+            } else {
+                elseBranch = parseStatement();
+            }
+
+            if (!elseBranch) {
+                logError("Invaild else branch");
+                delete condition;
+                delete thenBranch;
+                return nullptr;
+            }
+        }
+        return new IfStatement(condition, thenBranch, elseBranch);
     }
 
     Statement *ASTBuilder::parseWhileStatement() {
-        // TODO
-        logError("While statement not yet implemented");
-        return nullptr;
+        // consume "while" keyword
+        consumeValue("while", "while statement must start with 'while' keyword");
+
+        // parse condition expression
+        Expression *condition = parseExpression();
+        if (!condition) {
+            logError("while statement missing condition expression");
+            return nullptr;
+        }
+
+        // parse loop body
+        Statement *body = nullptr;
+
+        // check if it's a block
+        if (matchValue("{")) {
+            body = parseBlock();
+        } else {
+            // single statement form
+            body = parseStatement();
+        }
+
+        if (!body) {
+            logError("while statement missing loop body");
+            delete condition;
+            return nullptr;
+        }
+
+        // create WhileStatement node
+        return new WhileStatement(condition, body);
     }
 
     Statement *ASTBuilder::parseBreakStatement() {
-        // TODO
-        logError("Break statement not yet implemented");
-        return nullptr;
+        // break
+        // consume "break" keyword
+        consumeValue("break", "break statement must start with 'break' keyword");
+
+        // optionally consume semicolon or newline (depending on your language design)
+        consumeEndOfLine(); // if needed
+
+        // create BreakStatement node
+        return new BreakStatement();
     }
 
     Statement *ASTBuilder::parseContinueStatement() {
-        // TODO
-        logError("Continue statement not yet implemented");
-        return nullptr;
+        // continue
+        // consume "continue" keyword
+        consumeValue("continue", "continue statement must start with 'continue' keyword");
+
+        // optionally consume semicolon or newline (depending on your language design)
+        consumeEndOfLine(); // if needed
+
+        // create ContinueStatement node
+        return new ContinueStatement();
     }
 
 } // namespace AST

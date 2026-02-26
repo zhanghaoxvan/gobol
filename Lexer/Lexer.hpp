@@ -5,12 +5,11 @@
 
 #ifndef LEXER_HPP
 #define LEXER_HPP
-// iamsotired
+
 #include <Lexer/Token.hpp>
 #include <string_view>
 #include <unordered_set>
-// The Animation is not working.
-// Check for it or ?OK
+
 /**
  * @namespace lexer
  * @brief 词法分析器（Lexer）相关逻辑归属此命名空间
@@ -22,8 +21,8 @@ namespace lexer { // how many applications in your debian?
      * @brief 词法分析器核心类，负责将源代码解析为词法令牌（Token）序列
      */
     class Lexer {
-        /** 待解析的源代码字符串（只读，零拷贝） */
-        std::string_view source;
+        /** 待解析的源代码字符串 */
+        std::string source;
         /** 当前字符在源代码中的位置索引（从 0 开始） */
         size_t currentPosition;
         /** 用于错误定位的当前行号（从 1 开始） */
@@ -100,6 +99,10 @@ namespace lexer { // how many applications in your debian?
         token::Token parseString();
 
     public:
+        void resetPosition() {
+            currentPosition = 0;
+            line = 1, col = 0;
+        }
         /**
          * @brief 构造函数：初始化词法分析器状态
          * @param source 待解析的源代码字符串（使用 std::string_view 实现零拷贝）

@@ -72,6 +72,10 @@ namespace AST {
     ImportStatement::ImportStatement(std::string moduleName) : moduleName(std::move(moduleName)) {
     }
 
+    // ModuleStatement
+    ModuleStatement::ModuleStatement(std::string moduleName) : moduleName(std::move(moduleName)) {
+    }
+
     // IfStatement
     IfStatement::IfStatement(Expression *condition, Statement *thenBranch, Statement *elseBranch)
         : condition(condition), thenBranch(thenBranch), elseBranch(elseBranch) {
@@ -204,6 +208,33 @@ namespace AST {
 
     // FormatString
     FormatString::FormatString(std::string value) : value(std::move(value)) {
+        std::string varName;
+        bool inBrace = false;
+        size_t startPos = 0;
+
+        for (size_t i = 0; i < this->value.size(); ++i) {
+            char c = this->value[i];
+
+            if (c == '{' && !inBrace) {
+                // 开始解析变量
+                inBrace = true;
+                varName.clear();
+                startPos = i; // 记录 '{' 的位置
+            } else if (c == '}' && inBrace) {
+                // 结束解析变量
+                inBrace = false;
+
+                if (!varName.empty()) {
+                    VariablePosition pos;
+                    pos.posInValue = startPos; // 使用 '{' 的位置
+                    pos.value = new Identifier(varName);
+                    variables.push_back(pos);
+                }
+            } else if (inBrace) {
+                // 收集变量名
+                varName += c;
+            }
+        }
     }
 
     // RangeExpression

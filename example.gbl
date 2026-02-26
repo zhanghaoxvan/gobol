@@ -1,6 +1,8 @@
+module main
 import io
 func main(): int {
     var name: str = "Gobol"
+    val arr: int[10]
     io.print(@"Hello from {name}")
     for i in range(0, 10, 1) {
         io.print(@"Number {i}: {name}\n")

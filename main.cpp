@@ -1,6 +1,7 @@
 #include <AST/ASTBuilder.hpp>
 #include <AST/ASTPrinter.hpp>
 #include <Environment/SemanticAnalyzer.hpp>
+#include <Interpreter/Interpreter.hpp>
 #include <Lexer/Lexer.hpp>
 #include <fstream>
 #include <iostream>
@@ -45,8 +46,8 @@ int main(int argc, char *argv[]) {
     }
     std::cout << std::endl << std::endl;
     std::cout << "======= Step 2: AST =======" << std::endl;
-#endif
     lexer.resetPosition();
+#endif
     AST::ASTBuilder builder(lexer);
     AST::Program *prog = builder.build();
     if (builder.hasError()) {
@@ -63,6 +64,14 @@ int main(int argc, char *argv[]) {
 #endif
     analyzer::SemanticAnalyzer semanticAnalyzer;
     bool semanticPassed = semanticAnalyzer.analyze(prog);
-
+    if (!semanticPassed) {
+        return 1;
+    }
+#ifdef DEBUG
+    std::cout << std::endl << std::endl;
+    std::cout << "======= Step 4: Interpreter =======" << std::endl;
+#endif
+    interpreter::Interpreter interpreter;
+    interpreter.execute(prog);
     return 0;
 }

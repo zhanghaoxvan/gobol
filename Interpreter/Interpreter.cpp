@@ -846,15 +846,9 @@ namespace interpreter {
         // 获取函数名
         if (auto *id = dynamic_cast<AST::Identifier *>(node->getCallee())) {
             funcName = id->getName();
-#ifdef DEBUG
-            std::cout << "Debug: Calling function '" << funcName << "'" << std::endl;
-#endif
         } else if (auto *member = dynamic_cast<AST::MemberAccess *>(node->getCallee())) {
             if (auto *obj = dynamic_cast<AST::Identifier *>(member->getObject())) {
                 funcName = obj->getName() + "." + member->getMember();
-#ifdef DEBUG
-                std::cout << "Debug: Calling module function '" << funcName << "'" << std::endl;
-#endif
             }
         }
 
@@ -870,9 +864,6 @@ namespace interpreter {
         // 1. 检查内置函数
         auto it = builtins.find(funcName);
         if (it != builtins.end()) {
-#ifdef DEBUG
-            std::cout << "Debug: Found builtin function" << std::endl;
-#endif
             valueStack.push(it->second(args));
             return;
         }
@@ -883,15 +874,8 @@ namespace interpreter {
             std::string module = funcName.substr(0, dotPos);
             std::string member = funcName.substr(dotPos + 1);
 
-#ifdef DEBUG
-            std::cout << "Debug: Module='" << module << "', Member='" << member << "'" << std::endl;
-#endif
-
-            // 处理 io.print
             if (module == "io" && member == "print") {
-#ifdef DEBUG
-                std::cout << "Debug: Found io.print, printing " << args.size() << " arguments" << std::endl;
-#endif
+                // 实现 io.print
                 for (size_t i = 0; i < args.size(); i++) {
                     if (i > 0)
                         std::cout << " ";
@@ -921,69 +905,9 @@ namespace interpreter {
                 valueStack.push(RuntimeValue());
                 return;
             }
-
-            // 处理 io.println (带换行)
-            else if (module == "io" && member == "println") {
-                for (size_t i = 0; i < args.size(); i++) {
-                    if (i > 0)
-                        std::cout << " ";
-                    const auto &arg = args[i];
-                    switch (arg.type) {
-                    case RuntimeValue::TypeKind::INT:
-                        std::cout << arg.getInt();
-                        break;
-                    case RuntimeValue::TypeKind::FLOAT:
-                        std::cout << arg.getFloat();
-                        break;
-                    case RuntimeValue::TypeKind::BOOL:
-                        std::cout << (arg.getBool() ? "true" : "false");
-                        break;
-                    case RuntimeValue::TypeKind::STR:
-                        std::cout << arg.getStr();
-                        break;
-                    case RuntimeValue::TypeKind::NONE:
-                        std::cout << "none";
-                        break;
-                    default:
-                        std::cout << "?";
-                        break;
-                    }
-                }
-                std::cout << std::endl;
-                valueStack.push(RuntimeValue());
-                return;
-            }
-
-            // 处理 io.read
-            else if (module == "io" && member == "read") {
-                std::string input;
-                std::getline(std::cin, input);
-                valueStack.push(RuntimeValue(input));
-                return;
-            }
-
-            // 处理 io.scan
-            else if (module == "io" && member == "scan") {
-                std::string input;
-                std::cin >> input;
-                valueStack.push(RuntimeValue(input));
-                return;
-            }
         }
 
-        // 3. 处理 range 函数（特殊内置函数）
-        if (funcName == "range" || funcName == "__builtins__.range") {
-#ifdef DEBUG
-            std::cout << "Debug: Found range function" << std::endl;
-#endif
-            // range 函数已经在 RangeExpression 中处理
-            // 这里不应该被调用，如果被调用说明 AST 有问题
-            std::cerr << "Runtime Error: range() should not be called as a function" << std::endl;
-            valueStack.push(RuntimeValue());
-            return;
-        }
-
-        // 4. 查找用户定义函数
+        // 3. 查找用户定义函数
         RuntimeValue *funcVal = nullptr;
         for (int i = environments.size() - 1; i >= 0; i--) {
             auto it = environments[i].find(funcName);
@@ -998,10 +922,6 @@ namespace interpreter {
             valueStack.push(RuntimeValue());
             return;
         }
-
-#ifdef DEBUG
-        std::cout << "Debug: Calling user function '" << funcName << "'" << std::endl;
-#endif
 
         const auto &func = funcVal->getFunction();
 
@@ -1041,6 +961,7 @@ namespace interpreter {
 
         valueStack.push(result);
     }
+
     VISIT_ASTNODEO(Interpreter, AST::Function) {
         // 函数定义 - 存储函数到环境
         const std::string &funcName = node->getName();

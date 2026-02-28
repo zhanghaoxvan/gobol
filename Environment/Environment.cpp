@@ -81,6 +81,37 @@ namespace env {
         return true;
     }
 
+    bool Environment::declareArray(const std::string &name, DataType elementType, int size, bool isMut) {
+        if (scopes.empty())
+            scopes.emplace_back();
+
+        auto &currentScope = scopes.back();
+        if (currentScope.find(name) != currentScope.end()) {
+            std::cerr << "Semantic Error: Variable '" << name << "' already declared" << std::endl;
+            return false;
+        }
+
+        currentScope[name] =
+            Symbol(name, SymbolType::VARIABLE, elementType, static_cast<int>(scopes.size() - 1), size, isMut);
+        return true;
+    }
+
+    bool Environment::declareArray(const std::string &name, DataType elementType, AST::Expression *sizeExpr,
+                                   bool isMut) {
+        if (scopes.empty())
+            scopes.emplace_back();
+
+        auto &currentScope = scopes.back();
+        if (currentScope.find(name) != currentScope.end()) {
+            std::cerr << "Semantic Error: Variable '" << name << "' already declared" << std::endl;
+            return false;
+        }
+
+        currentScope[name] =
+            Symbol(name, SymbolType::VARIABLE, elementType, static_cast<int>(scopes.size() - 1), sizeExpr, isMut);
+        return true;
+    }
+
     Symbol *Environment::lookupSymbol(const std::string &name) {
         // 从当前作用域开始向上查找
         for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; i--) {

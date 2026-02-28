@@ -13,6 +13,29 @@ namespace AST {
             std::cout << std::string(indentLevel * 2, ' ');
         }
 
+        void printExpressionType(Expression *expr) {
+            if (!expr) {
+                std::cout << "null";
+                return;
+            }
+
+            if (dynamic_cast<Identifier *>(expr)) {
+                // Identifier 已经在 visit 中打印，这里不需要额外处理
+            } else if (dynamic_cast<ArrayIndex *>(expr)) {
+                // ArrayIndex 已经在 visit 中打印
+            } else if (dynamic_cast<MemberAccess *>(expr)) {
+                // MemberAccess 已经在 visit 中打印
+            } else if (dynamic_cast<NumberLiteral *>(expr)) {
+                // NumberLiteral 已经在 visit 中打印
+            } else if (dynamic_cast<StringLiteral *>(expr)) {
+                // StringLiteral 已经在 visit 中打印
+            } else if (dynamic_cast<BooleanLiteral *>(expr)) {
+                // BooleanLiteral 已经在 visit 中打印
+            } else {
+                std::cout << "?";
+            }
+        }
+
     public:
         VISIT_ASTNODE(ASTNode) {
             printIndent();
@@ -252,6 +275,10 @@ namespace AST {
         }
 
         VISIT_ASTNODE(ArrayIndex) {
+            if (!node->getArray() || !node->getIndex()) {
+                std::cout << "<invalid array index>";
+                return;
+            }
             node->getArray()->accept(this);
             std::cout << "[";
             node->getIndex()->accept(this);
@@ -281,16 +308,46 @@ namespace AST {
         }
 
         VISIT_ASTNODE(FormatString) {
-            std::cout << "@\"" << node->getValue() << "\"";
-            if (!node->getVariables().empty()) {
+            std::cout << "@\"";
+
+            // 安全地打印字符串值，处理特殊字符
+            const std::string &val = node->getValue();
+            for (char c : val) {
+                switch (c) {
+                case '\n':
+                    std::cout << "\\n";
+                    break;
+                case '\t':
+                    std::cout << "\\t";
+                    break;
+                case '\\':
+                    std::cout << "\\\\";
+                    break;
+                case '"':
+                    std::cout << "\\\"";
+                    break;
+                default:
+                    std::cout << c;
+                }
+            }
+            std::cout << "\"";
+
+            const auto &vars = node->getVariables();
+            if (!vars.empty()) {
                 std::cout << " [";
                 bool first = true;
-                for (const auto &variable : node->getVariables()) {
+                for (const auto &variable : vars) {
                     if (!first)
                         std::cout << ", ";
                     first = false;
-                    if (auto *id = dynamic_cast<Identifier *>(variable.value)) {
-                        std::cout << id->getName() << ":" << variable.posInValue;
+
+                    if (variable.value) {
+                        try {
+                            variable.value->accept(this);
+                        } catch (...) {
+                            std::cout << "<error>";
+                        }
+                        std::cout << ":" << variable.posInValue;
                     } else {
                         std::cout << "?@" << variable.posInValue;
                     }

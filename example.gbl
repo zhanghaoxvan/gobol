@@ -1,11 +1,15 @@
 module main
 import io
+
 func main(): int {
     var name: str = "Gobol"
-    val arr: int[10]
-    io.print(@"Hello from {name}")
+    var arr: int[10]
+    arr[2] = 114514
+    io.print(@"Hello from {name}\n")
+    io.print(@"arr[2] is {arr[2]}!\n")
     for i in range(0, 10, 1) {
-        io.print(@"Number {i}: {name}\n")
+        io.print(@"Number {i}\n")
     }
+    io.print("End of Task!")
     return 0
 }

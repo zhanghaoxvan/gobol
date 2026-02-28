@@ -20,22 +20,22 @@ namespace analyzer {
 
         // 声明 __builtins__ 模块的函数
         env.declareFunction("range", env::INT, "__builtins__");
-        env.declareFunction("print", env::NONE, "__builtins__");
-        env.declareFunction("len", env::INT, "__builtins__");
+        // env.declareFunction("print", env::NONE, "__builtins__");
+        // env.declareFunction("len", env::INT, "__builtins__");
 
         // 声明 io 模块的函数
         env.declareFunction("print", env::NONE, "io");
-        env.declareFunction("scan", env::STR, "io");
-        env.declareFunction("read", env::STR, "io");
+        // env.declareFunction("read", env::STR, "io");
 
         // 开始分析
         program->accept(this);
 
-#ifdef DEBUG
-        printErrors();
-#else
         if (hasError) {
-            printErrors();
+            printErrors(); // 始终打印错误
+        }
+#ifdef DEBUG
+        else {
+            printErrors(); // DEBUG 模式下打印成功信息
         }
 #endif
         return !hasError;
@@ -43,11 +43,13 @@ namespace analyzer {
 
     void SemanticAnalyzer::printErrors() const {
         if (errors.empty()) {
+#ifdef DEBUG
             std::cout << "✅ Semantic analysis passed!" << std::endl;
+#endif
         } else {
-            std::cout << "❌ Semantic analysis failed with " << errors.size() << " errors:" << std::endl;
+            std::cout << "❌ Semantic analysis failed with " << errors.size() << " errors:" << std::endl; // 始终显示
             for (const auto &err : errors) {
-                std::cout << "  ⚠️  " << err << std::endl;
+                std::cout << "  ⚠️  " << err << std::endl; // 始终显示
             }
         }
     }
@@ -215,23 +217,54 @@ namespace analyzer {
 
     VISIT_ASTNODEO(SemanticAnalyzer, AST::Declaration) {
         const std::string &varName = node->getName();
-        env::DataType declaredType = getDataTypeFromAST(node->getType());
+        bool isMut = (node->getKeyword() == "var");
 
-        if (!env.declareVariable(varName, declaredType)) {
-            error("Failed to declare variable '" + varName + "'");
-            return;
-        }
+        // 检查是否是数组类型
+        if (auto *arrayType = dynamic_cast<AST::ArrayType *>(node->getType())) {
+            // 获取元素类型
+            env::DataType elemType = getDataTypeFromAST(new AST::Type(arrayType->getName()));
 
-#ifdef DEBUG
-        std::cout << "    Variable declaration: " << varName << " : " << env::dataTypeToString(declaredType)
-                  << std::endl;
-#endif
+            // 处理数组大小
+            if (arrayType->getSize()) {
+                arrayType->getSize()->accept(this);
+                env::DataType sizeType = getCurrentType();
+                typeStack.pop();
 
-        if (node->getInitializer()) {
-            node->getInitializer()->accept(this);
-            env::DataType initType = getCurrentType();
+                if (sizeType != env::INT) {
+                    error("Array size must be integer");
+                    return;
+                }
 
-            checkTypeCompatibility(declaredType, initType, "variable '" + varName + "' initialization");
+                // 尝试获取常量值
+                if (auto *num = dynamic_cast<AST::NumberLiteral *>(arrayType->getSize())) {
+                    int size = static_cast<int>(num->getValue());
+                    env.declareArray(varName, elemType, size, isMut);
+                } else {
+                    // 非常量大小，保存表达式
+                    env.declareArray(varName, elemType, arrayType->getSize(), isMut);
+                }
+            } else {
+                error("Array size is required");
+                return;
+            }
+        } else {
+            // 普通变量声明
+            env::DataType declaredType = getDataTypeFromAST(node->getType());
+            if (!env.declareVariable(varName, declaredType)) {
+                error("Failed to declare variable '" + varName + "'");
+                return;
+            }
+
+            // 设置可变性
+            if (auto *sym = env.lookupSymbol(varName)) {
+                sym->isMut = isMut;
+            }
+
+            if (node->getInitializer()) {
+                node->getInitializer()->accept(this);
+                env::DataType initType = getCurrentType();
+                checkTypeCompatibility(declaredType, initType, "variable '" + varName + "' initialization");
+            }
         }
     }
 
@@ -394,9 +427,14 @@ namespace analyzer {
 
     VISIT_ASTNODEO(SemanticAnalyzer, AST::FormatString) {
         for (const auto &var : node->getVariables()) {
-            if (var.value) {
-                var.value->accept(this);
+            if (!var.value) {
+                error("Invalid expression in format string");
+                continue;
             }
+
+            var.value->accept(this);
+            env::DataType exprType = getCurrentType();
+            typeStack.pop();
         }
         typeStack.push(env::STR);
     }
@@ -413,12 +451,44 @@ namespace analyzer {
         const std::string &op = node->getOperator();
 
         if (op == "=") {
-            if (!dynamic_cast<AST::Identifier *>(node->getLeft())) {
-                error("Left side of assignment must be a variable");
+            bool isAssignable = false;
+
+            // 情况1: 普通变量赋值
+            if (auto *id = dynamic_cast<AST::Identifier *>(node->getLeft())) {
+                const auto *sym = env.lookupSymbol(id->getName());
+                if (sym && sym->isMut) {
+                    isAssignable = true;
+                } else {
+                    error("Cannot assign to constant variable '" + id->getName() + "'");
+                }
+            }
+            // 情况2: 数组元素赋值
+            else if (auto *arrIndex = dynamic_cast<AST::ArrayIndex *>(node->getLeft())) {
+                if (auto *arrId = dynamic_cast<AST::Identifier *>(arrIndex->getArray())) {
+                    const auto *sym = env.lookupSymbol(arrId->getName());
+                    if (!sym) {
+                        error("Array variable '" + arrId->getName() + "' not declared");
+                    } else if (!sym->isMut) {
+                        error("Cannot assign to constant array '" + arrId->getName() + "'");
+                    } else if (!sym->isArray) {
+                        error("Cannot index non-array variable '" + arrId->getName() + "'");
+                    } else {
+                        isAssignable = true;
+                    }
+                }
             }
 
+            if (!isAssignable) {
+                error("Left side of assignment must be a mutable variable or array element");
+                typeStack.push(env::UNKNOWN);
+                return;
+            }
+
+            // 类型兼容性检查
             if (!env::Environment::isTypeCompatible(leftType, rightType)) {
                 error("Cannot assign " + env::dataTypeToString(rightType) + " to " + env::dataTypeToString(leftType));
+                typeStack.push(env::UNKNOWN);
+                return;
             }
 
             typeStack.push(leftType);
@@ -584,18 +654,38 @@ namespace analyzer {
     }
 
     VISIT_ASTNODEO(SemanticAnalyzer, AST::ArrayIndex) {
+        // 先访问数组部分
         node->getArray()->accept(this);
         env::DataType arrayType = getCurrentType();
         typeStack.pop();
 
+        // 再访问索引部分
         node->getIndex()->accept(this);
         env::DataType indexType = getCurrentType();
         typeStack.pop();
 
         if (indexType != env::INT) {
             error("Array index must be integer");
+            typeStack.push(env::UNKNOWN);
+            return;
         }
 
-        typeStack.push(arrayType);
+        // 检查数组是否是变量
+        if (auto *id = dynamic_cast<AST::Identifier *>(node->getArray())) {
+            const auto *sym = env.lookupSymbol(id->getName());
+            if (!sym) {
+                error("Array variable '" + id->getName() + "' not declared");
+                typeStack.push(env::UNKNOWN);
+                return;
+            }
+            // 这里需要判断是否是数组，但目前没有数组类型信息
+            // 暂时假设是数组
+            typeStack.push(sym->dataType); // 数组元素的类型
+            return;
+        }
+
+        error("Cannot index non-array value");
+        typeStack.push(env::UNKNOWN);
     }
+
 } // namespace analyzer

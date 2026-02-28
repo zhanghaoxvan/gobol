@@ -289,7 +289,7 @@ namespace AST {
         const ::std::string &getModuleName() const {
             return moduleName;
         }
-        ACCEPT_VISITOR(ImportStatement)
+        ACCEPT_VISITOR(ModuleStatement)
     };
 
     /**
@@ -673,6 +673,10 @@ namespace AST {
         ::std::string value;
 
         ::std::vector<VariablePosition> variables;
+
+        static Expression *parseValue(const ::std::string &varName);
+        static Expression *tryParseLiteral(const ::std::string &str);
+        static Expression *parseExpression(const ::std::string &expr);
 
     public:
         explicit FormatString(::std::string value);

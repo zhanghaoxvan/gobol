@@ -19,6 +19,11 @@ namespace env {
         DataType dataType;
         int scopeLevel;
         std::string moduleName;
+        bool isMut = false;
+
+        bool isArray = false; // 是否是数组
+        int arraySize = 0;    // 数组大小（如果是常量）
+        AST::Expression *arraySizeExpr = nullptr;
 
         // 构造函数
         Symbol() : type(SymbolType::VARIABLE), dataType(UNKNOWN), scopeLevel(0) {
@@ -30,6 +35,14 @@ namespace env {
 
         Symbol(std::string n, const std::string &module, DataType dt, int scope)
             : name(std::move(n)), type(SymbolType::FUNCTION), dataType(dt), scopeLevel(scope), moduleName(module) {
+        }
+        Symbol(std::string n, SymbolType t, DataType dt, int scope, int size, bool mut)
+            : name(std::move(n)), type(t), dataType(dt), scopeLevel(scope), isMut(mut), isArray(true), arraySize(size) {
+        }
+
+        Symbol(std::string n, SymbolType t, DataType dt, int scope, AST::Expression *sizeExpr, bool mut)
+            : name(std::move(n)), type(t), dataType(dt), scopeLevel(scope), isMut(mut), isArray(true),
+              arraySizeExpr(sizeExpr) {
         }
     };
 
@@ -69,6 +82,8 @@ namespace env {
         bool declareVariable(const std::string &name, DataType type);
         bool declareFunction(const std::string &name, DataType returnType, const std::string &moduleName);
         bool declareModule(const std::string &name);
+        bool declareArray(const std::string &name, DataType elementType, int size, bool isMut);
+        bool declareArray(const std::string &name, DataType elementType, AST::Expression *sizeExpr, bool isMut);
 
         // 符号查找
         Symbol *lookupSymbol(const std::string &name);

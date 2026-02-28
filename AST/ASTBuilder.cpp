@@ -602,6 +602,21 @@ namespace AST {
                 std::string member = currentToken().value;
                 advance();
                 expr = new MemberAccess(expr, member);
+            } else if (matchValue("[")) {
+                // 数组索引 - 处理 arr[x]
+                advance();                             // 消费 '['
+                Expression *index = parseExpression(); // 解析索引表达式
+                if (!index) {
+                    logError("Expected expression inside array index");
+                    return expr;
+                }
+                if (!matchValue("]")) {
+                    logError("Expected ']' after array index");
+                    delete index;
+                    return expr;
+                }
+                advance(); // 消费 ']'
+                expr = new ArrayIndex(expr, index);
             } else if (matchValue("(")) {
                 // 函数调用
                 expr = parseFunctionCall(expr);

@@ -4,7 +4,6 @@
 
 namespace env {
 
-    // 辅助函数：数据类型转字符串（用于错误信息）
     std::string dataTypeToString(DataType type) {
         switch (type) {
         case INT:
@@ -22,66 +21,7 @@ namespace env {
         }
     }
 
-    bool Environment::declareVariable(const std::string &name, DataType type) {
-        // 确保至少有一个作用域
-        if (scopes.empty()) {
-            scopes.emplace_back();
-        }
-
-        // 检查当前作用域是否已存在同名变量
-        auto &currentScope = scopes.back();
-        if (currentScope.find(name) != currentScope.end()) {
-            std::cerr << "Semantic Error: Variable '" << name << "' is already declared in current scope" << std::endl;
-            return false;
-        }
-
-        // 声明新变量
-        currentScope[name] = Symbol(name, SymbolType::VARIABLE, type, static_cast<int>(scopes.size() - 1));
-        return true;
-    }
-
-    bool Environment::declareFunction(const std::string &name, DataType returnType, const std::string &moduleName) {
-        if (scopes.empty()) {
-            scopes.emplace_back();
-        }
-
-        auto &globalScope = scopes[0];
-
-        // 函数名使用 "模块名.函数名" 作为唯一标识
-        std::string fullName = moduleName + "." + name;
-
-        if (globalScope.find(fullName) != globalScope.end()) {
-            std::cerr << "Semantic Error: Function '" << fullName << "' is already declared" << std::endl;
-            return false;
-        }
-
-        // 存储完整名称，但保留模块信息
-        globalScope[fullName] = Symbol(name, moduleName, returnType, 0);
-        return true;
-    }
-
-    bool Environment::declareModule(const std::string &name) {
-        if (scopes.empty()) {
-            scopes.emplace_back();
-        }
-
-        auto &globalScope = scopes[0];
-
-        // 模块名单独存储，不与函数冲突
-        if (globalScope.find(name) != globalScope.end()) {
-            // 如果已经存在，检查是否是模块
-            if (globalScope[name].type != SymbolType::MODULE) {
-                std::cerr << "Semantic Error: Name '" << name << "' is already used" << std::endl;
-                return false;
-            }
-            return true; // 模块已存在，不报错
-        }
-
-        globalScope[name] = Symbol(name, SymbolType::MODULE, NONE, 0);
-        return true;
-    }
-
-    bool Environment::declareArray(const std::string &name, DataType elementType, int size, bool isMut) {
+    bool Environment::declareVariable(const std::string &name, DataType type, bool isMut) {
         if (scopes.empty())
             scopes.emplace_back();
 
@@ -91,12 +31,46 @@ namespace env {
             return false;
         }
 
-        currentScope[name] =
-            Symbol(name, SymbolType::VARIABLE, elementType, static_cast<int>(scopes.size() - 1), size, isMut);
+        Symbol sym(name, SymbolType::VARIABLE, type, getCurrentScope());
+        sym.isMut = isMut;
+        currentScope[name] = sym;
         return true;
     }
 
-    bool Environment::declareArray(const std::string &name, DataType elementType, AST::Expression *sizeExpr,
+    bool Environment::declareFunction(const std::string &name, DataType returnType, const std::string &moduleName) {
+        if (scopes.empty())
+            scopes.emplace_back();
+
+        auto &globalScope = scopes[0];
+        std::string fullName = moduleName + "." + name;
+
+        if (globalScope.find(fullName) != globalScope.end()) {
+            std::cerr << "Semantic Error: Function '" << fullName << "' already declared" << std::endl;
+            return false;
+        }
+
+        globalScope[fullName] = Symbol(name, moduleName, returnType, 0);
+        return true;
+    }
+
+    bool Environment::declareModule(const std::string &name) {
+        if (scopes.empty())
+            scopes.emplace_back();
+
+        auto &globalScope = scopes[0];
+        if (globalScope.find(name) != globalScope.end()) {
+            if (globalScope[name].type != SymbolType::MODULE) {
+                std::cerr << "Semantic Error: Name '" << name << "' already used" << std::endl;
+                return false;
+            }
+            return true;
+        }
+
+        globalScope[name] = Symbol(name, SymbolType::MODULE, NONE, 0);
+        return true;
+    }
+
+    bool Environment::declareArray(const std::string &name, DataType elementType, const std::vector<int> &sizes,
                                    bool isMut) {
         if (scopes.empty())
             scopes.emplace_back();
@@ -107,31 +81,41 @@ namespace env {
             return false;
         }
 
-        currentScope[name] =
-            Symbol(name, SymbolType::VARIABLE, elementType, static_cast<int>(scopes.size() - 1), sizeExpr, isMut);
+        currentScope[name] = Symbol(name, SymbolType::VARIABLE, elementType, getCurrentScope(), sizes, isMut);
+        return true;
+    }
+
+    bool Environment::declareArray(const std::string &name, DataType elementType,
+                                   const std::vector<AST::Expression *> &sizeExprs, bool isMut) {
+        if (scopes.empty())
+            scopes.emplace_back();
+
+        auto &currentScope = scopes.back();
+        if (currentScope.find(name) != currentScope.end()) {
+            std::cerr << "Semantic Error: Variable '" << name << "' already declared" << std::endl;
+            return false;
+        }
+
+        currentScope[name] = Symbol(name, SymbolType::VARIABLE, elementType, getCurrentScope(), sizeExprs, isMut);
         return true;
     }
 
     Symbol *Environment::lookupSymbol(const std::string &name) {
-        // 从当前作用域开始向上查找
         for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; i--) {
             auto &scopeMap = scopes[i];
             auto it = scopeMap.find(name);
-            if (it != scopeMap.end()) {
+            if (it != scopeMap.end())
                 return &(it->second);
-            }
         }
         return nullptr;
     }
 
     const Symbol *Environment::lookupSymbol(const std::string &name) const {
-        // 从当前作用域开始向上查找
         for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; i--) {
             const auto &scopeMap = scopes[i];
             auto it = scopeMap.find(name);
-            if (it != scopeMap.end()) {
+            if (it != scopeMap.end())
                 return &(it->second);
-            }
         }
         return nullptr;
     }
@@ -143,27 +127,20 @@ namespace env {
     bool Environment::isDeclaredInCurrentScope(const std::string &name) const {
         if (scopes.empty())
             return false;
-
         const auto &currentScope = scopes.back();
         return currentScope.find(name) != currentScope.end();
     }
 
     DataType Environment::getSymbolType(const std::string &name) const {
         const Symbol *sym = lookupSymbol(name);
-        if (sym) {
-            return sym->dataType;
-        }
-        return UNKNOWN;
+        return sym ? sym->dataType : UNKNOWN;
     }
 
     bool Environment::isTypeCompatible(DataType target, DataType source) {
         if (target == source)
             return true;
-
-        // 允许整数到浮点数的隐式转换
         if (target == FLOAT && source == INT)
             return true;
-
         return false;
     }
 
@@ -173,7 +150,7 @@ namespace env {
 
     void Environment::reset() {
         scopes.clear();
-        scopes.emplace_back(); // 重新创建全局作用域
+        scopes.emplace_back();
     }
 
     void Environment::printScope() const {
@@ -206,14 +183,26 @@ namespace env {
                 if (!symbol.moduleName.empty()) {
                     std::cout << " [module=" << symbol.moduleName << "]";
                 }
-                std::cout << std::endl;
+                if (symbol.isArray) {
+                    std::cout << " array[";
+                    for (size_t i = 0; i < symbol.dimensions.size(); i++) {
+                        if (i > 0)
+                            std::cout << ",";
+                        if (symbol.dimensions[i].isConstant) {
+                            std::cout << symbol.dimensions[i].constantSize;
+                        } else {
+                            std::cout << "expr";
+                        }
+                    }
+                    std::cout << "]";
+                }
+                std::cout << (symbol.isMut ? " (var)" : " (val)") << std::endl;
             }
         }
     }
 
     void Environment::printAllScopes() const {
         std::cout << "=== All Scopes (" << scopes.size() << " levels) ===" << std::endl;
-
         for (size_t i = 0; i < scopes.size(); i++) {
             std::cout << "Scope " << i << ":" << std::endl;
             const auto &scope = scopes[i];
@@ -237,9 +226,23 @@ namespace env {
                     if (!symbol.moduleName.empty()) {
                         std::cout << " [module=" << symbol.moduleName << "]";
                     }
-                    std::cout << std::endl;
+                    if (symbol.isArray) {
+                        std::cout << " array[";
+                        for (size_t j = 0; j < symbol.dimensions.size(); j++) {
+                            if (j > 0)
+                                std::cout << ",";
+                            if (symbol.dimensions[j].isConstant) {
+                                std::cout << symbol.dimensions[j].constantSize;
+                            } else {
+                                std::cout << "expr";
+                            }
+                        }
+                        std::cout << "]";
+                    }
+                    std::cout << (symbol.isMut ? " (var)" : " (val)") << std::endl;
                 }
             }
         }
     }
+
 } // namespace env

@@ -3,13 +3,26 @@ import io
 
 func main(): int {
     var name: str = "Gobol"
-    var arr: int[10]
-    arr[2] = 114514
+    var arr: int[10][10]
+    arr[2][2] = 114514
+    var flag: bool = true
     io.print(@"Hello from {name}\n")
-    io.print(@"arr[2] is {arr[2]}!\n")
-    for i in range(0, 10, 1) {
+    io.print(@"arr[2] is {arr[2][2]}!\n")
+    for i in range(0, 10) {
         io.print(@"Number {i}\n")
     }
-    io.print("End of Task!")
+    
+    if arr[2][2] == 114514 {
+        io.print("Right!\n")
+    } else {
+        io.print("Wrong!\n")
+    }
+    
+    /*
+    while true {
+        io.print("While!\n")
+    }
+    */
+    io.print("End of Task!\n")
     return 0
 }

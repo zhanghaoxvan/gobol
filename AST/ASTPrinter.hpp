@@ -117,11 +117,20 @@ namespace AST {
         }
 
         VISIT_ASTNODE(ArrayType) {
-            std::cout << node->getName() << "[";
-            if (node->getSize()) {
-                node->getSize()->accept(this); // 这里会调用 NumberLiteral 的打印
+            if (node->isMultiDimensional()) {
+                // 如果是多维数组，递归打印内层
+                node->getElementType()->accept(this);
             } else {
-                std::cout << "?"; // 未知大小
+                // 一维数组，打印基本类型名
+                std::cout << node->getBaseTypeName();
+            }
+
+            // 打印当前维度的大小
+            std::cout << "[";
+            if (node->getSize()) {
+                node->getSize()->accept(this);
+            } else {
+                std::cout << "?";
             }
             std::cout << "]";
         }
@@ -132,19 +141,22 @@ namespace AST {
             ++indentLevel;
 
             printIndent();
-            std::cout << "condition:" << std::endl;
-            ++indentLevel;
+            std::cout << "condition:";
             node->getCondition()->accept(this);
-            --indentLevel;
+            std::cout << std::endl;
 
             printIndent();
             std::cout << "then:" << std::endl;
+            ++indentLevel;
             node->getThenBranch()->accept(this);
+            --indentLevel;
 
             if (node->getElseBranch()) {
                 printIndent();
                 std::cout << "else:" << std::endl;
+                ++indentLevel;
                 node->getElseBranch()->accept(this);
+                --indentLevel;
             }
 
             --indentLevel;
@@ -300,7 +312,31 @@ namespace AST {
         }
 
         VISIT_ASTNODE(StringLiteral) {
-            std::cout << "\"" << node->getValue() << "\"";
+            // std::cout << "\"" << node->getValue() << "\"";
+            std::cout << "\"";
+            for (auto c : node->getValue()) {
+                switch (c) {
+                case '\t':
+                    std::cout << "\\t";
+                    break;
+
+                case '\n':
+                    std::cout << "\\n";
+                    break;
+
+                case '\\':
+                    std::cout << "\\\\";
+                    break;
+                case '\"':
+                    std::cout << "\\\"";
+                    break;
+
+                default:
+                    std::cout << c;
+                    break;
+                }
+            }
+            std::cout << "\"";
         }
 
         VISIT_ASTNODE(BooleanLiteral) {

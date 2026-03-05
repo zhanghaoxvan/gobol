@@ -80,7 +80,7 @@ namespace vm {
 
             for (size_t i = 0; i < typeInfo.size; i++) {
                 if (typeInfo.nested) {
-                    // 还有下一维，递归创建
+                    // 还有下一维，递归创建子数组 ✅
                     arr.push_back(createArray(*typeInfo.nested));
                 } else {
                     // 最后一维，创建元素
@@ -98,8 +98,12 @@ namespace vm {
                     case Type::STRING:
                         defaultValue = RuntimeValue("");
                         break;
+                    case Type::ARRAY:
+                        defaultValue = RuntimeValue(std::vector<RuntimeValue>());
+                        break;
                     default:
                         defaultValue = RuntimeValue();
+                        break;
                     }
                     arr.push_back(defaultValue);
                 }
@@ -132,7 +136,7 @@ namespace vm {
             if (index < 0 || index >= static_cast<int>(arr.size())) {
                 throw std::runtime_error("Array index out of bounds");
             }
-            return arr[index];
+            return arr[index]; // 这里应该返回子数组（如果存在）
         }
 
         // 设置数组元素

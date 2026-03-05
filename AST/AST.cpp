@@ -34,15 +34,71 @@ namespace AST {
     }
 
     // Type
-    Type::Type(std::string name) : name(std::move(name)) {
+    Type::Type(std::string name) : name(name) {
     }
 
-    // ArrayType
-    ArrayType::ArrayType(const std::string &elementType, Expression *size) : Type(elementType), size(size) {
+    // ArrayType 构造函数：基本类型数组
+    ArrayType::ArrayType(const ::std::string &elementType, Expression *size)
+        : Type(elementType), elementType(new Type(elementType)), size(size) {
     }
 
+    // ArrayType 构造函数：多维数组
+    ArrayType::ArrayType(Type *const elemType, Expression *size)
+        : Type(elemType->getName()), elementType(elemType), size(size) {
+    }
+
+    // 析构函数
     ArrayType::~ArrayType() {
         delete size;
+        delete elementType;
+    }
+
+    // 获取元素类型
+    Type *ArrayType::getElementType() const {
+        return elementType;
+    }
+
+    // 获取完整的类型名
+    ::std::string ArrayType::getName() const {
+        if (elementType) {
+            // 多维数组：外层数组的类型是 "内层类型[]"
+            return elementType->getName() + "[]";
+        } else {
+            // 一维数组：基本类型[]
+            return Type::getName() + "[]";
+        }
+    }
+
+    // 获取基础类型（去掉所有[]）
+    ::std::string ArrayType::getBaseTypeName() const {
+        if (elementType) {
+            if (auto *arrType = dynamic_cast<ArrayType *>(elementType)) {
+                return arrType->getBaseTypeName();
+            }
+            return elementType->getName();
+        }
+        return Type::getName();
+    }
+
+    Type *ArrayType::getBaseType() const {
+        if (elementType) {
+            if (auto *arrType = dynamic_cast<ArrayType *>(elementType)) {
+                return arrType->getBaseType();
+            }
+            return elementType;
+        }
+        return const_cast<Type *>(static_cast<const Type *>(this));
+    }
+
+    // 获取数组维度
+    int ArrayType::getDimension() const {
+        if (elementType) {
+            if (auto *arrType = dynamic_cast<ArrayType *>(elementType)) {
+                return 1 + arrType->getDimension();
+            }
+            return 1;
+        }
+        return 1; // 一维数组
     }
 
     // Parameter

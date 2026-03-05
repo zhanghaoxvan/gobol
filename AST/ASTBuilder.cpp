@@ -307,7 +307,9 @@ namespace AST {
     // 代码块解析
     Block *ASTBuilder::parseBlock() {
         auto *block = new Block();
-
+        while (match(lexer::token::TokenType::END_OF_FILE)) {
+            consumeEndOfLine();
+        }
         while (!matchValue("}") && !match(lexer::token::TokenType::END_OF_FILE) && !errorOccurred) {
             consumeEndOfLine();
 
@@ -326,30 +328,48 @@ namespace AST {
     }
 
     // 解析数组类型
-    /**
-     * @brief 解析数组类型（已经消费了类型名和 '['）
-     * @param elementTypeName 元素类型名
-     * @return 数组类型节点
-     */
     Type *ASTBuilder::parseArrayType(const std::string &elementTypeName) {
-        // 此时 '[' 已经被消费，当前位置在 '[' 之后
-
-        // 解析大小表达式
-        Expression *sizeExpr = parseExpression();
-        if (!sizeExpr) {
+        // 解析第一个维度
+        Expression *firstSize = parseExpression();
+        if (!firstSize) {
             logError("Expected size expression in array type");
             return nullptr;
         }
 
-        // 检查并消费 ']'
         if (!matchValue("]")) {
             logError("Expected ']' after array size");
-            delete sizeExpr;
+            delete firstSize;
             return nullptr;
         }
-        advance(); // 消费 ']'
+        advance(); // 消费第一个 ']'
+        Type *currentType = new ArrayType(elementTypeName, firstSize);
 
-        return new ArrayType(elementTypeName, sizeExpr);
+        // 检查是否还有更多的数组维度
+        int dim = 1;
+        while (matchValue("[")) {
+            dim++;
+
+            advance(); // 消费 '['
+
+            Expression *nextSize = parseExpression();
+            if (!nextSize) {
+                logError("Expected size expression in multi-dimensional array");
+                delete currentType;
+                return nullptr;
+            }
+
+            if (!matchValue("]")) {
+                logError("Expected ']' after array size");
+                delete nextSize;
+                delete currentType;
+                return nullptr;
+            }
+            advance(); // 消费 ']'
+
+            currentType = new ArrayType(currentType, nextSize);
+        }
+
+        return currentType;
     }
 
     // 变量声明解析
@@ -423,7 +443,7 @@ namespace AST {
         advance();
 
         // 'in' 关键字
-        if (!match(lexer::token::TokenType::IDENTIFIER) || currentToken().value != "in") {
+        if (!match(lexer::token::TokenType::KEYWORD) || currentToken().value != "in") {
             logError("Expected 'in' in for loop");
             return nullptr;
         }
@@ -715,25 +735,31 @@ namespace AST {
 
         Statement *thenBranch = nullptr;
 
-        if (matchValue("{")) {
-            thenBranch = parseBlock();
-        } else {
-            thenBranch = parseStatement();
-        }
+        consumeValue("{", "Expect '{' at start of branch body");
+        consumeEndOfLine();
+
+        thenBranch = parseBlock();
+
+        consumeValue("}", "Expect '}' at end of branch body");
+        consumeEndOfLine();
 
         if (!thenBranch) {
-            logError("i");
+            logError("invaild then branch");
             delete condition;
             return nullptr;
         }
 
         Statement *elseBranch = nullptr;
         if (matchValue("else")) {
-            if (matchValue("{")) {
-                elseBranch = parseBlock();
-            } else {
-                elseBranch = parseStatement();
-            }
+            advance();
+
+            consumeValue("{", "Expect '{' at start of branch body");
+            consumeEndOfLine();
+
+            elseBranch = parseBlock();
+
+            consumeValue("}", "Expect '}' at end of branch body");
+            consumeEndOfLine();
 
             if (!elseBranch) {
                 logError("Invaild else branch");

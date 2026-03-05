@@ -31,16 +31,16 @@ std::string getSource(const std::string &file) {
 int main(int argc, char *argv[]) {
 
     if (argc == 1) {
+        std::cout << "Author: zhanghaoxvan in Class 18, Grade 7" << std::endl;
         std::cout << "Usage:" << std::endl;
         std::cout << "  " << argv[0] << " <filename>" << std::endl;
         return 0;
     }
 
     std::string source = getSource(argv[1]);
-
     lexer::Lexer lexer(source);
-    auto tk = lexer.getNextToken();
 #ifdef DEBUG
+    auto tk = lexer.getNextToken();
     std::cout << "===== Step 0: Reprint Source =====" << std::endl;
     std::cout << source << std::endl;
     std::cout << "===== Step 1: Tokenize =====" << std::endl;
@@ -51,8 +51,8 @@ int main(int argc, char *argv[]) {
     }
     std::cout << std::endl << std::endl;
     std::cout << "======= Step 2: AST =======" << std::endl;
-#endif
     lexer.resetPosition();
+#endif
     AST::ASTBuilder builder(lexer);
     AST::Program *prog = builder.build();
     if (builder.hasError()) {
@@ -61,6 +61,7 @@ int main(int argc, char *argv[]) {
         }
         return 1;
     }
+
 #ifdef DEBUG
     AST::ASTPrinter printer;
     printer.visit(prog);

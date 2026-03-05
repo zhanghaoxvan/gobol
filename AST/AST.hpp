@@ -177,7 +177,7 @@ namespace AST {
         ::std::string name;
 
     public:
-        explicit Type(::std::string name);
+        Type(::std::string name);
         ~Type() override = default;
 
         const ::std::string &getName() const {
@@ -190,17 +190,52 @@ namespace AST {
      * @class ArrayType
      * @brief 数组类型
      */
+    /**
+     * @class ArrayType
+     * @brief 数组类型，支持多维数组
+     */
+    /**
+     * @class ArrayType
+     * @brief 数组类型，支持多维数组
+     */
     class ArrayType : public Type {
     private:
-        Expression *size;
+        Type *elementType; // 元素类型（可以是基本类型，也可以是数组类型）
+        Expression *size;  // 当前维度的大小
 
     public:
+        // 构造函数：基本类型数组 (如 int[10])
         ArrayType(const ::std::string &elementType, Expression *size);
+
+        // 构造函数：多维数组 (如 int[10][5] 或 (int[5])[10])
+        ArrayType(Type *const elementType, Expression *size);
+
         ~ArrayType() override;
 
+        // 获取元素类型
+        Type *getElementType() const;
+
+        // 获取当前维度的大小表达式
         Expression *getSize() const {
             return size;
         }
+
+        // 获取完整的类型名（如 "int[][]"）
+        ::std::string getName() const;
+
+        // 获取基础类型（去掉所有[]）
+        ::std::string getBaseTypeName() const;
+
+        Type *getBaseType() const;
+
+        // 获取数组维度
+        int getDimension() const;
+
+        // 判断是否是多维数组
+        bool isMultiDimensional() const {
+            return elementType != nullptr;
+        }
+
         ACCEPT_VISITOR(ArrayType)
     };
 

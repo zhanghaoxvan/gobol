@@ -253,69 +253,148 @@ namespace vm {
         }
 
         case opCode::OpCode::ALLOC_ARRAY: {
-            // 栈上顺序: [size, typeCode] (typeCode在栈顶)
-            // 注意：编译器先压入 size，再压入 typeCode，所以弹出时先弹出 typeCode
-            RuntimeValue typeVal = pop(); // 先弹出类型代码
-            RuntimeValue sizeVal = pop(); // 再弹出大小
+            // 栈上顺序: [dim1, dim2, ..., dimN, elementType, dimCount]
+            // 例如 int[10][5] 的栈布局: [10, 5, Type::INT, 2]
 
 #ifdef DEBUG
-            std::cout << "ALLOC_ARRAY: size=" << sizeVal.toString() << ", typeCode=" << typeVal.toString() << std::endl;
+            std::cout << "ALLOC_ARRAY: stack size before = " << evalStack.size() << std::endl;
 #endif
 
-            if (!sizeVal.isInt()) {
-                std::cerr << "Runtime Error: Array size must be integer" << std::endl;
+            // 1. 先弹出维度数量
+            RuntimeValue dimCountVal = pop();
+            if (!dimCountVal.isInt()) {
+                std::cerr << "Runtime Error: Dimension count must be integer" << std::endl;
                 push(RuntimeValue());
                 break;
             }
+            int dimCount = dimCountVal.getInt();
 
-            int size = sizeVal.getInt();
-            if (size < 0) {
-                std::cerr << "Runtime Error: Array size cannot be negative" << std::endl;
+#ifdef DEBUG
+            std::cout << "  dimCount = " << dimCount << std::endl;
+#endif
+
+            // 2. 弹出元素类型
+            RuntimeValue typeVal = pop();
+            if (!typeVal.isInt()) {
+                std::cerr << "Runtime Error: Element type must be integer" << std::endl;
                 push(RuntimeValue());
                 break;
             }
 
             // 确定元素类型
-            Type elementType = Type::INT; // 默认
-            if (typeVal.isInt()) {
-                int typeCode = typeVal.getInt();
-                switch (typeCode) {
-                case 0:
-                    elementType = Type::INT;
-                    break;
-                case 1:
-                    elementType = Type::FLOAT;
-                    break;
-                case 2:
-                    elementType = Type::BOOL;
-                    break;
-                case 3:
-                    elementType = Type::STRING;
-                    break;
-                default:
-                    elementType = Type::INT;
-                }
+            Type elementType = Type::INT;
+            int typeCode = typeVal.getInt();
+            switch (typeCode) {
+            case 0:
+                elementType = Type::INT;
+                break;
+            case 1:
+                elementType = Type::FLOAT;
+                break;
+            case 2:
+                elementType = Type::BOOL;
+                break;
+            case 3:
+                elementType = Type::STRING;
+                break;
+            default:
+                elementType = Type::INT;
             }
 
+            // 3. 弹出所有维度的大小（从内到外）
+            std::vector<int> dims;
+            for (int i = 0; i < dimCount; i++) {
+                RuntimeValue dimVal = pop();
+                if (!dimVal.isInt()) {
+                    std::cerr << "Runtime Error: Array dimension must be integer" << std::endl;
+                    push(RuntimeValue());
+                    break;
+                }
+                int dim = dimVal.getInt();
+                if (dim < 0) {
+                    std::cerr << "Runtime Error: Array dimension cannot be negative" << std::endl;
+                    push(RuntimeValue());
+                    break;
+                }
+                dims.push_back(dim);
+            }
+
+            // 维度是从内到外的，需要反转
+            std::reverse(dims.begin(), dims.end());
+
 #ifdef DEBUG
-            std::cout << "  creating array of type " << static_cast<int>(elementType) << " with size " << size
-                      << std::endl;
+            std::cout << "  dimensions: ";
+            for (int d : dims)
+                std::cout << d << " ";
+            std::cout << std::endl;
+            std::cout << "  element type: " << static_cast<int>(elementType) << std::endl;
 #endif
 
-            // 创建指定类型的数组
-            ArrayTypeInfo typeInfo(elementType, size);
-            RuntimeValue array = RuntimeValue::createArray(typeInfo);
+            // 4. 递归创建多维数组
+            std::function<RuntimeValue(int)> createMultiDimArray = [&](int level) -> RuntimeValue {
+                if (level == static_cast<int>(dims.size()) - 1) {
+                    // 最后一维，创建一维数组
+                    ArrayTypeInfo typeInfo(elementType, dims[level]);
+                    return RuntimeValue::createArray(typeInfo);
+                } else {
+                    // 还有更深维度，先创建子数组
+                    ArrayTypeInfo typeInfo(Type::ARRAY, dims[level]);
+                    std::vector<RuntimeValue> arr;
+                    arr.reserve(dims[level]);
+                    for (int i = 0; i < dims[level]; i++) {
+                        arr.push_back(createMultiDimArray(level + 1));
+                    }
+                    return RuntimeValue(arr);
+                }
+            };
 
-#ifdef DEBUG
-            std::cout << "  array created, pushing to stack" << std::endl;
-#endif
-
+            RuntimeValue array = createMultiDimArray(0);
             push(array);
+
+#ifdef DEBUG
+            std::cout << "  multi-dimensional array created, pushing to stack" << std::endl;
+#endif
+            break;
+        }
+        case opCode::OpCode::ARRAY_GET: {
+            RuntimeValue indexVal = pop();
+            RuntimeValue arrayVal = pop();
+
+            std::cout << "ARRAY_GET: array is " << (arrayVal.isArray() ? "array" : "not array") << std::endl;
+            if (arrayVal.isArray()) {
+                std::cout << "  array size = " << arrayVal.getArraySize() << std::endl;
+                std::cout << "  array type = " << static_cast<int>(arrayVal.getType()) << std::endl;
+            }
+
+            if (!arrayVal.isArray()) {
+                std::cerr << "Runtime Error: Cannot index non-array value" << std::endl;
+                push(RuntimeValue());
+                break;
+            }
+
+            if (!indexVal.isInt()) {
+                std::cerr << "Runtime Error: Array index must be integer" << std::endl;
+                push(RuntimeValue());
+                break;
+            }
+
+            int index = indexVal.getInt();
+            if (index < 0 || index >= arrayVal.getArraySize()) {
+                std::cerr << "Runtime Error: Array index out of bounds" << std::endl;
+                push(RuntimeValue());
+                break;
+            }
+
+            RuntimeValue element = arrayVal.getElement(index);
+            std::cout << "  element is " << (element.isArray() ? "array" : "not array") << std::endl;
+            std::cout << "  element type = " << static_cast<int>(element.getType()) << std::endl;
+
+            push(element);
             break;
         }
 
-        case opCode::OpCode::ARRAY_GET: {
-            // 栈上顺序: [array, index] (index在栈顶)
+        case opCode::OpCode::ARRAY_SET: {
+            RuntimeValue valueVal = pop();
             RuntimeValue indexVal = pop();
             RuntimeValue arrayVal = pop();
 
@@ -325,68 +404,17 @@ namespace vm {
                 break;
             }
 
-            if (!indexVal.isInt()) {
-                std::cerr << "Runtime Error: Array index must be integer" << std::endl;
-                push(RuntimeValue());
-                break;
-            }
-
             int index = indexVal.getInt();
             if (index < 0 || index >= arrayVal.getArraySize()) {
-                std::cerr << "Runtime Error: Array index out of bounds: " << index
-                          << " (size=" << arrayVal.getArraySize() << ")" << std::endl;
+                std::cerr << "Runtime Error: Array index out of bounds" << std::endl;
                 push(RuntimeValue());
                 break;
             }
 
-            push(arrayVal.getElement(index));
-            break;
-        }
-
-        case opCode::OpCode::ARRAY_SET: {
-            // 栈上顺序: [array, index, value] (value在栈顶)
-#ifdef DEBUG
-            std::cout << "ARRAY_SET: stack size before = " << evalStack.size() << std::endl;
-#endif
-
-            RuntimeValue valueVal = pop(); // 弹出 value
-            RuntimeValue indexVal = pop(); // 弹出 index
-            RuntimeValue arrayVal = pop(); // 弹出 array
-
-#ifdef DEBUG
-            std::cout << "  array: " << (arrayVal.isArray() ? "is array" : "NOT array") << std::endl;
-            std::cout << "  index: " << indexVal.toString() << std::endl;
-            std::cout << "  value: " << valueVal.toString() << std::endl;
-#endif
-
-            if (!arrayVal.isArray()) {
-                std::cerr << "Runtime Error: Cannot index non-array value" << std::endl;
-                push(RuntimeValue());
-                break;
-            }
-
-            if (!indexVal.isInt()) {
-                std::cerr << "Runtime Error: Array index must be integer" << std::endl;
-                push(RuntimeValue());
-                break;
-            }
-
-            int index = indexVal.getInt();
-            if (index < 0 || index >= arrayVal.getArraySize()) {
-                std::cerr << "Runtime Error: Array index out of bounds: " << index
-                          << " (size=" << arrayVal.getArraySize() << ")" << std::endl;
-                push(RuntimeValue());
-                break;
-            }
-
-            // 修改数组元素
+            // 关键：设置元素后，数组的维度信息应该保持不变
             arrayVal.setElement(index, valueVal);
 
-#ifdef DEBUG
-            std::cout << "  element set, pushing modified array back to stack" << std::endl;
-#endif
-
-            // 把修改后的数组压回栈，让 STORE_VAR 指令存回变量
+            // 把修改后的数组压回栈
             push(arrayVal);
             break;
         }

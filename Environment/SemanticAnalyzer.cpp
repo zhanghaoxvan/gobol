@@ -60,8 +60,22 @@ namespace analyzer {
     }
 
     env::DataType SemanticAnalyzer::getDataTypeFromAST(AST::Type *type) {
-        if (!type)
+        if (!type) {
             return env::NONE;
+        }
+
+        // 如果是数组类型，获取其元素类型
+        if (auto *arrayType = dynamic_cast<AST::ArrayType *>(type)) {
+            AST::Type *elemType = arrayType->getElementType();
+
+            // 如果元素类型是数组，继续递归
+            if (dynamic_cast<AST::ArrayType *>(elemType)) {
+                return getDataTypeFromAST(elemType);
+            }
+
+            // 元素类型不是数组，直接获取其数据类型
+            return getDataTypeFromAST(elemType);
+        }
 
         const std::string &name = type->getName();
         if (name == "int")
@@ -221,50 +235,65 @@ namespace analyzer {
 
         // 检查是否是数组类型
         if (auto *arrayType = dynamic_cast<AST::ArrayType *>(node->getType())) {
-            // 获取元素类型
-            env::DataType elemType = getDataTypeFromAST(new AST::Type(arrayType->getName()));
 
-            // 处理数组大小
-            if (arrayType->getSize()) {
-                arrayType->getSize()->accept(this);
-                env::DataType sizeType = getCurrentType();
-                typeStack.pop();
+            // 收集所有维度的大小
+            std::vector<int> constantSizes;
+            std::vector<AST::Expression *> exprSizes;
+            bool allConstant = true;
 
-                if (sizeType != env::INT) {
-                    error("Array size must be integer");
-                    return;
+            AST::Type *current = arrayType;
+            AST::Type *innerMostType = nullptr; // 保存最内层类型
+
+            while (current != nullptr) {
+                auto *arr = dynamic_cast<AST::ArrayType *>(current);
+                if (!arr) {
+                    innerMostType = current; // 保存非数组类型
+                    break;
                 }
 
-                // 尝试获取常量值
-                if (auto *num = dynamic_cast<AST::NumberLiteral *>(arrayType->getSize())) {
-                    int size = static_cast<int>(num->getValue());
-                    env.declareArray(varName, elemType, size, isMut);
-                } else {
-                    // 非常量大小，保存表达式
-                    env.declareArray(varName, elemType, arrayType->getSize(), isMut);
+                if (arr->getSize()) {
+                    arr->getSize()->accept(this);
+                    env::DataType sizeType = getCurrentType();
+                    typeStack.pop();
+
+                    if (sizeType != env::INT) {
+                        error("Array size must be integer");
+                        return;
+                    }
+
+                    if (auto *num = dynamic_cast<AST::NumberLiteral *>(arr->getSize())) {
+                        constantSizes.push_back(static_cast<int>(num->getValue()));
+                        exprSizes.push_back(nullptr);
+                    } else {
+                        allConstant = false;
+                        constantSizes.push_back(0);
+                        exprSizes.push_back(arr->getSize());
+                    }
                 }
+                current = arr->getElementType();
+            }
+
+            // 获取最内层的元素类型
+            env::DataType elemType = getDataTypeFromAST(innerMostType ? innerMostType : arrayType);
+
+            // 声明数组
+            if (allConstant) {
+                env.declareArray(varName, elemType, constantSizes, isMut);
             } else {
-                error("Array size is required");
-                return;
-            }
-        } else {
-            // 普通变量声明
-            env::DataType declaredType = getDataTypeFromAST(node->getType());
-            if (!env.declareVariable(varName, declaredType)) {
-                error("Failed to declare variable '" + varName + "'");
-                return;
+                env.declareArray(varName, elemType, exprSizes, isMut);
             }
 
-            // 设置可变性
-            if (auto *sym = env.lookupSymbol(varName)) {
-                sym->isMut = isMut;
-            }
+            return;
+        }
 
-            if (node->getInitializer()) {
-                node->getInitializer()->accept(this);
-                env::DataType initType = getCurrentType();
-                checkTypeCompatibility(declaredType, initType, "variable '" + varName + "' initialization");
-            }
+        // 普通变量声明
+        env::DataType declaredType = getDataTypeFromAST(node->getType());
+        env.declareVariable(varName, declaredType, isMut);
+
+        if (node->getInitializer()) {
+            node->getInitializer()->accept(this);
+            env::DataType initType = getCurrentType();
+            checkTypeCompatibility(declaredType, initType, "variable '" + varName + "' initialization");
         }
     }
 
@@ -461,10 +490,13 @@ namespace analyzer {
                 } else {
                     error("Cannot assign to constant variable '" + id->getName() + "'");
                 }
-            }
-            // 情况2: 数组元素赋值
-            else if (auto *arrIndex = dynamic_cast<AST::ArrayIndex *>(node->getLeft())) {
-                if (auto *arrId = dynamic_cast<AST::Identifier *>(arrIndex->getArray())) {
+            } else if (auto *arrIndex = dynamic_cast<AST::ArrayIndex *>(node->getLeft())) {
+                AST::Expression *array = arrIndex->getArray();
+                while (auto *nested = dynamic_cast<AST::ArrayIndex *>(array)) {
+                    array = nested->getArray();
+                }
+
+                if (auto *arrId = dynamic_cast<AST::Identifier *>(array)) {
                     const auto *sym = env.lookupSymbol(arrId->getName());
                     if (!sym) {
                         error("Array variable '" + arrId->getName() + "' not declared");
@@ -678,14 +710,23 @@ namespace analyzer {
                 typeStack.push(env::UNKNOWN);
                 return;
             }
-            // 这里需要判断是否是数组，但目前没有数组类型信息
-            // 暂时假设是数组
-            typeStack.push(sym->dataType); // 数组元素的类型
+
+            if (!sym->isArray) {
+                error("Variable '" + id->getName() + "' is not an array");
+                typeStack.push(env::UNKNOWN);
+                return;
+            }
+
+            // 对于 arr[2][2]，第一次索引返回子数组，第二次索引返回元素
+            // 但我们无法知道当前是第几次索引，所以简化处理：
+            // 假设 dataType 是元素类型，直接返回
+            typeStack.push(sym->dataType);
             return;
         }
 
-        error("Cannot index non-array value");
-        typeStack.push(env::UNKNOWN);
+        // 如果是 arr[2][2] 这种链式访问，arr[2] 部分已经是 ArrayIndex
+        // 它的类型应该是元素类型
+        typeStack.push(arrayType);
     }
 
 } // namespace analyzer

@@ -30,8 +30,9 @@ namespace lexer { // how many applications in your debian?
         /** 用于错误定位的当前列号（从 0 开始） */
         int col;
         /** GOBOL 语言关键字集合，解析标识符时会匹配此集合 */
-        const std::unordered_set<std::string> keywords = {"if",  "else", "for", "return", "int",    "float",
-                                                          "str", "func", "var", "val",    "module", "import"};
+        const std::unordered_set<std::string> keywords = {"if",     "else",   "for",  "return", "int",
+                                                          "float",  "str",    "func", "var",    "val",
+                                                          "module", "import", "in",   "true",   "false"};
 
         /**
          * @brief 检查解析器是否已到达源代码末尾

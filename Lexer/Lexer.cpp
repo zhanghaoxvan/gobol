@@ -164,6 +164,11 @@ namespace lexer {
             return {token::TokenType::OPERATOR, "]"};
         case '=':
             consume();
+            if (peek() == '=') {
+                consume();
+                return {token::TokenType::OPERATOR, "=="};
+            }
+            consume();
             return {token::TokenType::OPERATOR, "="};
         case ':':
             consume();
@@ -174,9 +179,31 @@ namespace lexer {
         case ',':
             consume();
             return {token::TokenType::OPERATOR, ","};
+        case '>':
+            consume();
+            if (peek() == '=') {
+                consume();
+                return {token::TokenType::OPERATOR, ">="};
+            }
+            return {token::TokenType::OPERATOR, ">"};
+        case '<':
+            consume();
+            if (peek() == '=') {
+                consume();
+                return {token::TokenType::OPERATOR, "<="};
+            }
+            return {token::TokenType::OPERATOR, "<"};
+        case '!':
+            consume();
+            if (peek() == '=') {
+                consume();
+                return {token::TokenType::OPERATOR, "!="};
+            }
+            return {token::TokenType::OPERATOR, "!"};
         case '@':
             consume();
             if (peek() != '"') {
+                consume();
                 return {token::TokenType::UNKNOWN, "@"};
             }
             return {token::TokenType::FORMAT_STRING, parseString().value};

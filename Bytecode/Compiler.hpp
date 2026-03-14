@@ -40,6 +40,8 @@ namespace vm {
         std::unordered_map<double, int> floatConstants;
         std::unordered_map<bool, int> boolConstants;
 
+        std::unordered_map<std::string, std::vector<int>> arrayDimensions;
+
         struct FormatStringInfo {
             std::vector<FormatPiece> pieces;
             int index;

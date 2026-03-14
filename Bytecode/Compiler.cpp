@@ -219,25 +219,31 @@ namespace vm {
 
         // 检查是否是数组类型
         if (auto *arrayType = dynamic_cast<AST::ArrayType *>(node->getType())) {
-            // 1. 收集所有维度的大小
-            std::vector<int> dims;
+            // 1. 收集所有维度表达式
+            std::vector<AST::Expression *> dimExprs;
+            std::vector<int> dimValues; // 保存维度值
             AST::Type *current = arrayType;
 
-            // 递归收集所有维度
-            while (auto *arr = dynamic_cast<AST::ArrayType *>(current)) {
-                if (arr->getSize()) {
-                    arr->getSize()->accept(this); // 压入维度大小
-                    dims.push_back(0);            // 记录维度数量
+            while (auto *arrType = dynamic_cast<AST::ArrayType *>(current)) {
+                dimExprs.push_back(arrType->getSize());
+
+                // 如果是数字常量，保存其值
+                if (auto *num = dynamic_cast<AST::NumberLiteral *>(arrType->getSize())) {
+                    dimValues.push_back(num->getValue());
                 }
-                current = arr->getElementType();
+
+                current = arrType->getElementType();
             }
 
-            // 2. 获取元素类型
+            // 2. 保存维度信息到符号表
+            if (dimValues.size() == dimExprs.size()) { // 全是常量
+                arrayDimensions[name] = dimValues;     // 需要添加这个成员变量
+            }
+
+            // 3. 获取最内层的元素类型
             std::string elemTypeName;
             if (auto *baseType = dynamic_cast<AST::Type *>(current)) {
                 elemTypeName = baseType->getName();
-            } else {
-                elemTypeName = arrayType->getBaseTypeName();
             }
 
             int typeCode = 0;
@@ -250,23 +256,24 @@ namespace vm {
             else if (elemTypeName == "str")
                 typeCode = 3;
 
-            // 3. 压入元素类型
-            emit(opCode::OpCode::LOAD_CONST, addConstant(RuntimeValue(typeCode)));
-
-            // 4. 压入维度数量
-            emit(opCode::OpCode::LOAD_CONST, addConstant(RuntimeValue(static_cast<int>(dims.size()))));
-
-            // 5. 分配数组
-            emit(opCode::OpCode::ALLOC_ARRAY);
-
-            // 6. 存储数组
-            if (isVar) {
-                emit(opCode::OpCode::STORE_VAR, name);
-            } else {
-                emit(opCode::OpCode::STORE_VAL, name);
+            // 4. 编译所有维度表达式
+            for (auto *dim : dimExprs) {
+                dim->accept(this);
             }
 
-            return; // 直接返回，避免下面的普通变量处理
+            // 5. 压入维度数量
+            emit(opCode::OpCode::LOAD_CONST, addConstant(RuntimeValue((int)dimExprs.size())));
+
+            // 6. 压入类型代码
+            emit(opCode::OpCode::LOAD_CONST, addConstant(RuntimeValue(typeCode)));
+
+            // 7. ALLOC_ARRAY
+            emit(opCode::OpCode::ALLOC_ARRAY);
+
+            // 8. 存储数组
+            emit(opCode::OpCode::STORE_VAR, node->getName());
+
+            return;
         }
 
         // 普通变量处理
@@ -276,7 +283,6 @@ namespace vm {
             emit(opCode::OpCode::LOAD_CONST, addConstant(RuntimeValue()));
         }
 
-        // 存储普通变量
         if (isVar) {
             emit(opCode::OpCode::STORE_VAR, name);
         } else {
@@ -334,55 +340,75 @@ namespace vm {
 
     void Compiler::visit(AST::BinaryExpression *node) {
         const std::string &op = node->getOperator();
+
         if (op == "=") {
-            // 情况1: 数组元素赋值 arr[2][2] = 114514
+            // 情况1: 数组元素赋值
             if (auto *arrIndex = dynamic_cast<AST::ArrayIndex *>(node->getLeft())) {
-                // 1. 找到最底层的数组变量名
+                /*// 1. 找到数组名和所有索引
                 std::string arrName;
                 std::vector<AST::Expression *> indices;
-
-                // 递归收集所有索引
                 AST::Expression *current = arrIndex;
                 while (auto *nested = dynamic_cast<AST::ArrayIndex *>(current)) {
-                    indices.push_back(nested->getIndex()); // 收集索引
+                    indices.push_back(nested->getIndex());
                     current = nested->getArray();
                 }
-
-                // 最后一个是数组变量名
-                if (auto *arrId = dynamic_cast<AST::Identifier *>(current)) {
-                    arrName = arrId->getName();
+                if (auto *id = dynamic_cast<AST::Identifier *>(current)) {
+                    arrName = id->getName();
                 }
-
-                // 索引顺序是从内到外，需要反转
                 std::reverse(indices.begin(), indices.end());
 
                 // 2. 加载数组
                 emit(opCode::OpCode::LOAD_VAR, arrName);
 
-                // 3. 对于除了最后一个维度外的所有维度，获取子数组
-                for (size_t i = 0; i < indices.size() - 1; i++) {
-                    indices[i]->accept(this);        // 压入索引
-                    emit(opCode::OpCode::ARRAY_GET); // 获取子数组
+                // 3. 编译所有索引
+                for (auto *idx : indices) {
+                    idx->accept(this);
                 }
 
-                // 4. 压入最后一个索引
-                indices.back()->accept(this);
+                // 4. 获取维度信息并计算扁平化索引
+                auto it = arrayDimensions.find(arrName);
+                if (it != arrayDimensions.end()) {
+                    const auto &dims = it->second;
+                    int stride = 1;
+                    for (int d = dims.size() - 1; d >= 0; d--) {
+                        if (d < dims.size() - 1) {
+                            emit(opCode::OpCode::LOAD_CONST, addConstant(RuntimeValue(stride)));
+                            emit(opCode::OpCode::MUL);
+                        }
+                        stride *= dims[d];
+                    }
+                    if (dims.size() >= 2) {
+                        emit(opCode::OpCode::ADD);
+                    }
+                }
 
-                // 5. 压入要赋的值
+                // 5. 编译右值
                 node->getRight()->accept(this);
 
-                // 6. 设置数组元素
+                // 6. ARRAY_SET
                 emit(opCode::OpCode::ARRAY_SET);
 
-                // 7. 把修改后的数组存回变量
+                // 7. 存回变量
                 if (!arrName.empty()) {
                     emit(opCode::OpCode::STORE_VAR, arrName);
-                }
+                }*/
+                arrIndex->accept(this);
 
+                // 编译右值
+                node->getRight()->accept(this);
+
+                // ARRAY_SET
+                emit(opCode::OpCode::ARRAY_SET);
+
+                // 存回变量
+                // std::string arrName = getArrayName(arrIndex);
+                // if (!arrName.empty()) {
+                //     emit(opCode::OpCode::STORE_VAR, arrName);
+                // }
                 return;
             }
 
-            // 情况2: 普通变量赋值
+            // 情况2: 普通变量赋值 x = 0
             auto *left = dynamic_cast<AST::Identifier *>(node->getLeft());
             if (!left) {
                 std::cerr << "Compile Error: Left side of assignment must be identifier or array element" << std::endl;
@@ -631,23 +657,61 @@ namespace vm {
     void Compiler::visit(AST::ArrayType *) {
     }
     void Compiler::visit(AST::ArrayIndex *node) {
-        // 检查是否是嵌套的数组索引（多维数组）
-        if (auto *innerArray = dynamic_cast<AST::ArrayIndex *>(node->getArray())) {
-            // 递归编译内层数组索引
-            innerArray->accept(this);
-            // 内层数组索引执行后，栈顶应该是子数组
-
-            // 编译当前索引
-            node->getIndex()->accept(this);
-
-            // 生成 ARRAY_GET，获取子数组的元素
-            emit(opCode::OpCode::ARRAY_GET);
-        } else {
-            // 一维数组：直接编译数组和索引
-            node->getArray()->accept(this);
-            node->getIndex()->accept(this);
-            emit(opCode::OpCode::ARRAY_GET);
+        // 1. 找到数组名
+        AST::Expression *current = node;
+        while (auto *arrIndex = dynamic_cast<AST::ArrayIndex *>(current)) {
+            current = arrIndex->getArray();
         }
+
+        std::string arrName;
+        if (auto *id = dynamic_cast<AST::Identifier *>(current)) {
+            arrName = id->getName();
+        } else {
+            std::cerr << "Compile Error: Invalid array access" << std::endl;
+            return;
+        }
+
+        // 2. 获取维度信息（需要从之前保存的 arrayDimensions 中获取）
+        auto it = arrayDimensions.find(arrName);
+        if (it == arrayDimensions.end()) {
+            std::cerr << "Compile Error: Unknown array dimensions for " << arrName << std::endl;
+            return;
+        }
+        const auto &dims = it->second;
+
+        // 3. 收集所有索引
+        std::vector<AST::Expression *> indices;
+        current = node;
+        while (auto *arrIndex = dynamic_cast<AST::ArrayIndex *>(current)) {
+            indices.push_back(arrIndex->getIndex());
+            current = arrIndex->getArray();
+        }
+        std::reverse(indices.begin(), indices.end());
+
+        // 4. 加载数组
+        emit(opCode::OpCode::LOAD_VAR, arrName);
+
+        // 5. 编译所有索引
+        for (auto *idx : indices) {
+            idx->accept(this);
+        }
+
+        // 6. 计算扁平化索引
+        // flatIndex = i * (dim2*dim3) + j * dim3 + k
+        int stride = 1;
+        for (int d = dims.size() - 1; d >= 0; d--) {
+            if (d < dims.size() - 1) {
+                emit(opCode::OpCode::LOAD_CONST, addConstant(RuntimeValue(stride)));
+                emit(opCode::OpCode::MUL);
+                if (d < dims.size() - 2) {
+                    emit(opCode::OpCode::ADD);
+                }
+            }
+            stride *= dims[d];
+        }
+
+        // 7. 执行数组访问
+        emit(opCode::OpCode::ARRAY_GET);
     }
 
     void Compiler::visit(AST::ASTNode *) {

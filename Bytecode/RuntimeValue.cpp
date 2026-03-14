@@ -99,6 +99,21 @@ namespace vm {
             return std::get<bool>(value) ? "true" : "false";
         case Type::STRING:
             return std::get<std::string>(value);
+        case Type::ARRAY: {
+            auto arr = std::get<std::vector<RuntimeValue>>(value);
+            if (arr.empty()) {
+                return "[]";
+            }
+            ss << "[";
+            for (size_t i = 0; i < arr.size(); ++i) {
+                ss << arr[i].toString();
+                if (i < arr.size() - 1) {
+                    ss << ", ";
+                }
+            }
+            ss << "]";
+            return ss.str();
+        }
         default:
             return "unknown";
         }

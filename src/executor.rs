@@ -1,0 +1,1128 @@
+use crate::ast::*;
+use crate::value::RtValue;
+use std::collections::HashMap;
+
+// ==================== Runtime Environment ====================
+
+pub struct RuntimeEnv {
+    scopes: Vec<HashMap<String, RtValue>>,
+}
+
+impl RuntimeEnv {
+    pub fn new() -> Self {
+        let mut env = RuntimeEnv { scopes: Vec::new() };
+        env.scopes.push(HashMap::new());
+        env
+    }
+
+    pub fn enter_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    pub fn exit_scope(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+
+    pub fn declare(&mut self, name: &str, value: RtValue) {
+        let scope = self.scopes.last_mut().unwrap();
+        scope.insert(name.to_string(), value);
+    }
+
+    pub fn lookup(&self, name: &str) -> Option<&RtValue> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(v) = scope.get(name) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    pub fn assign(&mut self, name: &str, value: RtValue) -> bool {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(v) = scope.get_mut(name) {
+                *v = value;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// ==================== Built-in Functions ====================
+
+type BuiltinFn = fn(&[RtValue]) -> Result<RtValue, String>;
+
+pub struct Builtins {
+    functions: HashMap<String, BuiltinFn>,
+}
+
+impl Builtins {
+    pub fn new() -> Self {
+        let mut functions: HashMap<String, BuiltinFn> = HashMap::new();
+        functions.insert("io.print".to_string(), builtin_print);
+        functions.insert("io.read".to_string(), builtin_read);
+        functions.insert("__builtins__.range".to_string(), builtin_range);
+        functions.insert("__builtins__.panic".to_string(), builtin_panic);
+        Builtins { functions }
+    }
+
+    pub fn call(&self, name: &str, args: &[RtValue]) -> Result<RtValue, String> {
+        match self.functions.get(name) {
+            Some(f) => f(args),
+            None => Err(format!("Undefined function: '{}'", name)),
+        }
+    }
+}
+
+fn builtin_print(args: &[RtValue]) -> Result<RtValue, String> {
+    for arg in args {
+        print!("{}", arg);
+    }
+    Ok(RtValue::None_)
+}
+
+fn builtin_read(_args: &[RtValue]) -> Result<RtValue, String> {
+    let mut input = String::new();
+    match std::io::stdin().read_line(&mut input) {
+        Ok(_) => {
+            // Trim trailing newline
+            if input.ends_with('\n') {
+                input.pop();
+            }
+            if input.ends_with('\r') {
+                input.pop();
+            }
+            Ok(RtValue::Str(input))
+        }
+        Err(e) => Err(format!("Failed to read input: {}", e)),
+    }
+}
+
+fn builtin_range(args: &[RtValue]) -> Result<RtValue, String> {
+    if args.is_empty() || args.len() > 3 {
+        return Err("range() takes 1-3 arguments".to_string());
+    }
+
+    let start: i64 = if args.len() >= 2 {
+        match &args[0] {
+            RtValue::Int(n) => *n,
+            _ => return Err("range start must be int".to_string()),
+        }
+    } else {
+        0
+    };
+
+    let end: i64 = if args.len() >= 2 {
+        match &args[1] {
+            RtValue::Int(n) => *n,
+            _ => return Err("range end must be int".to_string()),
+        }
+    } else {
+        match &args[0] {
+            RtValue::Int(n) => *n,
+            _ => return Err("range argument must be int".to_string()),
+        }
+    };
+
+    let step: i64 = if args.len() == 3 {
+        match &args[2] {
+            RtValue::Int(n) => *n,
+            _ => return Err("range step must be int".to_string()),
+        }
+    } else if args.len() == 2 && start > end {
+        -1
+    } else {
+        1
+    };
+
+    let mut result = Vec::new();
+    let mut i = start;
+    if step > 0 {
+        while i < end {
+            result.push(RtValue::Int(i));
+            i += step;
+        }
+    } else if step < 0 {
+        while i > end {
+            result.push(RtValue::Int(i));
+            i += step;
+        }
+    }
+    Ok(RtValue::Array(result))
+}
+
+fn builtin_panic(args: &[RtValue]) -> Result<RtValue, String> {
+    let msg = if args.is_empty() {
+        "panic called".to_string()
+    } else {
+        args[0].to_string_val()
+    };
+    Err(format!("Panic: {}", msg))
+}
+
+// ==================== Executor ====================
+
+pub struct Executor {
+    env: RuntimeEnv,
+    pub builtins: Builtins,
+    value_stack: Vec<RtValue>,
+    returning: bool,
+    return_value: RtValue,
+    breaking: bool,
+    continuing: bool,
+    errors: Vec<String>,
+    expression_depth: i32,
+    // loop_depth: i32,
+    user_functions: HashMap<String, *const Function>,
+    struct_definitions: HashMap<String, Vec<String>>,
+}
+
+impl Executor {
+    pub fn new() -> Self {
+        Executor {
+            env: RuntimeEnv::new(),
+            builtins: Builtins::new(),
+            value_stack: Vec::new(),
+            returning: false,
+            return_value: RtValue::None_,
+            breaking: false,
+            continuing: false,
+            errors: Vec::new(),
+            expression_depth: 0,
+            // loop_depth: 0,
+            user_functions: HashMap::new(),
+            struct_definitions: HashMap::new(),
+        }
+    }
+
+    pub fn execute(&mut self, program: &Program) -> Result<i32, Vec<String>> {
+        program.accept(self);
+
+        if !self.errors.is_empty() {
+            return Err(self.errors.clone());
+        }
+
+        match &self.return_value {
+            RtValue::Int(n) => Ok(*n as i32),
+            _ => Ok(0),
+        }
+    }
+
+    fn error(&mut self, msg: String) {
+        self.errors.push(msg);
+    }
+
+    fn push(&mut self, v: RtValue) {
+        self.value_stack.push(v);
+    }
+
+    fn pop(&mut self) -> RtValue {
+        self.value_stack.pop().unwrap_or(RtValue::None_)
+    }
+
+    fn call_user_function(&mut self, func: &Function, args: &[RtValue]) {
+        self.env.enter_scope();
+
+        // Bind parameters to arguments
+        if let Some(params) = func.get_parameters() {
+            for (i, param) in params.iter().enumerate() {
+                let value = if i < args.len() {
+                    args[i].clone()
+                } else {
+                    RtValue::None_
+                };
+                self.env.declare(param.get_name(), value);
+            }
+        }
+
+        // Execute body
+        let prev_returning = self.returning;
+        let prev_return_value = self.return_value.clone();
+        self.returning = false;
+        self.return_value = RtValue::None_;
+
+        if let Some(body) = func.get_body() {
+            body.accept(self);
+        }
+
+        let result = if self.returning {
+            self.return_value.clone()
+        } else {
+            RtValue::None_
+        };
+
+        self.returning = prev_returning;
+        self.return_value = prev_return_value;
+
+        self.env.exit_scope();
+        self.push(result);
+    }
+}
+
+impl AstVisitor for Executor {
+    fn visit_program(&mut self, node: &Program) {
+        // Register __builtins__ and io as modules first
+        self.env.declare("__builtins__", RtValue::None_);
+        self.env.declare("io", RtValue::None_);
+
+        // First pass: collect all function declarations and struct/impl definitions
+        for stmt in node.get_statements() {
+            if stmt.as_any().downcast_ref::<Function>().is_some()
+                || stmt.as_any().downcast_ref::<StructDefinition>().is_some()
+                || stmt.as_any().downcast_ref::<ImplBlock>().is_some()
+            {
+                stmt.accept(self);
+            }
+        }
+
+        // Second pass: handle module/import statements (they set up context)
+        for stmt in node.get_statements() {
+            if stmt.as_any().downcast_ref::<ModuleStatement>().is_some()
+                || stmt.as_any().downcast_ref::<ImportStatement>().is_some()
+            {
+                stmt.accept(self);
+            }
+        }
+
+        // Find and execute 'main' function
+        for stmt in node.get_statements() {
+            if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
+                if func.get_name() == "main" {
+                    self.env.enter_scope();
+                    if let Some(body) = func.get_body() {
+                        body.accept(self);
+                    }
+                    self.env.exit_scope();
+                    break;
+                }
+            }
+        }
+    }
+
+    fn visit_module_statement(&mut self, _node: &ModuleStatement) {
+        // Module declarations are handled by semantic analysis; no runtime effect
+    }
+
+    fn visit_import_statement(&mut self, _node: &ImportStatement) {
+        // Imports are validated by semantic analysis; no runtime effect
+    }
+
+    fn visit_struct_definition(&mut self, node: &StructDefinition) {
+        // Store struct metadata for later instantiation
+        let struct_name = node.get_name().to_string();
+        let field_names: Vec<String> = node.get_fields().iter().map(|f| f.name.clone()).collect();
+        self.struct_definitions.insert(struct_name.clone(), field_names);
+        self.env.declare(&struct_name, RtValue::Struct(
+            struct_name.clone(),
+            std::collections::HashMap::new(),
+        ));
+    }
+
+    fn visit_impl_block(&mut self, node: &ImplBlock) {
+        // Process each item in the impl block
+        for item in node.get_items() {
+            match item {
+                ImplItem::Constructor(func) | ImplItem::Method(func) | ImplItem::Convert(func) => {
+                    // Store method for later dispatch
+                    func.accept(self);
+                }
+            }
+        }
+    }
+
+    fn visit_export_statement(&mut self, _node: &ExportStatement) {
+        // Exports are a compile-time concept; no runtime effect
+    }
+
+    fn visit_block(&mut self, node: &Block) {
+        self.env.enter_scope();
+        for stmt in node.get_statements() {
+            if self.returning || self.breaking || self.continuing || !self.errors.is_empty() {
+                break;
+            }
+            stmt.accept(self);
+        }
+        self.env.exit_scope();
+    }
+
+    fn visit_function(&mut self, node: &Function) {
+        // Store function pointer for later calling
+        self.user_functions.insert(
+            node.get_name().to_string(),
+            node as *const Function,
+        );
+        self.env.declare(node.get_name(), RtValue::None_);
+    }
+
+    fn visit_declaration(&mut self, node: &Declaration) {
+        let name = node.get_name();
+        let initializer = node.get_initializer();
+
+        let value = if let Some(init) = initializer {
+            init.accept(self);
+            self.pop()
+        } else {
+            // Default values based on type
+            if let Some(tp) = node.get_type() {
+                if let Some(arr) = tp.as_type_any().downcast_ref::<ArrayType>() {
+                    // Create default array
+                    return self.declare_array(name, arr, &node.get_keyword());
+                }
+            }
+            RtValue::None_
+        };
+
+        self.env.declare(name, value);
+    }
+
+    fn visit_expression_statement(&mut self, node: &ExpressionStatement) {
+        if let Some(expr) = node.get_expression() {
+            expr.accept(self);
+            if self.expression_depth == 0 {
+                self.pop(); // discard result in statement context
+            }
+        }
+    }
+
+    fn visit_return_statement(&mut self, node: &ReturnStatement) {
+        if let Some(val) = node.get_value() {
+            val.accept(self);
+            self.return_value = self.pop();
+        } else {
+            self.return_value = RtValue::None_;
+        }
+        self.returning = true;
+    }
+
+    fn visit_if_statement(&mut self, node: &IfStatement) {
+        if let Some(cond) = node.get_condition() {
+            cond.accept(self);
+            let condition = self.pop();
+
+            let was_expr_context = self.expression_depth > 0;
+            self.expression_depth += 1;
+
+            if condition.is_truthy() {
+                if let Some(then_branch) = node.get_then_branch() {
+                    then_branch.accept(self);
+                }
+            } else if let Some(else_branch) = node.get_else_branch() {
+                else_branch.accept(self);
+            } else if was_expr_context {
+                // No else branch in expression context: push None_
+                self.push(RtValue::None_);
+            }
+
+            self.expression_depth -= 1;
+
+            // If used as statement, discard any value left by the branch
+            if !was_expr_context && !self.value_stack.is_empty() {
+                // Check if the branch actually pushed something
+                // (for safety, we don't pop here to avoid removing unpredictably)
+                let _ = self.pop();
+            }
+        }
+    }
+
+    fn visit_while_statement(&mut self, node: &WhileStatement) {
+        loop {
+            if let Some(cond) = node.get_condition() {
+                cond.accept(self);
+                let condition = self.pop();
+
+                if !condition.is_truthy() {
+                    break;
+                }
+            } else {
+                break;
+            }
+
+            if let Some(body) = node.get_body() {
+                body.accept(self);
+
+                if self.returning {
+                    break;
+                }
+                if self.continuing {
+                    self.continuing = false;
+                    continue;
+                }
+                if self.breaking {
+                    self.breaking = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn visit_for_statement(&mut self, node: &ForStatement) {
+        let loop_var = node.get_loop_variable();
+
+        // Evaluate the iterable
+        if let Some(iter) = node.get_iterable() {
+            iter.accept(self);
+            let iterable = self.pop();
+
+            match iterable {
+                RtValue::Array(elems) => {
+                    self.env.enter_scope();
+                    for elem in &elems {
+                        self.env.declare(loop_var, elem.clone());
+
+                        if let Some(body) = node.get_body() {
+                            body.accept(self);
+                        }
+
+                        if self.returning {
+                            break;
+                        }
+                        if self.continuing {
+                            self.continuing = false;
+                            continue;
+                        }
+                        if self.breaking {
+                            self.breaking = false;
+                            break;
+                        }
+                    }
+                    self.env.exit_scope();
+                }
+                other => {
+                    self.error(format!(
+                        "For loop iterable must be an array, got {}",
+                        other.type_name()
+                    ));
+                }
+            }
+        }
+    }
+
+    fn visit_break_statement(&mut self, _node: &BreakStatement) {
+        self.breaking = true;
+    }
+
+    fn visit_continue_statement(&mut self, _node: &ContinueStatement) {
+        self.continuing = true;
+    }
+
+    // ==================== Expressions ====================
+
+    fn visit_binary_expression(&mut self, node: &BinaryExpression) {
+        let op = node.get_operator();
+
+        // Assignment and compound assignment
+        if op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=" {
+            if let Some(right) = node.get_right() {
+                right.accept(self);
+                let mut value = self.pop();
+
+                // For compound assignments, compute left + operation
+                if op != "=" {
+                    // Evaluate left side value
+                    if let Some(left) = node.get_left() {
+                        if let Some(id) = left.as_any().downcast_ref::<Identifier>() {
+                            if let Some(existing) = self.env.lookup(id.get_name()) {
+                                let left_val = existing.clone();
+                                let arith_op: &str = &op[..1]; // "+=" -> "+"
+                                value = match arith_op {
+                                    "+" => match (&left_val, &value) {
+                                        (RtValue::Int(a), RtValue::Int(b)) => RtValue::Int(a + b),
+                                        (RtValue::Float(a), RtValue::Float(b)) => RtValue::Float(a + b),
+                                        (RtValue::Int(a), RtValue::Float(b)) => RtValue::Float(*a as f64 + b),
+                                        (RtValue::Float(a), RtValue::Int(b)) => RtValue::Float(a + *b as f64),
+                                        _ => {
+                                            self.error(format!("Cannot += on non-numeric types"));
+                                            RtValue::None_
+                                        }
+                                    },
+                                    "-" => binary_arith(&left_val, &value, |a, b| a - b),
+                                    "*" => binary_arith(&left_val, &value, |a, b| a * b),
+                                    "/" => {
+                                        if value.to_number() == 0.0 {
+                                            self.error("Division by zero".to_string());
+                                            RtValue::None_
+                                        } else {
+                                            binary_arith(&left_val, &value, |a, b| a / b)
+                                        }
+                                    }
+                                    _ => {
+                                        self.error(format!("Unknown compound operator: {}", op));
+                                        RtValue::None_
+                                    }
+                                };
+                            }
+                        }
+                    }
+                }
+
+                // Left side must be an identifier or array index
+                if let Some(left) = node.get_left() {
+                    if let Some(id) = left.as_any().downcast_ref::<Identifier>() {
+                        if !self.env.assign(id.get_name(), value.clone()) {
+                            self.error(format!("Cannot assign to undeclared variable '{}'", id.get_name()));
+                        }
+                        self.push(value);
+                        return;
+                    }
+
+                    if let Some(arr_idx) = left.as_any().downcast_ref::<ArrayIndex>() {
+                        // Evaluate array and index
+                        self.assign_array_element(arr_idx, value.clone());
+                        self.push(value);
+                        return;
+                    }
+                }
+
+                self.error("Invalid assignment target".to_string());
+                self.push(RtValue::None_);
+            }
+            return;
+        }
+
+        // Logical short-circuit
+        if op == "&&" {
+            if let Some(left) = node.get_left() {
+                left.accept(self);
+            }
+            let left_val = self.pop();
+            if !left_val.is_truthy() {
+                self.push(RtValue::Bool(false));
+                return;
+            }
+            if let Some(right) = node.get_right() {
+                right.accept(self);
+            }
+            let right_val = self.pop();
+            self.push(RtValue::Bool(right_val.is_truthy()));
+            return;
+        }
+
+        if op == "||" {
+            if let Some(left) = node.get_left() {
+                left.accept(self);
+            }
+            let left_val = self.pop();
+            if left_val.is_truthy() {
+                self.push(RtValue::Bool(true));
+                return;
+            }
+            if let Some(right) = node.get_right() {
+                right.accept(self);
+            }
+            let right_val = self.pop();
+            self.push(RtValue::Bool(right_val.is_truthy()));
+            return;
+        }
+
+        // Evaluate both sides
+        if let Some(left) = node.get_left() {
+            left.accept(self);
+        }
+        let left_val = self.pop();
+        if let Some(right) = node.get_right() {
+            right.accept(self);
+        }
+        let right_val = self.pop();
+
+        let result = match op {
+            "+" => match (&left_val, &right_val) {
+                (RtValue::Str(a), RtValue::Str(b)) => RtValue::Str(format!("{}{}", a, b)),
+                (RtValue::Str(a), b) => RtValue::Str(format!("{}{}", a, b.to_string_val())),
+                (a, RtValue::Str(b)) => RtValue::Str(format!("{}{}", a.to_string_val(), b)),
+                (a, b) => {
+                    let (la, lb) = (a.to_number(), b.to_number());
+                    if matches!(a, RtValue::Float(_)) || matches!(b, RtValue::Float(_)) {
+                        RtValue::Float(la + lb)
+                    } else {
+                        RtValue::Int((la + lb) as i64)
+                    }
+                }
+            },
+            "-" => binary_arith(&left_val, &right_val, |a, b| a - b),
+            "*" => binary_arith(&left_val, &right_val, |a, b| a * b),
+            "/" => {
+                let rhs = right_val.to_number();
+                if rhs == 0.0 {
+                    self.error("Division by zero".to_string());
+                    RtValue::None_
+                } else {
+                    binary_arith(&left_val, &right_val, |a, b| a / b)
+                }
+            }
+            "%" => {
+                let rhs = right_val.to_number();
+                if rhs == 0.0 {
+                    self.error("Modulo by zero".to_string());
+                    RtValue::None_
+                } else {
+                    binary_arith(&left_val, &right_val, |a, b| a % b)
+                }
+            }
+            "==" => RtValue::Bool(values_equal(&left_val, &right_val)),
+            "!=" => RtValue::Bool(!values_equal(&left_val, &right_val)),
+            "<" => RtValue::Bool(left_val.to_number() < right_val.to_number()),
+            ">" => RtValue::Bool(left_val.to_number() > right_val.to_number()),
+            "<=" => RtValue::Bool(left_val.to_number() <= right_val.to_number()),
+            ">=" => RtValue::Bool(left_val.to_number() >= right_val.to_number()),
+            _ => {
+                self.error(format!("Unknown operator: {}", op));
+                RtValue::None_
+            }
+        };
+        self.push(result);
+    }
+
+    fn visit_unary_expression(&mut self, node: &UnaryExpression) {
+        if let Some(operand) = node.get_operand() {
+            operand.accept(self);
+        }
+        let val = self.pop();
+        let op = node.get_operator();
+
+        let result = match op {
+            "-" => match val {
+                RtValue::Int(n) => RtValue::Int(-n),
+                RtValue::Float(f) => RtValue::Float(-f),
+                _ => {
+                    self.error(format!("Cannot negate type {}", val.type_name()));
+                    RtValue::None_
+                }
+            },
+            "+" => val,
+            "!" => RtValue::Bool(!val.is_truthy()),
+            _ => {
+                self.error(format!("Unknown unary operator: {}", op));
+                RtValue::None_
+            }
+        };
+        self.push(result);
+    }
+
+    fn visit_identifier(&mut self, node: &Identifier) {
+        let name = node.get_name();
+        match self.env.lookup(name) {
+            Some(v) => self.push(v.clone()),
+            None => {
+                self.error(format!("Undefined variable: '{}'", name));
+                self.push(RtValue::None_);
+            }
+        }
+    }
+
+    fn visit_number_literal(&mut self, node: &NumberLiteral) {
+        let val = node.get_value();
+        if val == (val as i64) as f64 {
+            self.push(RtValue::Int(val as i64));
+        } else {
+            self.push(RtValue::Float(val));
+        }
+    }
+
+    fn visit_string_literal(&mut self, node: &StringLiteral) {
+        self.push(RtValue::Str(node.get_value().to_string()));
+    }
+
+    fn visit_null_literal(&mut self, _node: &NullLiteral) {
+        self.push(RtValue::None_);
+    }
+
+    fn visit_boolean_literal(&mut self, node: &BooleanLiteral) {
+        self.push(RtValue::Bool(node.get_value()));
+    }
+
+    fn visit_format_string(&mut self, node: &FormatString) {
+        let template = node.get_value().to_string();
+        let vars = node.get_variables();
+
+        // Build a position-to-variable map
+        let mut var_map: std::collections::HashMap<usize, &VariablePosition> = std::collections::HashMap::new();
+        for var in vars {
+            var_map.insert(var.pos_in_value as usize, var);
+        }
+
+        let mut result = String::new();
+        let chars: Vec<char> = template.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            if chars[i] == '{' && var_map.contains_key(&i) {
+                // Found a variable to substitute
+                if let Some(ref expr) = var_map[&i].value {
+                    expr.accept(self);
+                    let val = self.pop();
+                    result.push_str(&val.to_string_val());
+                }
+                // Skip to after the closing brace
+                while i < chars.len() && chars[i] != '}' {
+                    i += 1;
+                }
+                if i < chars.len() {
+                    i += 1; // skip '}'
+                }
+            } else {
+                result.push(chars[i]);
+                i += 1;
+            }
+        }
+
+        self.push(RtValue::Str(result));
+    }
+
+    fn visit_function_call(&mut self, node: &FunctionCall) {
+        let func_name = self.resolve_function_name(node);
+
+        // Evaluate arguments
+        let mut args: Vec<RtValue> = Vec::new();
+        if let Some(arg_list) = node.get_arguments() {
+            for arg in arg_list {
+                arg.accept(self);
+                args.push(self.pop());
+            }
+        }
+
+        // Check if it's a struct constructor call (e.g. Point(1, 2))
+        let short_name = if let Some(dot) = func_name.rfind('.') {
+            &func_name[dot + 1..]
+        } else {
+            &func_name
+        };
+
+        if let Some(field_names) = self.struct_definitions.get(short_name) {
+            let mut fields = HashMap::new();
+            for (i, field_name) in field_names.iter().enumerate() {
+                let value = if i < args.len() {
+                    args[i].clone()
+                } else {
+                    RtValue::None_
+                };
+                fields.insert(field_name.clone(), value);
+            }
+            self.push(RtValue::Struct(short_name.to_string(), fields));
+            return;
+        }
+
+        // Try built-in
+        match self.builtins.call(&func_name, &args) {
+            Ok(val) => {
+                self.push(val);
+                return;
+            }
+            Err(_) => {}
+        }
+
+        // Try user-defined function
+        if let Some(&func_ptr) = self.user_functions.get(short_name) {
+            let func = unsafe { &*func_ptr };
+            self.call_user_function(func, &args);
+            return;
+        }
+
+        self.error(format!("Undefined function: '{}'", func_name));
+        self.push(RtValue::None_);
+    }
+
+    fn visit_member_access(&mut self, node: &MemberAccess) {
+        // Evaluate object
+        if let Some(obj) = node.get_object() {
+            obj.accept(self);
+        }
+        let obj_val = self.pop();
+        let member = node.get_member();
+
+        // Handle struct field access
+        if let RtValue::Struct(_, fields) = &obj_val {
+            if let Some(field_val) = fields.get(member) {
+                self.push(field_val.clone());
+                return;
+            }
+            self.error(format!("Struct has no field '{}'", member));
+            self.push(RtValue::None_);
+            return;
+        }
+
+        // Look up as module.member (e.g. io.print)
+        if let Some(obj) = node.get_object() {
+            if let Some(id) = obj.as_any().downcast_ref::<Identifier>() {
+                let full_name = format!("{}.{}", id.get_name(), member);
+                if self.builtins.functions.contains_key(&full_name) {
+                    self.push(RtValue::Str(full_name));
+                    return;
+                }
+            }
+        }
+
+        self.push(RtValue::None_);
+    }
+
+    fn visit_array_index(&mut self, node: &ArrayIndex) {
+        // Evaluate the array
+        if let Some(arr_expr) = node.get_array() {
+            arr_expr.accept(self);
+        }
+        let arr = self.pop();
+
+        // Evaluate the index
+        if let Some(idx_expr) = node.get_index() {
+            idx_expr.accept(self);
+        }
+        let idx = self.pop();
+
+        match (&arr, &idx) {
+            (RtValue::Array(elems), RtValue::Int(n)) => {
+                let i = *n as usize;
+                if i < elems.len() {
+                    self.push(elems[i].clone());
+                } else {
+                    self.error(format!(
+                        "Array index out of bounds: index={}, length={}",
+                        i,
+                        elems.len()
+                    ));
+                    self.push(RtValue::None_);
+                }
+            }
+            (RtValue::Array(_), _) => {
+                self.error("Array index must be an integer".to_string());
+                self.push(RtValue::None_);
+            }
+            _ => {
+                self.error(format!("Cannot index into value of type '{}'", arr.type_name()));
+                self.push(RtValue::None_);
+            }
+        }
+    }
+
+    fn visit_grouped_expression(&mut self, node: &GroupedExpression) {
+        if let Some(expr) = node.get_expression() {
+            expr.accept(self);
+        }
+    }
+
+    fn visit_range_expression(&mut self, node: &RangeExpression) {
+        let mut args: Vec<RtValue> = Vec::new();
+        for arg in node.get_arguments() {
+            arg.accept(self);
+            args.push(self.pop());
+        }
+        // Delegate to builtin_range
+        match builtin_range(&args) {
+            Ok(val) => self.push(val),
+            Err(msg) => {
+                self.error(msg);
+                self.push(RtValue::None_);
+            }
+        }
+    }
+
+    // Default empty visitors
+    fn visit_ast_node(&mut self, _node: &dyn AstNode) {}
+    fn visit_statement(&mut self, _node: &dyn Statement) {}
+    fn visit_expression(&mut self, _node: &dyn Expression) {}
+    fn visit_parameter(&mut self, _node: &Parameter) {}
+    fn visit_basic_type(&mut self, _node: &BasicType) {}
+    fn visit_type(&mut self, _node: &dyn Type) {}
+    fn visit_array_type(&mut self, _node: &ArrayType) {}
+}
+
+// ==================== Helpers ====================
+
+fn binary_arith<F>(a: &RtValue, b: &RtValue, op: F) -> RtValue
+where
+    F: Fn(f64, f64) -> f64,
+{
+    let (la, lb) = (a.to_number(), b.to_number());
+    let result = op(la, lb);
+    if result == (result as i64) as f64 && matches!(a, RtValue::Int(_)) && matches!(b, RtValue::Int(_))
+    {
+        RtValue::Int(result as i64)
+    } else {
+        RtValue::Float(result)
+    }
+}
+
+fn values_equal(a: &RtValue, b: &RtValue) -> bool {
+    match (a, b) {
+        (RtValue::Int(a), RtValue::Int(b)) => a == b,
+        (RtValue::Int(a), RtValue::Float(b)) => *a as f64 == *b,
+        (RtValue::Float(a), RtValue::Int(b)) => *a == *b as f64,
+        (RtValue::Float(a), RtValue::Float(b)) => a == b,
+        (RtValue::Bool(a), RtValue::Bool(b)) => a == b,
+        (RtValue::Str(a), RtValue::Str(b)) => a == b,
+        (RtValue::Array(a), RtValue::Array(b)) => {
+            if a.len() != b.len() {
+                return false;
+            }
+            a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+        }
+        (RtValue::None_, RtValue::None_) => true,
+        _ => false,
+    }
+}
+
+impl Executor {
+    fn declare_array(&mut self, name: &str, arr_type: &ArrayType, keyword: &str) {
+        let _is_mut = keyword == "var";
+
+        let value = self.build_array_value(arr_type);
+        self.env.declare(name, value);
+    }
+
+    fn build_array_value(&self, arr_type: &ArrayType) -> RtValue {
+        let elem_count = match arr_type.get_size() {
+            Some(size) => {
+                // For compile-time constants, we can get the value from the NumberLiteral
+                if let Some(num) = size.as_any().downcast_ref::<NumberLiteral>() {
+                    num.get_value() as usize
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        };
+
+        let element_type = arr_type.get_element_type();
+        let inner = if let Some(inner_arr) = element_type.as_type_any().downcast_ref::<ArrayType>() {
+            // Multi-dimensional: each element is itself an array
+            self.build_array_value(inner_arr)
+        } else {
+            RtValue::None_
+        };
+
+        RtValue::Array(vec![inner; elem_count])
+    }
+
+    fn assign_array_element(&mut self, arr_idx: &ArrayIndex, value: RtValue) {
+        // Walk the index chain to get the innermost array and index
+        if let Some(arr_expr) = arr_idx.get_array() {
+            if let Some(idx_expr) = arr_idx.get_index() {
+                // Check if nested (arr[2][2])
+                if let Some(inner) = arr_expr.as_any().downcast_ref::<ArrayIndex>() {
+                    // Evaluate inner array reference first
+                    // We need to dig down to the base array
+                    let base = self.resolve_base_array(inner);
+                    let indices = self.collect_indices(arr_idx);
+
+                    if let Some(base_name) = base {
+                        if let Some(base_val) = self.env.lookup(&base_name) {
+                            let mut new_val = base_val.clone();
+                            if self.set_array_element(&mut new_val, &indices, &value) {
+                                self.env.assign(&base_name, new_val);
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Simple case: arr[idx]
+                if let Some(id) = arr_expr.as_any().downcast_ref::<Identifier>() {
+                    let name = id.get_name();
+                    idx_expr.accept(self);
+                    let idx_val = self.pop();
+                    if let RtValue::Int(n) = idx_val {
+                        if let Some(arr_val) = self.env.lookup(name) {
+                            if let RtValue::Array(elems) = arr_val {
+                                let mut new_elems = elems.clone();
+                                let i = n as usize;
+                                if i < new_elems.len() {
+                                    new_elems[i] = value;
+                                    self.env.assign(name, RtValue::Array(new_elems));
+                                } else {
+                                    self.error(format!("Array index out of bounds: {}", i));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_base_array(&self, arr: &ArrayIndex) -> Option<String> {
+        if let Some(arr_expr) = arr.get_array() {
+            if let Some(id) = arr_expr.as_any().downcast_ref::<Identifier>() {
+                return Some(id.get_name().to_string());
+            }
+            if let Some(inner) = arr_expr.as_any().downcast_ref::<ArrayIndex>() {
+                return self.resolve_base_array(inner);
+            }
+        }
+        None
+    }
+
+    fn collect_indices(&self, arr: &ArrayIndex) -> Vec<i64> {
+        let mut indices = Vec::new();
+        self.collect_indices_recursive(arr, &mut indices);
+        indices
+    }
+
+    fn collect_indices_recursive(&self, arr: &ArrayIndex, indices: &mut Vec<i64>) {
+        if let Some(inner) = arr.get_array().and_then(|a| {
+            a.as_any().downcast_ref::<ArrayIndex>().map(|_| ())
+        }) {
+            if let Some(inner_arr) = arr.get_array().unwrap().as_any().downcast_ref::<ArrayIndex>() {
+                self.collect_indices_recursive(inner_arr, indices);
+            }
+            let _ = inner;
+        }
+        // Evaluate this level's index
+        if let Some(idx_expr) = arr.get_index() {
+            // We can't call accept on self here because we only have &self
+            // Instead, we evaluate the index directly if it's a literal
+            if let Some(num) = idx_expr.as_any().downcast_ref::<NumberLiteral>() {
+                indices.push(num.get_value() as i64);
+            }
+        }
+    }
+
+    fn set_array_element(&self, arr: &mut RtValue, indices: &[i64], value: &RtValue) -> bool {
+        if indices.is_empty() {
+            return false;
+        }
+        if indices.len() == 1 {
+            let i = indices[0] as usize;
+            if let RtValue::Array(elems) = arr {
+                if i < elems.len() {
+                    elems[i] = value.clone();
+                    return true;
+                }
+            }
+            return false;
+        }
+        let i = indices[0] as usize;
+        if let RtValue::Array(elems) = arr {
+            if i < elems.len() {
+                return self.set_array_element(&mut elems[i], &indices[1..], value);
+            }
+        }
+        false
+    }
+
+    fn resolve_function_name(&self, node: &FunctionCall) -> String {
+        if let Some(callee) = node.get_callee() {
+            if let Some(id) = callee.as_any().downcast_ref::<Identifier>() {
+                // Check current module functions first
+                let direct = id.get_name();
+                // Try io.func or __builtins__.func
+                let io_name = format!("io.{}", direct);
+                if self.builtins.functions.contains_key(&io_name) {
+                    return io_name;
+                }
+                let builtin_name = format!("__builtins__.{}", direct);
+                if self.builtins.functions.contains_key(&builtin_name) {
+                    return builtin_name;
+                }
+                return direct.to_string();
+            }
+            if let Some(member) = callee.as_any().downcast_ref::<MemberAccess>() {
+                if let Some(obj) = member.get_object() {
+                    if let Some(obj_id) = obj.as_any().downcast_ref::<Identifier>() {
+                        return format!("{}.{}", obj_id.get_name(), member.get_member());
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+}

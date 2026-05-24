@@ -45,6 +45,7 @@ pub trait AstVisitor {
     fn visit_null_literal(&mut self, _node: &NullLiteral) {}
     fn visit_format_string(&mut self, _node: &FormatString) {}
     fn visit_range_expression(&mut self, _node: &RangeExpression) {}
+    fn visit_array_literal(&mut self, _node: &ArrayLiteral) {}
 }
 
 // ==================== Node ====================
@@ -1583,6 +1584,37 @@ impl AstNode for RangeExpression {
 }
 
 impl Expression for RangeExpression {
+    fn as_expression(&self) -> &dyn Expression {
+        self
+    }
+}
+
+// ==================== ArrayLiteral ====================
+
+pub struct ArrayLiteral {
+    elements: Vec<Box<dyn Expression>>,
+}
+
+impl ArrayLiteral {
+    pub fn new(elements: Vec<Box<dyn Expression>>) -> Self {
+        ArrayLiteral { elements }
+    }
+
+    pub fn get_elements(&self) -> &Vec<Box<dyn Expression>> {
+        &self.elements
+    }
+}
+
+impl AstNode for ArrayLiteral {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_array_literal(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Expression for ArrayLiteral {
     fn as_expression(&self) -> &dyn Expression {
         self
     }

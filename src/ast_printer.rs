@@ -446,4 +446,15 @@ impl AstVisitor for AstPrinter {
         }
         print!(")");
     }
+
+    fn visit_array_literal(&mut self, node: &ArrayLiteral) {
+        print!("[");
+        for (i, elem) in node.get_elements().iter().enumerate() {
+            if i > 0 {
+                print!(", ");
+            }
+            elem.accept(self);
+        }
+        print!("]");
+    }
 }

@@ -539,14 +539,24 @@ impl AstVisitor for Executor {
                                     },
                                     "-" => binary_arith(&left_val, &value, |a, b| a - b),
                                     "*" => binary_arith(&left_val, &value, |a, b| a * b),
-                                    "/" => {
-                                        if value.to_number() == 0.0 {
-                                            self.error("Division by zero".to_string());
-                                            RtValue::None_
-                                        } else {
-                                            binary_arith(&left_val, &value, |a, b| a / b)
+                                    "/" => match (&left_val, &value) {
+                                        (RtValue::Int(a), RtValue::Int(b)) => {
+                                            if *b == 0 {
+                                                self.error("Division by zero".to_string());
+                                                RtValue::None_
+                                            } else {
+                                                RtValue::Int(a / b)
+                                            }
                                         }
-                                    }
+                                        (a, b) => {
+                                            if b.to_number() == 0.0 {
+                                                self.error("Division by zero".to_string());
+                                                RtValue::None_
+                                            } else {
+                                                binary_arith(a, b, |x, y| x / y)
+                                            }
+                                        }
+                                    },
                                     _ => {
                                         self.error(format!("Unknown compound operator: {}", op));
                                         RtValue::None_
@@ -642,22 +652,42 @@ impl AstVisitor for Executor {
             },
             "-" => binary_arith(&left_val, &right_val, |a, b| a - b),
             "*" => binary_arith(&left_val, &right_val, |a, b| a * b),
-            "/" => {
-                let rhs = right_val.to_number();
-                if rhs == 0.0 {
-                    self.error("Division by zero".to_string());
-                    RtValue::None_
-                } else {
-                    binary_arith(&left_val, &right_val, |a, b| a / b)
+            "/" => match (&left_val, &right_val) {
+                (RtValue::Int(a), RtValue::Int(b)) => {
+                    if *b == 0 {
+                        self.error("Division by zero".to_string());
+                        RtValue::None_
+                    } else {
+                        RtValue::Int(a / b)
+                    }
                 }
-            }
-            "%" => {
-                let rhs = right_val.to_number();
-                if rhs == 0.0 {
-                    self.error("Modulo by zero".to_string());
-                    RtValue::None_
-                } else {
-                    binary_arith(&left_val, &right_val, |a, b| a % b)
+                (a, b) => {
+                    let rhs = b.to_number();
+                    if rhs == 0.0 {
+                        self.error("Division by zero".to_string());
+                        RtValue::None_
+                    } else {
+                        binary_arith(a, b, |x, y| x / y)
+                    }
+                }
+            },
+            "%" => match (&left_val, &right_val) {
+                (RtValue::Int(a), RtValue::Int(b)) => {
+                    if *b == 0 {
+                        self.error("Modulo by zero".to_string());
+                        RtValue::None_
+                    } else {
+                        RtValue::Int(a % b)
+                    }
+                }
+                (a, b) => {
+                    let rhs = b.to_number();
+                    if rhs == 0.0 {
+                        self.error("Modulo by zero".to_string());
+                        RtValue::None_
+                    } else {
+                        binary_arith(a, b, |x, y| x % y)
+                    }
                 }
             }
             "==" => RtValue::Bool(values_equal(&left_val, &right_val)),
@@ -726,6 +756,15 @@ impl AstVisitor for Executor {
 
     fn visit_null_literal(&mut self, _node: &NullLiteral) {
         self.push(RtValue::None_);
+    }
+
+    fn visit_array_literal(&mut self, node: &ArrayLiteral) {
+        let mut elems: Vec<RtValue> = Vec::new();
+        for elem in node.get_elements() {
+            elem.accept(self);
+            elems.push(self.pop());
+        }
+        self.push(RtValue::Array(elems));
     }
 
     fn visit_boolean_literal(&mut self, node: &BooleanLiteral) {

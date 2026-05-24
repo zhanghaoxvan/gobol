@@ -259,9 +259,15 @@ struct Pair<T> {
 ### 7.3 Impl Blocks (Methods)
 
 ```gobol
+struct Point {
+    x: int,
+    y: int
+}
+
 impl Point {
-    constructor(x: int, y: int): Point {
-        return self
+    constructor(x: int, y: int) {
+        self.x = x
+        self.y = y
     }
     
     func distance(self): float {
@@ -468,7 +474,7 @@ func main(): int {
         }
     }
     
-    var p: Point = Point(x: 3, y: 4)
+    var p: Point = Point(3, 4)
     io.print(p.distance())     // 5.0
     
     return 0

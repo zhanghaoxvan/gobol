@@ -1021,6 +1021,10 @@ impl AstBuilder {
             return Some(Box::new(GroupedExpression::new(Some(expr))));
         }
 
+        if self.match_value("[") {
+            return self.parse_array_literal();
+        }
+
         self.log_error(&format!("Unexpected token in expression: {}", self.current_token().value));
         None
     }
@@ -1054,6 +1058,30 @@ impl AstBuilder {
         }
 
         Some(args)
+    }
+
+    fn parse_array_literal(&mut self) -> Option<Box<dyn Expression>> {
+        self.advance(); // consume '['
+
+        let mut elements: Vec<Box<dyn Expression>> = Vec::new();
+
+        while !self.match_value("]") && !self.error_occurred {
+            if self.match_value(",") {
+                self.advance();
+                continue;
+            }
+            let elem = self.parse_expression()?;
+            elements.push(elem);
+
+            if self.match_value(",") {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.consume_value("]", "Expected ']' after array literal");
+        Some(Box::new(ArrayLiteral::new(elements)))
     }
 
     fn parse_if_expression(&mut self) -> Option<Box<dyn Expression>> {

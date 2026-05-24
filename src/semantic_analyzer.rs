@@ -338,13 +338,27 @@ impl AstVisitor for SemanticAnalyzer {
 
         // Normal variable
         let declared_type = self.get_data_type_from_ast(node.get_type());
-        self.env.declare_variable(&var_name, &declared_type, is_mut);
+        let actual_type = if declared_type == DataType::None_ {
+            // Infer type from initializer
+            if let Some(init) = node.get_initializer() {
+                init.accept(self);
+                let init_type = self.get_current_type();
+                self.env.declare_variable(&var_name, &init_type, is_mut);
+                return;
+            } else {
+                self.env.declare_variable(&var_name, &declared_type, is_mut);
+                return;
+            }
+        } else {
+            self.env.declare_variable(&var_name, &declared_type, is_mut);
+            declared_type
+        };
 
         if let Some(init) = node.get_initializer() {
             init.accept(self);
             let init_type = self.get_current_type();
             self.check_type_compatibility(
-                declared_type,
+                actual_type,
                 init_type,
                 &format!("variable '{}' initialization", var_name),
             );
@@ -534,6 +548,27 @@ impl AstVisitor for SemanticAnalyzer {
 
     fn visit_null_literal(&mut self, _node: &NullLiteral) {
         self.type_stack.push(DataType::None_);
+    }
+
+    fn visit_array_literal(&mut self, node: &ArrayLiteral) {
+        let mut first = true;
+        let mut elem_type = DataType::Unknown;
+        for elem in node.get_elements() {
+            elem.accept(self);
+            let et = self.get_current_type();
+            self.type_stack.pop();
+            if first {
+                elem_type = et;
+                first = false;
+            } else if !Environment::is_type_compatible(&elem_type, &et) {
+                self.error(&format!(
+                    "Mixed types in array literal: {} and {}",
+                    data_type_to_string(elem_type.clone()),
+                    data_type_to_string(et)
+                ));
+            }
+        }
+        self.type_stack.push(elem_type);
     }
 
     fn visit_boolean_literal(&mut self, _node: &BooleanLiteral) {

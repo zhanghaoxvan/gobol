@@ -337,7 +337,7 @@ impl vec<T> {
 impl vec_iterator<T> {
     func next(self): (T, bool) {
         if _index >= _len { return (null, false) }
-        let value = _data[_index]
+        var value: T = _data[_index]
         _index += 1
         return (value, true)
     }
@@ -357,8 +357,7 @@ import io
 
 io.print("Hello, World!")      // Print without newline
 io.println("Hello!")           // Print with newline
-let input = io.read()          // Read a line
-let word = io.scan()           // Read a word
+var input: str = io.read()     // Read a line
 ```
 
 The `io` module is automatically available through `__setup__` and does not require explicit import in most cases.
@@ -371,10 +370,10 @@ The `io` module is automatically available through `__setup__` and does not requ
 
 ```gobol
 // Create range
-let r = range(0, 10)           // 0..9, step 1
-let r2 = range(0, 10, 2)       // 0,2,4,6,8
-let r3 = 0..10                 // Equivalent to range(0,10,1)
-let r4 = 10..0                 // Equivalent to range(10,0,-1)
+var r: int[] = range(0, 10)           // 0..9, step 1
+var r2: int[] = range(0, 10, 2)       // 0,2,4,6,8
+var r3: int[] = 0..10                 // Equivalent to range(0,10,1)
+var r4: int[] = 10..0                 // Equivalent to range(10,0,-1)
 
 // Methods
 io.print(r.start())            // 0
@@ -384,7 +383,7 @@ io.print(r.len())              // 10
 io.print(r.contains(5))        // true
 
 // Convert to array
-let arr: int[] = r
+var arr: int[] = r
 ```
 
 The `range` type represents an integer sequence and supports bidirectional iteration. The `..` operator is syntactic sugar that automatically determines the direction.
@@ -453,8 +452,8 @@ func main(): int {
     }
     
     // Range and conversion
-    let r = 0..10
-    let nums: int[] = r
+    var r: int[] = 0..10
+    var nums: int[] = r
     io.print(nums[0])
     
     // Struct
@@ -469,7 +468,7 @@ func main(): int {
         }
     }
     
-    let p = Point{x: 3, y: 4}
+    var p: Point = Point(x: 3, y: 4)
     io.print(p.distance())     // 5.0
     
     return 0

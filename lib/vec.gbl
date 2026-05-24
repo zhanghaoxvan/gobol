@@ -99,7 +99,7 @@ impl<T> vec_iterator<T> {
     
     func next(self): (T, bool) {
         if _index >= _len { return (null, false) }
-        let value = _data[_index]
+        var value: T = _data[_index]
         _index += 1
         return (value, true)
     }

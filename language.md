@@ -7,7 +7,9 @@ GoBol is a statically-typed, modular programming language with generics support.
 GoBol 是一门静态类型、支持泛型的模块化编程语言。它融合了 Rust 的安全性特性和 Go 的简洁语法。编译器使用 Rust 编写，支持解释执行和原生代码生成。
 
 **Author**: zhanghaoxvan
+
 **File Extension**: `.gbl`  
+
 **License**: GPL3
 
 ---

@@ -1,0 +1,13 @@
+module io
+
+import __builtins__
+
+func print(s: str) {
+    __builtins__._print(s)
+}
+
+func read(): str {
+    return __builtins__._read()
+}
+
+export(print, read)

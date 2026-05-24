@@ -1,6 +1,22 @@
 module main
 import io
 
+struct Point {
+    x: int,
+    y: int
+}
+
+impl Point {
+    constructor(x: int, y: int) {
+        self.x = x
+        self.y = y
+    }
+}
+
+func add(p: Point): int {
+    return p.x + p.y
+}
+
 func main(): int {
     var name: str = "Gobol"
     var arr: int[10][10]
@@ -8,10 +24,15 @@ func main(): int {
     var flag: bool = true
     io.print(@"Hello from {name}\n")
     io.print(@"arr[2] is {arr[2][2]}!\n")
-    for i in range(0, 10) {
+
+    io.print(io.read())
+
+    for i in 0..10 {
         io.print(@"Number {i}\n")
     }
     
+    io.print(@"Calc: {add(new Point(1, 2))}\n")
+
     if arr[2][2] == 114514 {
         io.print("Right!\n")
     } else {

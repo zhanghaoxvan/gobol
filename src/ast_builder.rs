@@ -159,7 +159,7 @@ impl AstBuilder {
                 "import" => return self.parse_import(),
                 "module" => return self.parse_module(),
                 "func" => return self.parse_function(),
-                "var" | "val" | "let" => return self.parse_declaration(),
+                "var" | "val" => return self.parse_declaration(),
                 "for" => return self.parse_for_statement(),
                 "return" => return self.parse_return_statement(),
                 "struct" => return self.parse_struct_definition(),

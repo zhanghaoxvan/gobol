@@ -25,13 +25,13 @@ func main(): int {
     io.print(@"Hello from {name}\n")
     io.print(@"arr[2] is {arr[2][2]}!\n")
 
-    io.print(io.read())
-
     for i in 0..10 {
         io.print(@"Number {i}\n")
     }
+
+    var p: Point = Point(1, 2)
     
-    io.print(@"Calc: {add(new Point(1, 2))}\n")
+    io.print(@"Calc: {add(p)}\n")
 
     if arr[2][2] == 114514 {
         io.print("Right!\n")

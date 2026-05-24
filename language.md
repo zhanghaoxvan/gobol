@@ -480,10 +480,6 @@ func main(): int {
 ## 17. Running GoBol Programs
 
 ```bash
-# Debug mode (prints AST and semantic analysis info)
-cargo run -- example.gbl
-
-# Release mode (only output execution results)
 cargo run --release -- example.gbl
 ```
 

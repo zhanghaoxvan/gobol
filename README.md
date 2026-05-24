@@ -48,10 +48,6 @@ cargo build --release
 ### 运行
 
 ```bash
-# Debug 模式
-cargo run -- example.gbl
-
-# Release 模式
 cargo run --release -- example.gbl
 ```
 

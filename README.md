@@ -4,23 +4,23 @@
 [![License](https://img.shields.io/badge/license-GPLv3-red.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/zhanghaoxvan/gobol)
 
-**GoBol** — 一门静态类型、支持泛型的现代编程语言。
+**GoBol** — A statically-typed, modular programming language with generics support.
 
 ---
 
-## 📦 项目结构
+## 📦 Project Structure
 
 ```
 gobol/
-├── src/                      # 编译器源代码
+├── src/                      # Compiler source code
 │   ├── main.rs
-│   ├── lexer.rs              # 词法分析器
-│   ├── ast.rs                # AST 定义
-│   ├── ast_builder.rs        # 语法分析器
-│   ├── ast_printer.rs        # AST 打印器
-│   ├── environment.rs        # 符号表环境
-│   ├── semantic_analyzer.rs  # 语义分析器
-│   ├── executor.rs           # 解释器
+│   ├── lexer.rs              # Lexer
+│   ├── ast.rs                # AST definition
+│   ├── ast_builder.rs        # Parser
+│   ├── ast_printer.rs        # AST printer
+│   ├── environment.rs        # Symbol table environment
+│   ├── semantic_analyzer.rs  # Semantic analyzer
+│   ├── executor.rs           # Executor
 │   ├── token.rs
 │   └── value.rs
 ├── lib/                      # 标准库
@@ -37,15 +37,15 @@ gobol/
 
 ---
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 编译
+### Compile
 
 ```bash
 cargo build --release
 ```
 
-### 运行
+### Run
 
 ```bash
 cargo run --release -- example.gbl
@@ -53,11 +53,11 @@ cargo run --release -- example.gbl
 
 ---
 
-## 📄 示例
+## 📄 Example
 
 `example.gbl`:
 
-```go
+```gobol
 module main
 
 func main(): int {
@@ -66,10 +66,12 @@ func main(): int {
 }
 ```
 
+See [Language Docs](language.md) for more details.
+
 ---
 
-## 📜 许可证
+## 📜 License
 
 **GNU General Public License v3.0**
 
-详见 [LICENSE](LICENSE) 文件。
+See [LICENSE](LICENSE) for details.

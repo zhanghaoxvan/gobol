@@ -34,6 +34,7 @@ pub trait AstVisitor {
     fn visit_impl_block(&mut self, _node: &ImplBlock) {}
     fn visit_binary_expression(&mut self, _node: &BinaryExpression) {}
     fn visit_unary_expression(&mut self, _node: &UnaryExpression) {}
+    fn visit_cast_expression(&mut self, _node: &CastExpression) {}
     fn visit_function_call(&mut self, _node: &FunctionCall) {}
     fn visit_member_access(&mut self, _node: &MemberAccess) {}
     fn visit_array_index(&mut self, _node: &ArrayIndex) {}
@@ -365,18 +366,25 @@ impl Statement for Function {
 // ==================== ImportStatement ====================
 
 pub struct ImportStatement {
-    module_name: String,
+    path: Vec<String>,
+    alias: Option<String>,
 }
 
 impl ImportStatement {
-    pub fn new(module_name: impl Into<String>) -> Self {
-        ImportStatement {
-            module_name: module_name.into(),
-        }
+    pub fn new(path: Vec<String>, alias: Option<String>) -> Self {
+        ImportStatement { path, alias }
     }
 
-    pub fn get_module_name(&self) -> &str {
-        &self.module_name
+    pub fn get_path(&self) -> &Vec<String> {
+        &self.path
+    }
+
+    pub fn get_alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+
+    pub fn get_module_name(&self) -> String {
+        self.path.join(".")
     }
 }
 
@@ -931,6 +939,45 @@ impl Expression for UnaryExpression {
     }
 }
 
+// ==================== CastExpression ====================
+
+pub struct CastExpression {
+    expression: Option<Box<dyn Expression>>,
+    target_type: Box<dyn Type>,
+}
+
+impl CastExpression {
+    pub fn new(expression: Option<Box<dyn Expression>>, target_type: Box<dyn Type>) -> Self {
+        CastExpression {
+            expression,
+            target_type,
+        }
+    }
+
+    pub fn get_expression(&self) -> Option<&dyn Expression> {
+        self.expression.as_deref().map(|e| e.as_expression())
+    }
+
+    pub fn get_target_type(&self) -> &dyn Type {
+        &*self.target_type
+    }
+}
+
+impl AstNode for CastExpression {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_cast_expression(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Expression for CastExpression {
+    fn as_expression(&self) -> &dyn Expression {
+        self
+    }
+}
+
 // ==================== FunctionCall ====================
 
 pub struct FunctionCall {
@@ -1353,6 +1400,19 @@ impl FormatString {
         if var_name.is_empty() {
             return None;
         }
+        // Handle unary operators (-, !, +)
+        let first = var_name.chars().next().unwrap();
+        if first == '-' || first == '!' || first == '+' {
+            let op: String = first.into();
+            let rest = var_name[first.len_utf8()..].trim();
+            if rest.is_empty() {
+                return None;
+            }
+            if let Some(operand) = Self::parse_value(rest) {
+                return Some(Box::new(UnaryExpression::new(op, Some(operand))));
+            }
+            return None;
+        }
         if let Some(lit) = Self::try_parse_literal(var_name) {
             return Some(lit);
         }
@@ -1446,6 +1506,19 @@ impl FormatString {
                     return Some(Box::new(MemberAccess::new(Some(o), member_part)));
                 }
                 return None;
+            }
+        }
+        // 处理类型转换: expr as Type
+        if let Some(as_pos) = expr.rfind(" as ") {
+            let lhs = &expr[..as_pos];
+            let type_name = expr[as_pos + 4..].trim();
+            if !type_name.is_empty()
+                && type_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                if let Some(lhs_expr) = Self::parse_expression(lhs) {
+                    let tp: Box<dyn Type> = Box::new(BasicType::new(type_name));
+                    return Some(Box::new(CastExpression::new(Some(lhs_expr), tp)));
+                }
             }
         }
         // 标识符

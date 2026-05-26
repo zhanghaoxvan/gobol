@@ -14,7 +14,7 @@ impl Lexer {
         let mut keywords = HashSet::new();
         let kw = [
             "if", "else", "for", "return", "int", "float", "str", "func", "var", "val",
-            "module", "import", "in", "true", "false", "while", "break", "continue",
+            "module", "import", "in", "as", "true", "false", "while", "break", "continue",
             "null", "self", "export", "struct", "impl", "constructor", "new",
             "convert", "operator",
         ];

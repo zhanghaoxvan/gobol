@@ -263,7 +263,6 @@ impl Environment {
         let scope_level = self.get_current_scope();
         let scope = self.scopes.last_mut().unwrap();
         if scope.contains_key(name) {
-            eprintln!("Semantic Error: Variable '{}' already declared", name);
             return false;
         }
 
@@ -282,7 +281,6 @@ impl Environment {
         let global_scope = &mut self.scopes[0];
 
         if global_scope.contains_key(&full_name) {
-            eprintln!("Semantic Error: Function '{}' already declared", full_name);
             return false;
         }
 
@@ -298,7 +296,6 @@ impl Environment {
         let global_scope = &mut self.scopes[0];
         if let Some(existing) = global_scope.get(name) {
             if existing.symbol_type != SymbolType::Module {
-                eprintln!("Semantic Error: Name '{}' already used", name);
                 return false;
             }
             return true;
@@ -324,7 +321,6 @@ impl Environment {
         let scope_level = self.get_current_scope();
         let scope = self.scopes.last_mut().unwrap();
         if scope.contains_key(name) {
-            eprintln!("Semantic Error: Variable '{}' already declared", name);
             return false;
         }
 
@@ -349,7 +345,6 @@ impl Environment {
         let scope_level = self.get_current_scope();
         let scope = self.scopes.last_mut().unwrap();
         if scope.contains_key(name) {
-            eprintln!("Semantic Error: Variable '{}' already declared", name);
             return false;
         }
 

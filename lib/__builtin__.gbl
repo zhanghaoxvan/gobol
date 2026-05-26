@@ -1,5 +1,0 @@
-module __builtin__
-func _print(s: str) // by compiler
-func _read(): str // by compiler
-
-export(_print, _read)

@@ -1,0 +1,56 @@
+module math
+
+// ==================== 常量 ====================
+val PI: float = 3.14159265358979323846
+val E: float = 2.71828182845904523536
+val TAU: float = 6.28318530717958647692
+
+// ==================== 基础运算 ====================
+
+// 绝对值
+func abs(x: float): float {
+    if x < 0 {
+        return -x
+    }
+    return x
+}
+
+// 最大值
+func max(a: float, b: float): float {
+    if a > b { return a }
+    return b
+}
+
+// 最小值
+func min(a: float, b: float): float {
+    if a < b { return a }
+    return b
+}
+
+// 取整（向零）
+func trunc(x: float): float {
+    if x >= 0 {
+        return floor(x)
+    }
+    return ceil(x)
+}
+
+// 向下取整
+func floor(x: float): float {
+    if x == 0 { return 0.0 }
+    var i: int = x as int
+    if x < 0 && x != i as float {
+        return (i - 1) as float
+    }
+    return i as float
+}
+
+// 向上取整
+func ceil(x: float): float {
+    if x == 0 { return 0.0 }
+    var i: int = x as int
+    if x > 0 && x != i as float {
+        return (i + 1) as float
+    }
+    return i as float
+}

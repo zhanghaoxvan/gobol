@@ -39,11 +39,6 @@ func main(): int {
         io.print("Wrong!\n")
     }
     
-    /*
-    while true {
-        io.print("While!\n")
-    }
-    */
     io.print("End of Task!\n")
     return 0
 }

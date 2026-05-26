@@ -55,13 +55,13 @@ impl<T> vec<T> {
     func pop(self): T {
         if _len == 0 { panic("pop from empty vec") }
         _len -= 1
-        let value = _data[_len]
+        var value: T = _data[_len]
         _data[_len] = null
         return value
     }
     
     convert T[](self): T[] {
-        let result: T[] = new T[_len]
+        var result: T[] = new T[_len]
         for i in 0.._len {
             result[i] = _data[i]
         }
@@ -74,8 +74,8 @@ impl<T> vec<T> {
 }
 
 func _grow<T>(self: vec<T>) {
-    let new_cap = if _cap == 0 { 4 } else { _cap * 2 }
-    let new_data: T[] = new T[new_cap]?
+    var new_cap: int = if _cap == 0 { 4 } else { _cap * 2 }
+    var new_data: T[] = new T[new_cap]?
     for i in 0.._len {
         new_data[i] = _data[i]
     }
@@ -115,7 +115,7 @@ operator []=(self: vec<T>, index: int, value: T) {
 }
 
 operator +(left: vec<T>, right: vec<T>): vec<T> {
-    let result = vec<T>.new()
+    var result: vec<T> = vec<T>.new()
     for i in 0..left.len() {
         result.push(left[i])
     }

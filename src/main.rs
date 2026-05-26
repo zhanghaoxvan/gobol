@@ -16,6 +16,7 @@ use lexer::Lexer;
 use semantic_analyzer::SemanticAnalyzer;
 use std::env;
 use std::fs;
+use std::path::Path;
 
 fn get_source(file: &str) -> String {
     fs::read_to_string(file).unwrap_or_else(|_| {
@@ -90,7 +91,21 @@ fn main() {
         println!("======= Step 3: Semantic Analysis =======");
     }
 
+    // Build lib search paths: relative to CWD and relative to input file
+    let mut lib_paths = vec!["lib".to_string()];
+    if let Some(parent) = Path::new(&args[1]).parent() {
+        if let Some(p) = parent.join("lib").to_str() {
+            lib_paths.push(p.to_string());
+        }
+        if let Some(grandparent) = parent.parent() {
+            if let Some(p) = grandparent.join("lib").to_str() {
+                lib_paths.push(p.to_string());
+            }
+        }
+    }
+
     let mut semantic_analyzer = SemanticAnalyzer::new();
+    semantic_analyzer.set_lib_paths(lib_paths.clone());
     let semantic_passed = semantic_analyzer.analyze(&prog);
     if !semantic_passed {
         std::process::exit(1);
@@ -103,6 +118,7 @@ fn main() {
     }
 
     let mut executor = Executor::new();
+    executor.set_lib_paths(lib_paths);
     match executor.execute(&prog) {
         Ok(exit_code) => {
             if exit_code != 0 {

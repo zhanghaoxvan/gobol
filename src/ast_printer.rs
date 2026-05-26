@@ -257,7 +257,11 @@ impl AstVisitor for AstPrinter {
 
     fn visit_import_statement(&mut self, node: &ImportStatement) {
         self.print_indent();
-        println!("Import(moduleName = {})", node.get_module_name());
+        print!("Import(path = {})", node.get_module_name());
+        if let Some(alias) = node.get_alias() {
+            print!(" as {}", alias);
+        }
+        println!();
     }
 
     fn visit_module_statement(&mut self, node: &ModuleStatement) {
@@ -324,6 +328,14 @@ impl AstVisitor for AstPrinter {
             right.accept(self);
         }
         print!(")");
+    }
+
+    fn visit_cast_expression(&mut self, node: &CastExpression) {
+        if let Some(expr) = node.get_expression() {
+            expr.accept(self);
+        }
+        print!(" as ");
+        node.get_target_type().accept(self);
     }
 
     fn visit_unary_expression(&mut self, node: &UnaryExpression) {

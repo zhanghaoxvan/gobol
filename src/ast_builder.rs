@@ -218,11 +218,37 @@ impl AstBuilder {
             return None;
         }
 
-        let module_name = self.current_token().value.clone();
+        let mut path = vec![self.current_token().value.clone()];
         self.advance();
+
+        // Handle "import a.b.c"
+        while self.match_value(".") {
+            self.advance(); // consume '.'
+            if !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected identifier after '.' in import path");
+                return None;
+            }
+            path.push(self.current_token().value.clone());
+            self.advance();
+        }
+
+        // Handle "import a as b"
+        let alias = if self.match_type(&TokenType::Keyword) && self.current_token().value == "as" {
+            self.advance(); // consume 'as'
+            if !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected identifier after 'as'");
+                return None;
+            }
+            let alias = self.current_token().value.clone();
+            self.advance();
+            Some(alias)
+        } else {
+            None
+        };
+
         self.consume_end_of_line();
 
-        Some(Box::new(ImportStatement::new(module_name)))
+        Some(Box::new(ImportStatement::new(path, alias)))
     }
 
     fn parse_export_statement(&mut self) -> Option<Box<dyn Statement>> {
@@ -237,8 +263,22 @@ impl AstBuilder {
                 self.log_error("Expected identifier in export list");
                 return None;
             }
-            names.push(self.current_token().value.clone());
+            let mut name = self.current_token().value.clone();
             self.advance();
+
+            // Handle dotted names: add.add, io.print, etc.
+            while self.match_value(".") {
+                self.advance();
+                if !self.match_type(&TokenType::Identifier) {
+                    self.log_error("Expected identifier after '.' in export name");
+                    return None;
+                }
+                name.push('.');
+                name.push_str(&self.current_token().value);
+                self.advance();
+            }
+
+            names.push(name);
 
             if self.match_value(",") {
                 self.advance();
@@ -906,13 +946,25 @@ impl AstBuilder {
     }
 
     fn parse_multiplicative(&mut self) -> Option<Box<dyn Expression>> {
-        let mut expr = self.parse_unary()?;
+        let mut expr = self.parse_cast()?;
 
         while self.match_value("*") || self.match_value("/") || self.match_value("%") {
             let op = self.current_token().value.clone();
             self.advance();
-            let right = self.parse_unary()?;
+            let right = self.parse_cast()?;
             expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
+        }
+
+        Some(expr)
+    }
+
+    fn parse_cast(&mut self) -> Option<Box<dyn Expression>> {
+        let mut expr = self.parse_unary()?;
+
+        while self.match_type(&TokenType::Keyword) && self.current_token().value == "as" {
+            self.advance(); // consume 'as'
+            let target_type = self.parse_type()?;
+            expr = Box::new(CastExpression::new(Some(expr), target_type));
         }
 
         Some(expr)

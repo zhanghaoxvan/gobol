@@ -1,8 +1,12 @@
 #![allow(dead_code)]
 
 use crate::ast::*;
+use crate::ast_builder::AstBuilder;
 use crate::environment::*;
-use std::collections::HashMap;
+use crate::lexer::Lexer;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 
 pub struct SemanticAnalyzer {
     env: Environment,
@@ -16,6 +20,11 @@ pub struct SemanticAnalyzer {
     type_stack: Vec<DataType>,
     struct_fields: HashMap<String, HashMap<String, DataType>>,
     current_impl_struct: Option<String>,
+    lib_paths: Vec<String>,
+    loaded_modules: HashSet<String>,
+    loaded_programs: Vec<Box<Program>>,
+    current_module_dir: Option<String>,
+    module_aliases: HashMap<String, String>,
 }
 
 impl SemanticAnalyzer {
@@ -32,19 +41,27 @@ impl SemanticAnalyzer {
             type_stack: Vec::new(),
             struct_fields: HashMap::new(),
             current_impl_struct: None,
+            lib_paths: vec!["lib".to_string()],
+            loaded_modules: HashSet::new(),
+            loaded_programs: Vec::new(),
+            current_module_dir: None,
+            module_aliases: HashMap::new(),
         }
     }
 
-    pub fn analyze(&mut self, program: &Program) -> bool {
-        // Register built-in modules
-        self.env.declare_module("__builtins__");
-        self.env.declare_module("io");
+    pub fn set_lib_paths(&mut self, paths: Vec<String>) {
+        self.lib_paths = paths;
+    }
 
-        // Declare builtin functions
-        self.env.declare_function("range", &DataType::Int, "__builtins__");
-        self.env.declare_function("print", &DataType::None_, "io");
-        self.env.declare_function("read", &DataType::Str, "io");
+    pub fn analyze(&mut self, program: &Program) -> bool {
+        // Register built-in modules and compiler-provided functions
+        self.env.declare_module("__builtins__");
+        self.env.declare_function("_print", &DataType::None_, "__builtins__");
+        self.env.declare_function("_read", &DataType::Str, "__builtins__");
         self.env.declare_function("panic", &DataType::None_, "__builtins__");
+
+        // Auto-import __setup__ which loads io, range, etc. from lib/
+        self.load_module("__setup__");
 
         program.accept(self);
 
@@ -134,6 +151,150 @@ impl SemanticAnalyzer {
         ));
         false
     }
+
+    fn resolve_module_path(&self, path_parts: &[String], base_dir: Option<&str>) -> Option<String> {
+        let relative = path_parts.join("/") + ".gbl";
+
+        // First: check relative to the importing module's directory
+        if let Some(dir) = base_dir {
+            let rel_full = format!("{}/{}", dir, relative);
+            if Path::new(&rel_full).exists() {
+                return Some(rel_full);
+            }
+            let rel_setup = format!("{}/{}/__setup__.gbl", dir, path_parts.join("/"));
+            if Path::new(&rel_setup).exists() {
+                return Some(rel_setup);
+            }
+        }
+
+        // Second: check each lib path
+        for lib_path in &self.lib_paths {
+            let full = format!("{}/{}", lib_path, relative);
+            if Path::new(&full).exists() {
+                return Some(full);
+            }
+            // Fallback: lib/X/__setup__.gbl
+            let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
+            let setup_full = format!("{}/{}", lib_path, setup_relative);
+            if Path::new(&setup_full).exists() {
+                return Some(setup_full);
+            }
+        }
+        // Third: try without lib prefix
+        let direct = format!("{}.gbl", path_parts.join("/"));
+        if Path::new(&direct).exists() {
+            return Some(direct);
+        }
+        let setup_direct = format!("{}/__setup__.gbl", path_parts.join("/"));
+        if Path::new(&setup_direct).exists() {
+            return Some(setup_direct);
+        }
+        None
+    }
+
+    fn load_module(&mut self, module_name: &str) {
+        if self.loaded_modules.contains(module_name) {
+            return;
+        }
+
+        let path_parts: Vec<String> = module_name.split('.').map(|s| s.to_string()).collect();
+        let base_dir = self.current_module_dir.clone();
+        let file_path = match self.resolve_module_path(&path_parts, base_dir.as_deref()) {
+            Some(p) => p,
+            None => {
+                if module_name == "__builtins__" {
+                    self.loaded_modules.insert(module_name.to_string());
+                    return;
+                }
+                return;
+            }
+        };
+
+        let source = match fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let lexer = Lexer::new(source);
+        let mut builder = AstBuilder::new(lexer);
+        let prog = match builder.build() {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Set current_module_dir for relative imports within this module
+        let prev_dir = self.current_module_dir.clone();
+        if let Some(parent) = Path::new(&file_path).parent() {
+            self.current_module_dir = parent.to_str().map(|s| s.to_string());
+        }
+
+        self.loaded_modules.insert(module_name.to_string());
+
+        // Save context
+        let prev_module = self.current_module.clone();
+
+        // Only register declarations (module, imports, function signatures, structs)
+        for stmt in prog.get_statements() {
+            if let Some(mod_stmt) = stmt.as_any().downcast_ref::<ModuleStatement>() {
+                self.current_module = mod_stmt.get_module_name().to_string();
+                self.env.declare_module(&self.current_module);
+            } else if let Some(import_stmt) = stmt.as_any().downcast_ref::<ImportStatement>() {
+                let name = import_stmt.get_module_name();
+                self.load_module(&name);
+                if let Some(alias) = import_stmt.get_alias() {
+                    self.module_aliases.insert(alias.to_string(), name);
+                }
+            } else if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
+                let func_name = func.get_name().to_string();
+                let return_type = self.get_data_type_from_ast(func.get_return_type());
+                self.env.declare_function(&func_name, &return_type, &self.current_module);
+            } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
+                let struct_name = struct_def.get_name().to_string();
+                let mut fields = HashMap::new();
+                for field in struct_def.get_fields() {
+                    let field_type = self.get_data_type_from_ast(field.field_type.as_deref());
+                    fields.insert(field.name.clone(), field_type);
+                }
+                self.struct_fields.insert(struct_name.clone(), fields);
+                self.env.declare_module(&struct_name);
+            } else if let Some(impl_block) = stmt.as_any().downcast_ref::<ImplBlock>() {
+                let prev_impl = self.current_impl_struct.clone();
+                self.current_impl_struct = Some(impl_block.get_struct_name().to_string());
+                for item in impl_block.get_items() {
+                    match item {
+                        ImplItem::Constructor(func) | ImplItem::Method(func) | ImplItem::Convert(func) => {
+                            let func_name = func.get_name().to_string();
+                            let return_type = self.get_data_type_from_ast(func.get_return_type());
+                            self.env.declare_function(&func_name, &return_type, &self.current_module);
+                        }
+                    }
+                }
+                self.current_impl_struct = prev_impl;
+            } else if let Some(export_stmt) = stmt.as_any().downcast_ref::<ExportStatement>() {
+                for name in export_stmt.get_names() {
+                    let parts: Vec<&str> = name.split('.').collect();
+                    let short = parts.last().unwrap_or(&"");
+                    let original_key = if parts.len() > 1 {
+                        let mod_part = parts[0];
+                        let resolved_mod = self.module_aliases.get(mod_part).map(|s| s.as_str()).unwrap_or(mod_part);
+                        format!("{}.{}", resolved_mod, short)
+                    } else {
+                        format!("{}.{}", self.current_module, name)
+                    };
+                    if let Some(sym) = self.env.lookup_symbol(&original_key) {
+                        let return_type = sym.data_type.clone();
+                        self.env.declare_function(short, &return_type, &self.current_module);
+                    }
+                }
+            }
+        }
+
+        // Restore context
+        self.current_module = prev_module;
+        self.current_module_dir = prev_dir;
+
+        self.loaded_programs.push(prog);
+    }
 }
 
 impl AstVisitor for SemanticAnalyzer {
@@ -198,11 +359,9 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_import_statement(&mut self, node: &ImportStatement) {
         let module_name = node.get_module_name();
         #[cfg(debug_assertions)]
-        println!("  Import module: {}", module_name);
+        println!("  Import module: {} (alias: {:?})", module_name, node.get_alias());
 
-        if module_name != "io" && module_name != "__builtins__" {
-            self.error(&format!("Unknown module: '{}'", module_name));
-        }
+        self.load_module(&module_name);
     }
 
     fn visit_function(&mut self, node: &Function) {
@@ -729,6 +888,14 @@ impl AstVisitor for SemanticAnalyzer {
 
         self.error(&format!("Unknown operator: {}", op));
         self.type_stack.push(DataType::Unknown);
+    }
+
+    fn visit_cast_expression(&mut self, node: &CastExpression) {
+        if let Some(expr) = node.get_expression() {
+            expr.accept(self);
+        }
+        let target_type = self.get_data_type_from_ast(Some(node.get_target_type()));
+        self.type_stack.push(target_type);
     }
 
     fn visit_unary_expression(&mut self, node: &UnaryExpression) {

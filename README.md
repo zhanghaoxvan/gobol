@@ -23,12 +23,9 @@ gobol/
 │   ├── executor.rs           # Executor
 │   ├── token.rs
 │   └── value.rs
-├── lib/                      # 标准库
-│   ├── __builtin__.gbl
-│   ├── __setup__.gbl
-│   ├── io.gbl
-│   ├── range.gbl
-│   └── vec.gbl
+├── lib/                      # Standard library
+│   ├── ***.gbl
+│   └── ***.gbl
 ├── example.gbl
 ├── Cargo.toml
 ├── README.md

@@ -29,7 +29,6 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() == 1 {
-        println!("Author: zhanghaoxvan in Class 18, Grade 7");
         println!("Usage:");
         println!("  {} <filename>", args[0]);
         return;

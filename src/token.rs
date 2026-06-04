@@ -16,15 +16,15 @@ pub enum TokenType {
 impl fmt::Display for TokenType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            TokenType::Identifier => "IDENTIFIER",
-            TokenType::Keyword => "KEYWORD",
-            TokenType::Number => "NUMBER",
-            TokenType::String => "STRING",
-            TokenType::FormatString => "FORMAT_STRING",
-            TokenType::Operator => "OPERATOR",
-            TokenType::EndOfLine => "END_OF_LINE",
-            TokenType::EndOfFile => "END_OF_FILE",
-            TokenType::Unknown => "UNKNOWN",
+            TokenType::Identifier => "identifier",
+            TokenType::Keyword => "keyword",
+            TokenType::Number => "number",
+            TokenType::String => "string",
+            TokenType::FormatString => "format_string",
+            TokenType::Operator => "operator",
+            TokenType::EndOfLine => "end_of_line",
+            TokenType::EndOfFile => "end_of_file",
+            TokenType::Unknown => "unknown",
         };
         write!(f, "{}", s)
     }
@@ -43,9 +43,4 @@ impl Token {
             value: value.into(),
         }
     }
-}
-
-#[cfg(debug_assertions)]
-pub fn token_type_to_string(token_type: &TokenType) -> String {
-    token_type.to_string()
 }

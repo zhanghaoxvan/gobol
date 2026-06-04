@@ -1,59 +1,71 @@
-mod ast;
-mod ast_builder;
-mod ast_printer;
-mod environment;
-mod executor;
-mod lexer;
-mod semantic_analyzer;
-mod token;
-mod value;
-
-use ast_builder::AstBuilder;
-#[cfg(debug_assertions)]
-use ast_printer::AstPrinter;
-use executor::Executor;
-use lexer::Lexer;
-use semantic_analyzer::SemanticAnalyzer;
+use gobol::ast_builder::AstBuilder;
+use gobol::ast_printer::AstPrinter;
+use gobol::executor::Executor;
+use gobol::lexer::Lexer;
+use gobol::semantic_analyzer::SemanticAnalyzer;
+use gobol::token;
 use std::env;
 use std::fs;
 use std::path::Path;
 
 fn get_source(file: &str) -> String {
-    fs::read_to_string(file).unwrap_or_else(|_| {
-        eprintln!("Error: Cannot open file '{}'", file);
-        String::new()
-    })
+    let source = match fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: Cannot open file '{}': {}", file, e);
+            std::process::exit(1);
+    }
+    };
+    source
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() == 1 {
+    let is_version = args.iter().any(|s| s == "--version");
+    let is_help = args.iter().any(|s| s == "--help");
+    
+    if is_help {
+        println!("Gobol - A test programming language");
+        println!();
         println!("Usage:");
-        println!("  {} <filename>", args[0]);
+        println!("  gobol <filename> [--verbose]    Run a Gobol script");
+        println!("  gobol --version                 Show version information");
+        println!("  gobol --help                    Show this help message");
+        println!();
+        println!("Options:");
+        println!("  --verbose, -v    Enable verbose output");
+        return;
+    }
+    if is_version {
+        println!("gobol 0.1.0");
         return;
     }
 
-    let source = get_source(&args[1]);
+    let is_verbose = args.iter().any(|s| s == "--verbose"); 
 
-    #[cfg(debug_assertions)]
-    {
+    let filename = match args.iter().skip(1).find(|s| !s.starts_with("-")) {
+        Some(f) => f,
+        None => {
+            eprintln!("Error: No filename provided");
+            std::process::exit(1);
+        }
+    };
+
+    let source = get_source(&filename);
+
+    if is_verbose {
         println!("===== Step 0: Reprint Source =====");
         println!("{}", source);
     }
-    #[cfg(debug_assertions)]
     let mut lexer = Lexer::new(source);
-    #[cfg(not(debug_assertions))]
-    let lexer = Lexer::new(source);
-
-    #[cfg(debug_assertions)]
-    {
+    if is_verbose {
         let mut tk = lexer.get_next_token();
         println!("===== Step 1: Tokenize =====");
         while tk.r#type != token::TokenType::EndOfFile {
             println!(
                 "Token(Type={}, Val='{}')",
-                token::token_type_to_string(&tk.r#type),
+                tk.r#type,
                 if tk.value == "\n" { "\\n".to_string() } else { tk.value.clone() }
             );
             tk = lexer.get_next_token();
@@ -81,8 +93,7 @@ fn main() {
         }
     };
 
-    #[cfg(debug_assertions)]
-    {
+    if is_verbose {
         let mut printer = AstPrinter::new();
         printer.visit(prog.as_ref());
         println!();
@@ -91,11 +102,16 @@ fn main() {
     }
 
     // Build lib search paths: relative to CWD and relative to input file
-    let mut lib_paths = vec!["lib".to_string()];
-    if let Some(parent) = Path::new(&args[1]).parent() {
+    let mut lib_paths = vec![
+        "std".to_string(),           // 1. ./std
+    ];
+
+    if let Some(parent) = Path::new(&filename).parent() {
+        // 2. <script_dir>/lib
         if let Some(p) = parent.join("lib").to_str() {
             lib_paths.push(p.to_string());
         }
+        // 3. <script_dir>/../lib
         if let Some(grandparent) = parent.parent() {
             if let Some(p) = grandparent.join("lib").to_str() {
                 lib_paths.push(p.to_string());
@@ -110,8 +126,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    #[cfg(debug_assertions)]
-    {
+    if is_verbose {
         println!();
         println!("======= Step 4: Execution =======");
     }

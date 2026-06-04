@@ -36,6 +36,9 @@ gobol/
 
 ## 🚀 Quick Start
 
+> [!IMPORTANT]
+> This content is outdated because of the `grape`.
+
 ### Compile
 
 ```bash

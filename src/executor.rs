@@ -65,8 +65,8 @@ pub struct Builtins {
 impl Builtins {
     pub fn new() -> Self {
         let mut functions: HashMap<String, BuiltinFn> = HashMap::new();
-        functions.insert("io.print".to_string(), builtin_print);
-        functions.insert("io.read".to_string(), builtin_read);
+        functions.insert("__builtins__._print".to_string(), builtin_print);
+        functions.insert("__builtins__._read".to_string(), builtin_read);
         functions.insert("__builtins__.panic".to_string(), builtin_panic);
         Builtins { functions }
     }

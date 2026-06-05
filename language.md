@@ -1,10 +1,10 @@
-# GoBol Language Documentation
+# Gobol Language Documentation
 
 ## 1. Overview
 
-GoBol is a statically-typed, modular programming language with generics support. It combines Rust's safety features with Go's simplicity. The compiler is written in Rust and targets both interpretation and native code generation.
+Gobol is a statically-typed, modular programming language with generics support. It combines Rust's safety features with Go's simplicity. The compiler is written in Rust and targets both interpretation and native code generation.
 
-GoBol 是一门静态类型、支持泛型的模块化编程语言。它融合了 Rust 的安全性特性和 Go 的简洁语法。编译器使用 Rust 编写，支持解释执行和原生代码生成。
+Gobol 是一门静态类型、支持泛型的模块化编程语言。它融合了 Rust 的安全性特性和 Go 的简洁语法。编译器使用 Rust 编写，支持解释执行和原生代码生成。
 
 **Author**: zhanghaoxvan
 
@@ -110,9 +110,9 @@ arr[0] = 100                     // Index assignment
 var matrix: int[][] = [[1, 2], [3, 4]]
 ```
 
-Arrays in GoBol are dynamic and automatically grow when capacity is exceeded. The `int[10]` syntax pre-allocates capacity but does not set length.
+Arrays in Gobol are dynamic and automatically grow when capacity is exceeded. The `int[10]` syntax pre-allocates capacity but does not set length.
 
-GoBol 中的数组是动态的，当容量不足时会自动扩容。`int[10]` 语法预分配容量但不设置长度。
+Gobol 中的数组是动态的，当容量不足时会自动扩容。`int[10]` 语法预分配容量但不设置长度。
 
 ---
 
@@ -485,7 +485,7 @@ func main(): int {
 
 ---
 
-## 17. Running GoBol Programs
+## 17. Running Gobol Programs
 
 ```bash
 cargo run --release -- example.gbl
@@ -513,4 +513,4 @@ cargo run --release -- example.gbl
 
 ---
 
-**GoBol — A safe, modern, and expressive programming language** 🚀
+**Gobol — A safe, modern, and expressive programming language** 🚀

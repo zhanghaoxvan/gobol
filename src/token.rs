@@ -44,3 +44,19 @@ impl Token {
         }
     }
 }
+
+#[allow(dead_code)]
+#[deprecated(note = "TokenType can now be turned into string inline")]
+fn token_type_to_str(r#type: &TokenType) -> &str {
+    match r#type {
+        TokenType::Identifier => "identifier",
+        TokenType::Keyword => "keyword",
+        TokenType::Number => "number",
+        TokenType::String => "string",
+        TokenType::FormatString => "format_string",
+        TokenType::Operator => "operator",
+        TokenType::EndOfLine => "end_of_line",
+        TokenType::EndOfFile => "end_of_file",
+        TokenType::Unknown => "unknown",
+    }
+}

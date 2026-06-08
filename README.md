@@ -1,4 +1,3 @@
-```markdown
 # Gobol
 
 [![Rust](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](https://www.rust-lang.org/)
@@ -177,4 +176,3 @@ See [Language Docs](language.md) for more details.
 See [LICENSE](LICENSE) for details.
 
 详见 [LICENSE](LICENSE) 文件。
-```

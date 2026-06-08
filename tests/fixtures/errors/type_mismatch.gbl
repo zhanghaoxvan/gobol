@@ -1,0 +1,6 @@
+module main
+
+func main(): int {
+    var x: int = "string"
+    return 0
+}

@@ -1,0 +1,11 @@
+module main
+
+func greet(name: str) {
+    io.print("Hello, ")
+    io.print(name)
+}
+
+func main(): int {
+    greet("Gobol")
+    return 0
+}

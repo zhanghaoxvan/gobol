@@ -1,0 +1,6 @@
+module main
+
+func main(): int {
+    io.print(undefined_var)
+    return 0
+}

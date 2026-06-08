@@ -101,23 +101,24 @@ fn main() {
         println!("======= Step 3: Semantic Analysis =======");
     }
 
-    // Build lib search paths: relative to CWD and relative to input file
-    let mut lib_paths = vec![
-        "std".to_string(),           // 1. ./std
-    ];
+    // Build lib search paths: local script lib first, then std
+    let mut lib_paths = Vec::new();
 
     if let Some(parent) = Path::new(&filename).parent() {
-        // 2. <script_dir>/lib
+        // 1. <script_dir>/lib (highest priority — local overrides)
         if let Some(p) = parent.join("lib").to_str() {
             lib_paths.push(p.to_string());
         }
-        // 3. <script_dir>/../lib
+        // 2. <script_dir>/../lib
         if let Some(grandparent) = parent.parent() {
             if let Some(p) = grandparent.join("lib").to_str() {
                 lib_paths.push(p.to_string());
             }
         }
     }
+
+    // 3. ./std (standard library, lowest priority)
+    lib_paths.push("std".to_string());
 
     let mut semantic_analyzer = SemanticAnalyzer::new();
     semantic_analyzer.set_lib_paths(lib_paths.clone());

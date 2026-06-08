@@ -188,6 +188,10 @@ impl Executor {
     }
 
     fn call_user_function(&mut self, func: &Function, args: &[RtValue]) {
+        self.call_user_function_with_copyback(func, args, &[])
+    }
+
+    fn call_user_function_with_copyback(&mut self, func: &Function, args: &[RtValue], copyback: &[(usize, String)]) {
         self.env.enter_scope();
 
         // Bind parameters to arguments
@@ -218,10 +222,30 @@ impl Executor {
             RtValue::None_
         };
 
+        // Capture modified array param values before exiting scope
+        let mut copyback_values: Vec<(String, RtValue)> = Vec::new();
+        if let Some(params) = func.get_parameters() {
+            for (idx, caller_var) in copyback {
+                if let Some(param) = params.get(*idx) {
+                    if let Some(val) = self.env.lookup(param.get_name()) {
+                        if matches!(val, RtValue::Array(_)) {
+                            copyback_values.push((caller_var.clone(), val.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
         self.returning = prev_returning;
         self.return_value = prev_return_value;
 
         self.env.exit_scope();
+
+        // Now update caller's variables (after function scope is gone)
+        for (caller_var, val) in copyback_values {
+            self.env.assign(&caller_var, val);
+        }
+
         self.push(result);
     }
 }
@@ -476,7 +500,7 @@ impl AstVisitor for Executor {
                                 body.accept(self);
                             }
                             if self.returning { break; }
-                            if self.continuing { self.continuing = false; continue; }
+                            if self.continuing { self.continuing = false; i += step; continue; }
                             if self.breaking { self.breaking = false; break; }
                             i += step;
                         }
@@ -487,7 +511,7 @@ impl AstVisitor for Executor {
                                 body.accept(self);
                             }
                             if self.returning { break; }
-                            if self.continuing { self.continuing = false; continue; }
+                            if self.continuing { self.continuing = false; i += step; continue; }
                             if self.breaking { self.breaking = false; break; }
                             i += step;
                         }
@@ -870,12 +894,70 @@ impl AstVisitor for Executor {
     fn visit_function_call(&mut self, node: &FunctionCall) {
         let func_name = self.resolve_function_name(node);
 
-        // Evaluate arguments
+        // Collect arguments. For method calls (obj.method), prepend self
         let mut args: Vec<RtValue> = Vec::new();
+        let mut method_target: Option<String> = None;
+        let mut array_arg_vars: Vec<(usize, String)> = Vec::new();
+
+        // Check if this is a method call — prepend self, track var name
+        if let Some(callee) = node.get_callee() {
+            if let Some(member) = callee.as_any().downcast_ref::<MemberAccess>() {
+                if let Some(obj) = member.get_object() {
+                    if let Some(obj_id) = obj.as_any().downcast_ref::<Identifier>() {
+                        if self.env.lookup(obj_id.get_name()).map_or(false, |v| !matches!(v, RtValue::None_)) {
+                            method_target = Some(obj_id.get_name().to_string());
+                            obj.accept(self);
+                            args.push(self.pop());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Evaluate explicit arguments, tracking array variable names for copy-back
         if let Some(arg_list) = node.get_arguments() {
-            for arg in arg_list {
+            for (i, arg) in arg_list.iter().enumerate() {
+                // Track if this argument is a simple variable (for copy-back)
+                if let Some(id) = arg.as_any().downcast_ref::<Identifier>() {
+                    let var_name = id.get_name();
+                    if self.env.lookup(var_name).map_or(false, |v| matches!(v, RtValue::Array(_))) {
+                        array_arg_vars.push((i, var_name.to_string()));
+                    }
+                }
                 arg.accept(self);
                 args.push(self.pop());
+            }
+        }
+
+        // Handle array methods (len, add) directly
+        if args.len() >= 1 && matches!(&args[0], RtValue::Array(_)) {
+            let method = if let Some(dot) = func_name.rfind('.') {
+                &func_name[dot + 1..]
+            } else {
+                &func_name
+            };
+            match method {
+                "len" => {
+                    if let RtValue::Array(elems) = &args[0] {
+                        self.push(RtValue::Int(elems.len() as i64));
+                        return;
+                    }
+                }
+                "add" => {
+                    if args.len() >= 2 {
+                        let val = args.remove(1);
+                        if let RtValue::Array(mut elems) = args.remove(0) {
+                            elems.push(val);
+                            // Update the variable in env
+                            if let Some(ref var_name) = method_target {
+                                self.env.assign(var_name, RtValue::Array(elems.clone()));
+                            }
+                            self.push(RtValue::Array(elems));
+                            return;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -887,6 +969,15 @@ impl AstVisitor for Executor {
         };
 
         if let Some(field_names) = self.struct_definitions.get(short_name) {
+            // Check if there's a user-defined constructor
+            let constructor_name = format!("{}.constructor", short_name);
+            if let Some(&func_ptr) = self.user_functions.get(&constructor_name) {
+                let func = unsafe { &*func_ptr };
+                self.call_user_function(func, &args);
+                return;
+            }
+
+            // No constructor: direct struct creation by positional field matching
             let mut fields = HashMap::new();
             for (i, field_name) in field_names.iter().enumerate() {
                 let value = if i < args.len() {
@@ -912,17 +1003,94 @@ impl AstVisitor for Executor {
         // Try user-defined function (qualified name first, then short name)
         if let Some(&func_ptr) = self.user_functions.get(&func_name) {
             let func = unsafe { &*func_ptr };
-            self.call_user_function(func, &args);
+            self.call_user_function_with_copyback(func, &args, &array_arg_vars);
             return;
         }
         if let Some(&func_ptr) = self.user_functions.get(short_name) {
             let func = unsafe { &*func_ptr };
-            self.call_user_function(func, &args);
+            self.call_user_function_with_copyback(func, &args, &array_arg_vars);
             return;
         }
 
         self.error(format!("Undefined function: '{}'", func_name));
         self.push(RtValue::None_);
+    }
+
+    fn visit_struct_literal(&mut self, node: &StructLiteral) {
+        let type_name = node.get_type_name().to_string();
+
+        // Get struct field definitions
+        let field_names = match self.struct_definitions.get(&type_name) {
+            Some(names) => names.clone(),
+            None => {
+                self.error(format!("Unknown struct type: '{}'", type_name));
+                self.push(RtValue::None_);
+                return;
+            }
+        };
+
+        // Initialize all fields to default values
+        let mut fields: HashMap<String, RtValue> = HashMap::new();
+        for fname in &field_names {
+            fields.insert(fname.clone(), RtValue::Int(0));
+        }
+
+        // Track which fields have been explicitly set (for positional matching)
+        let mut assigned: HashSet<String> = HashSet::new();
+        let mut positional_index: usize = 0;
+
+        for field_init in node.get_fields() {
+            match field_init {
+                StructFieldInit::Named { name, value } => {
+                    value.accept(self);
+                    let val = self.pop();
+                    fields.insert(name.clone(), val);
+                    assigned.insert(name.clone());
+                }
+                StructFieldInit::Positional(value) => {
+                    // Check if this is a spread (same-type struct)
+                    let mut is_spread = false;
+                    if let Some(id) = value.as_any().downcast_ref::<Identifier>() {
+                        if let Some(existing) = self.env.lookup(id.get_name()) {
+                            if let RtValue::Struct(existing_type, _) = existing {
+                                if existing_type == &type_name {
+                                    // Spread: copy all fields from the existing struct
+                                    if let RtValue::Struct(_, existing_fields) = existing {
+                                        for (k, v) in existing_fields {
+                                            fields.insert(k.clone(), v.clone());
+                                            assigned.insert(k.clone());
+                                        }
+                                    }
+                                    is_spread = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if !is_spread {
+                        // Positional: evaluate and assign to next unset field
+                        value.accept(self);
+                        let val = self.pop();
+
+                        // Find next unassigned field
+                        while positional_index < field_names.len()
+                            && assigned.contains(&field_names[positional_index])
+                        {
+                            positional_index += 1;
+                        }
+
+                        if positional_index < field_names.len() {
+                            let fname = &field_names[positional_index];
+                            fields.insert(fname.clone(), val);
+                            assigned.insert(fname.clone());
+                            positional_index += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.push(RtValue::Struct(type_name, fields));
     }
 
     fn visit_member_access(&mut self, node: &MemberAccess) {
@@ -1235,7 +1403,23 @@ impl Executor {
             if let Some(member) = callee.as_any().downcast_ref::<MemberAccess>() {
                 if let Some(obj) = member.get_object() {
                     if let Some(obj_id) = obj.as_any().downcast_ref::<Identifier>() {
-                        return format!("{}.{}", obj_id.get_name(), member.get_member());
+                        let obj_name = obj_id.get_name();
+                        let method_name = member.get_member();
+                        // Check if this is a method call on a runtime variable
+                        if self.env.lookup(obj_name).map_or(false, |v| !matches!(v, RtValue::None_)) {
+                            // Method dispatch: look up method by name
+                            let qualified = if self.current_module.is_empty() {
+                                method_name.to_string()
+                            } else {
+                                format!("{}.{}", self.current_module, method_name)
+                            };
+                            if self.user_functions.contains_key(&qualified) {
+                                return qualified;
+                            }
+                            return method_name.to_string();
+                        }
+                        // Module-qualified call: module.func
+                        return format!("{}.{}", obj_name, method_name);
                     }
                 }
             }
@@ -1255,6 +1439,11 @@ impl Executor {
             let rel_setup = format!("{}/{}/__setup__.gbl", dir, path_parts.join("/"));
             if Path::new(&rel_setup).exists() {
                 return Some(rel_setup);
+            }
+            // Also check in base_dir/lib/ (local lib directory)
+            let rel_lib = format!("{}/lib/{}", dir, relative);
+            if Path::new(&rel_lib).exists() {
+                return Some(rel_lib);
             }
         }
 

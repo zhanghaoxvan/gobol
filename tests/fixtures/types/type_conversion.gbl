@@ -1,0 +1,15 @@
+module main
+
+func main(): int {
+    var a: int = 42
+    var b: float = a as float
+    var c: str = a as str
+    var d: bool = 1 as bool
+    
+    io.print(b)
+    io.print(" ")
+    io.print(c)
+    io.print(" ")
+    io.print(d)
+    return 0
+}

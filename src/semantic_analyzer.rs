@@ -107,6 +107,12 @@ impl SemanticAnalyzer {
             None => return DataType::None_,
         };
 
+        // Check for NullableType
+        if let Some(nullable) = tp.as_type_any().downcast_ref::<NullableType>() {
+            let inner = self.get_data_type_from_ast(Some(nullable.get_inner_type()));
+            return DataType::Nullable(Box::new(inner));
+        }
+
         // Check for ArrayType via downcast
         if let Some(arr) = tp.as_type_any().downcast_ref::<ArrayType>() {
             let elem = arr.get_element_type();
@@ -164,6 +170,11 @@ impl SemanticAnalyzer {
             let rel_setup = format!("{}/{}/__setup__.gbl", dir, path_parts.join("/"));
             if Path::new(&rel_setup).exists() {
                 return Some(rel_setup);
+            }
+            // Also check in base_dir/lib/ (local lib directory)
+            let rel_lib = format!("{}/lib/{}", dir, relative);
+            if Path::new(&rel_lib).exists() {
+                return Some(rel_lib);
             }
         }
 
@@ -421,7 +432,15 @@ impl AstVisitor for SemanticAnalyzer {
         let param_name = node.get_name();
         let param_type = self.get_data_type_from_ast(node.get_type());
 
-        self.env.declare_variable(param_name, &param_type, false);
+        // Array parameters are always mutable (reference type)
+        let is_array = node.get_type().map_or(false, |t| t.as_type_any().downcast_ref::<ArrayType>().is_some());
+        self.env.declare_variable(param_name, &param_type, is_array);
+        // Mark as array if the parameter type is an array
+        if is_array {
+            if let Some(sym) = self.env.lookup_symbol_mut(param_name) {
+                sym.is_array = true;
+            }
+        }
         #[cfg(debug_assertions)]
         println!("    Parameter: {} : {}", param_name, data_type_to_string(param_type));
     }
@@ -583,7 +602,9 @@ impl AstVisitor for SemanticAnalyzer {
             iter.accept(self);
             let iter_type = self.get_current_type();
 
-            if iter_type != DataType::Int {
+            let is_valid = matches!(iter_type, DataType::Int)
+                || matches!(&iter_type, DataType::Struct(s) if s == "range");
+            if !is_valid {
                 self.error("For loop iterable must be range expression");
             }
         }
@@ -864,6 +885,58 @@ impl AstVisitor for SemanticAnalyzer {
             return;
         }
 
+        // 处理复合赋值运算符 +=, -=, *=, /=
+        if op == "+=" || op == "-=" || op == "*=" || op == "/=" {
+            let mut is_assignable = false;
+            let mut var_name = String::new();
+
+            if let Some(left) = node.get_left() {
+                if let Some(id) = left.as_any().downcast_ref::<Identifier>() {
+                    var_name = id.get_name().to_string();
+                    if let Some(sym) = self.env.lookup_symbol(&var_name) {
+                        if sym.is_mut {
+                            is_assignable = true;
+                        } else {
+                            self.error(&format!("Cannot assign to constant variable '{}'", var_name));
+                        }
+                    } else {
+                        self.error(&format!("Undeclared variable '{}'", var_name));
+                    }
+                } else {
+                    self.error("Left side of compound assignment must be a variable");
+                    self.type_stack.push(DataType::Unknown);
+                    return;
+                }
+            }
+
+            if !is_assignable {
+                if var_name.is_empty() {
+                    self.error("Left side of compound assignment must be a mutable variable");
+                }
+                self.type_stack.push(DataType::Unknown);
+                return;
+            }
+
+            // 检查类型兼容性
+            let base_op = &op[0..1];
+            
+            // 字符串拼接
+            if base_op == "+" && (left_type == DataType::Str || right_type == DataType::Str) {
+                self.type_stack.push(DataType::Str);
+                return;
+            }
+
+            // 数值运算
+            if !Environment::is_numeric_type(&left_type) || !Environment::is_numeric_type(&right_type) {
+                self.error(&format!("Operator '{}' requires numeric operands", op));
+                self.type_stack.push(DataType::Unknown);
+                return;
+            }
+
+            self.type_stack.push(left_type);
+            return;
+        }
+
         if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
             if !Environment::is_type_compatible(&left_type, &right_type)
                 && !Environment::is_type_compatible(&right_type, &left_type)
@@ -950,8 +1023,57 @@ impl AstVisitor for SemanticAnalyzer {
             return;
         }
 
-        let full_name = format!("{}.{}", module_name, func_name);
-        let sym_data_type = self.env.lookup_symbol(&full_name).map(|s| s.data_type.clone());
+        // Build lookup name. For method calls (obj.method), resolve via struct type
+        let full_name = if module_name != self.current_module {
+            // Check if module_name is a variable (not a module) → method dispatch
+            let is_var = self.env.lookup_symbol(&module_name)
+                .map_or(false, |s| s.symbol_type != SymbolType::Module);
+            if is_var {
+                // For struct types, look up method in current module
+                // For arrays, the method is handled by the executor
+                format!("{}.{}", self.current_module, func_name)
+            } else {
+                format!("{}.{}", module_name, func_name)
+            }
+        } else {
+            format!("{}.{}", module_name, func_name)
+        };
+
+        // Try qualified lookup, then short-name lookup
+        let sym_data_type = self.env.lookup_symbol(&full_name)
+            .or_else(|| self.env.lookup_symbol(&func_name))
+            .map(|s| s.data_type.clone());
+
+        // If not found but it's a method call on a variable (e.g. arr.len, arr.add),
+        // allow it with sensible return types
+        if sym_data_type.is_none() && module_name != self.current_module {
+            if let Some(var_sym) = self.env.lookup_symbol(&module_name) {
+                if var_sym.is_array {
+                    // Array methods: len() -> Int, add() -> None_
+                    if func_name == "len" {
+                        // Process explicit arguments (none expected)
+                        if let Some(args) = node.get_arguments() {
+                            for arg in args {
+                                arg.accept(self);
+                                self.type_stack.pop();
+                            }
+                        }
+                        self.type_stack.push(DataType::Int);
+                        return;
+                    }
+                    if func_name == "add" {
+                        if let Some(args) = node.get_arguments() {
+                            for arg in args {
+                                arg.accept(self);
+                                self.type_stack.pop();
+                            }
+                        }
+                        self.type_stack.push(DataType::None_);
+                        return;
+                    }
+                }
+            }
+        }
 
         match sym_data_type {
             Some(dt) => {
@@ -969,6 +1091,130 @@ impl AstVisitor for SemanticAnalyzer {
                 self.type_stack.push(DataType::Unknown);
             }
         }
+    }
+
+    fn visit_struct_literal(&mut self, node: &StructLiteral) {
+        let type_name = node.get_type_name().to_string();
+
+        // Look up struct definition
+        let struct_fields = match self.struct_fields.get(&type_name) {
+            Some(fields) => fields.clone(),
+            None => {
+                self.error(&format!("Unknown struct type: '{}'", type_name));
+                self.type_stack.push(DataType::Unknown);
+                return;
+            }
+        };
+
+        let field_names: Vec<String> = struct_fields.keys().cloned().collect();
+        let mut named_assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut positional_index = 0;
+
+        for field_init in node.get_fields() {
+            match field_init {
+                StructFieldInit::Named { name, value } => {
+                    // Verify field exists
+                    if !struct_fields.contains_key(name) {
+                        self.error(&format!(
+                            "Struct '{}' has no field '{}'",
+                            type_name, name
+                        ));
+                        self.type_stack.push(DataType::Unknown);
+                        return;
+                    }
+                    // Only error on duplicate NAMED assignments (overriding spread/positional is OK)
+                    if named_assigned.contains(name) {
+                        self.error(&format!(
+                            "Field '{}' assigned multiple times in struct literal",
+                            name
+                        ));
+                        self.type_stack.push(DataType::Unknown);
+                        return;
+                    }
+                    named_assigned.insert(name.clone());
+                    covered.insert(name.clone());
+
+                    // Type-check the value
+                    value.accept(self);
+                    let value_type = self.get_current_type();
+                    self.type_stack.pop();
+
+                    let expected_type = struct_fields.get(name).cloned().unwrap_or(DataType::Unknown);
+                    if expected_type != DataType::Unknown && value_type != DataType::Unknown {
+                        self.check_type_compatibility(
+                            expected_type,
+                            value_type,
+                            &format!("struct literal field '{}'", name),
+                        );
+                    }
+                }
+                StructFieldInit::Positional(value) => {
+                    // Check if it's a spread (identifier of same struct type)
+                    let mut is_spread = false;
+                    if let Some(id) = value.as_any().downcast_ref::<Identifier>() {
+                        let id_name = id.get_name();
+                        let full_name = format!("{}.{}", self.current_module, id_name);
+                        if let Some(sym) = self.env.lookup_symbol(&full_name)
+                            .or_else(|| self.env.lookup_symbol(id_name))
+                        {
+                            if let DataType::Struct(ref s) = sym.data_type {
+                                if s == &type_name {
+                                    is_spread = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if is_spread {
+                        // Spread: all unassigned fields are filled from this struct
+                        value.accept(self);
+                        let _spread_type = self.get_current_type();
+                        self.type_stack.pop();
+                        // Mark all fields as covered (but NOT named_assigned, so named inits can override)
+                        for fname in &field_names {
+                            covered.insert(fname.clone());
+                        }
+                    } else {
+                        // Positional: match to next uncovered field
+                        value.accept(self);
+                        let value_type = self.get_current_type();
+                        self.type_stack.pop();
+
+                        // Skip fields already covered by spread or previous positional
+                        while positional_index < field_names.len()
+                            && covered.contains(&field_names[positional_index])
+                        {
+                            positional_index += 1;
+                        }
+
+                        if positional_index >= field_names.len() {
+                            self.error(&format!(
+                                "Too many positional fields in struct literal for '{}'",
+                                type_name
+                            ));
+                            self.type_stack.push(DataType::Unknown);
+                            return;
+                        }
+
+                        let field_name = &field_names[positional_index];
+                        covered.insert(field_name.clone());
+                        positional_index += 1;
+
+                        let expected_type = struct_fields.get(field_name).cloned().unwrap_or(DataType::Unknown);
+                        if expected_type != DataType::Unknown && value_type != DataType::Unknown {
+                            self.check_type_compatibility(
+                                expected_type,
+                                value_type,
+                                &format!("struct literal field '{}'", field_name),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        self.type_stack.push(DataType::Struct(type_name));
     }
 
     fn visit_member_access(&mut self, node: &MemberAccess) {

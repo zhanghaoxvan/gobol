@@ -1,0 +1,11 @@
+module main
+
+func main(): int {
+    var arr: int[] = [10, 20, 30, 40, 50]
+    io.print(arr[0])
+    io.print(" ")
+    io.print(arr[2])
+    io.print(" ")
+    io.print(arr[4])
+    return 0
+}

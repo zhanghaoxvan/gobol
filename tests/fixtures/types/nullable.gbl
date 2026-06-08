@@ -1,0 +1,11 @@
+module main
+
+func main(): int {
+    var opt: int? = null
+    opt = 42
+    
+    if opt != null {
+        io.print(opt)
+    }
+    return 0
+}

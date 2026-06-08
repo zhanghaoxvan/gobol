@@ -656,12 +656,15 @@ impl AstBuilder {
 
         if self.match_value("?") {
             self.advance();
+            tp = Box::new(NullableType::new(tp));
         }
 
         Some(tp)
     }
 
     fn parse_block(&mut self) -> Option<Box<Block>> {
+        
+        eprintln!("[DEBUG] parse_block: token = {:?}", self.current_token());
         let mut block = Block::new();
 
         while self.match_type(&TokenType::EndOfFile) {
@@ -719,6 +722,7 @@ impl AstBuilder {
     }
 
     fn parse_declaration(&mut self) -> Option<Box<dyn Statement>> {
+        eprintln!("[DEBUG] parse_declaration: token = {:?}", self.current_token());
         let keyword = self.current_token().value.clone();
         self.advance();
 
@@ -767,6 +771,8 @@ impl AstBuilder {
     }
 
     fn parse_for_statement(&mut self) -> Option<Box<dyn Statement>> {
+        
+        eprintln!("[DEBUG] parse_for_statement: token = {:?}", self.current_token());
         self.advance(); // consume 'for'
 
         if !self.match_type(&TokenType::Identifier) {
@@ -797,56 +803,32 @@ impl AstBuilder {
     }
 
     fn parse_range_or_iterable(&mut self) -> Option<Box<dyn Expression>> {
-        // Try range(x, y) first
-        if self.match_type(&TokenType::Identifier) && self.current_token().value == "range" {
-            return self.parse_range();
-        }
-
-        // Try expr .. expr pattern
-        let first = self.parse_expression()?;
+        let start = self.parse_expression()?;
 
         if self.match_value("..") {
-            self.advance();
-            let second = self.parse_expression()?;
-            let mut args: Vec<Box<dyn Expression>> = Vec::new();
-            args.push(first);
-            args.push(second);
-            // Check if first > second for descending (constant fold at parse time)
-            // At runtime, builtin_range handles 2-arg step direction
-            return Some(Box::new(RangeExpression::new(args)));
-        }
-
-        Some(first)
-    }
-
-    fn parse_range(&mut self) -> Option<Box<dyn Expression>> {
-        if !(self.match_type(&TokenType::Identifier) && self.current_token().value == "range") {
-            self.log_error("Expected 'range'");
-            return None;
-        }
-        self.advance();
-
-        self.consume_value("(", "Expected '(' after 'range'");
-
-        let mut args: Vec<Box<dyn Expression>> = Vec::new();
-
-        while !self.match_value(")") && !self.error_occurred {
-            let arg = self.parse_expression();
-            if let Some(a) = arg {
-                args.push(a);
-            }
-
-            if self.match_value(",") {
-                self.advance();
+            self.advance(); // consume '..'
+            let end = self.parse_expression()?;
+            
+            // 尝试优化：如果两端都是数字，编译时确定步长
+            let step = if let (Some(start_val), Some(end_val)) = (as_number(&start), as_number(&end)) {
+                let step_val = if start_val > end_val { -1.0 } else { 1.0 };
+                Some(Box::new(NumberLiteral::new(step_val)) as Box<dyn Expression>)
             } else {
-                break;
+                // 运行时由 range 函数根据 start 和 end 的大小决定步长
+                None
+            };
+            
+            let range_func = Box::new(Identifier::new("range"));
+            let mut args = vec![start, end];
+            if let Some(s) = step {
+                args.push(s);
             }
+            
+            return Some(Box::new(FunctionCall::new(Some(range_func), Some(args))));
         }
 
-        self.consume_value(")", "Expected ')' after range arguments");
-
-        Some(Box::new(RangeExpression::new(args)))
-    }
+        Some(start)
+        }
 
     fn parse_format_string(&self, format_str: &str) -> Option<Box<dyn Expression>> {
         Some(Box::new(FormatString::new(format_str)))
@@ -1014,67 +996,79 @@ impl AstBuilder {
     }
 
     fn parse_primary(&mut self) -> Option<Box<dyn Expression>> {
+        // 标识符 (可能是变量名或结构体类型名)
         if self.match_type(&TokenType::Identifier) {
             let name = self.current_token().value.clone();
             self.advance();
+            
+            // 检查是否是结构体字面量: TypeName { ... }
+            // 通过大写开头判断类型名（遵循Go命名约定）
+            if self.match_value("{") && name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                return self.parse_struct_literal(Box::new(Identifier::new(name)));
+            }
+            
             return Some(Box::new(Identifier::new(name)));
         }
 
+        // 数字字面量
         if self.match_type(&TokenType::Number) {
             let value: f64 = self.current_token().value.parse().unwrap_or(0.0);
             self.advance();
             return Some(Box::new(NumberLiteral::new(value)));
         }
 
+        // 字符串字面量
         if self.match_type(&TokenType::String) {
             let value = self.current_token().value.clone();
             self.advance();
             return Some(Box::new(StringLiteral::new(value)));
         }
 
+        // 格式化字符串
         if self.match_type(&TokenType::FormatString) {
             let value = self.current_token().value.clone();
             self.advance();
             return self.parse_format_string(&value);
         }
 
+        // 关键字字面量
         if self.match_type(&TokenType::Keyword) {
             let value = self.current_token().value.clone();
-            if value == "true" || value == "false" {
-                self.advance();
-                return Some(Box::new(BooleanLiteral::new(value == "true")));
-            }
-            if value == "null" {
-                self.advance();
-                return Some(Box::new(NullLiteral::new()));
-            }
-            if value == "self" {
-                self.advance();
-                return Some(Box::new(Identifier::new("self")));
-            }
-            if value == "if" {
-                return self.parse_if_expression();
-            }
-            if value == "new" {
-                return self.parse_new_expression();
+            match value.as_str() {
+                "true" | "false" => {
+                    self.advance();
+                    return Some(Box::new(BooleanLiteral::new(value == "true")));
+                }
+                "null" => {
+                    self.advance();
+                    return Some(Box::new(NullLiteral::new()));
+                }
+                "self" => {
+                    self.advance();
+                    return Some(Box::new(Identifier::new("self")));
+                }
+                "if" => return self.parse_if_expression(),
+                "new" => return self.parse_new_expression(),
+                _ => {}
             }
         }
 
+        // 数组字面量: [1, 2, 3]
+        if self.match_value("[") {
+            return self.parse_array_literal();
+        }
+
+        // 括号表达式: (1 + 2)
         if self.match_value("(") {
             self.advance();
             let expr = self.parse_expression()?;
-            // Handle tuple expressions (expr, expr, ...)
-            // For now, just skip extra expressions
+            // 处理元组（简单地跳过额外的表达式）
             while self.match_value(",") {
                 self.advance();
                 self.parse_expression();
             }
             self.consume_value(")", "Expected ')' after expression");
             return Some(Box::new(GroupedExpression::new(Some(expr))));
-        }
-
-        if self.match_value("[") {
-            return self.parse_array_literal();
         }
 
         self.log_error(&format!("Unexpected token in expression: {}", self.current_token().value));
@@ -1089,6 +1083,45 @@ impl AstBuilder {
         self.consume_value(")", "Expected ')' after arguments");
 
         Some(Box::new(FunctionCall::new(Some(callee), args)))
+    }
+
+    fn parse_struct_literal(&mut self, type_expr: Box<dyn Expression>) -> Option<Box<dyn Expression>> {
+        // Extract type name from the expression (must be an Identifier)
+        let type_name = if let Some(id) = type_expr.as_any().downcast_ref::<Identifier>() {
+            id.get_name().to_string()
+        } else {
+            self.log_error("Expected type name before '{'");
+            return Some(type_expr);
+        };
+
+        self.advance(); // consume '{'
+
+        let mut fields: Vec<StructFieldInit> = Vec::new();
+
+        while !self.match_value("}") && !self.error_occurred {
+            // Peek ahead: if we see `identifier :`, it's a named field
+            if self.match_type(&TokenType::Identifier) && self.peek_next_token().value == ":" {
+                let name = self.current_token().value.clone();
+                self.advance(); // consume identifier
+                self.advance(); // consume ':'
+                let value = self.parse_expression()?;
+                fields.push(StructFieldInit::Named { name, value });
+            } else if !self.match_value("}") {
+                // Positional field: bare expression (or spread identifier)
+                let value = self.parse_expression()?;
+                fields.push(StructFieldInit::Positional(value));
+            }
+
+            if self.match_value(",") {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.consume_value("}", "Expected '}' after struct literal");
+
+        Some(Box::new(StructLiteral::new(type_name, fields)))
     }
 
     fn parse_argument_list(&mut self) -> Option<Vec<Box<dyn Expression>>> {
@@ -1113,26 +1146,49 @@ impl AstBuilder {
     }
 
     fn parse_array_literal(&mut self) -> Option<Box<dyn Expression>> {
+        
+        eprintln!("[DEBUG] parse_array_literal: current token = {:?}", self.current_token());
         self.advance(); // consume '['
 
         let mut elements: Vec<Box<dyn Expression>> = Vec::new();
 
         while !self.match_value("]") && !self.error_occurred {
             if self.match_value(",") {
+                
+                eprintln!("[DEBUG] skipping comma");
                 self.advance();
                 continue;
             }
-            let elem = self.parse_expression()?;
+            
+            eprintln!("[DEBUG] about to parse element, token = {:?}", self.current_token());
+            let elem = match self.parse_expression() {
+                Some(e) => {
+                    
+                    eprintln!("[DEBUG] parsed element OK");
+                    e
+                }
+                None => {
+                    
+                    eprintln!("[DEBUG] parse_expression returned None, token = {:?}", self.current_token());
+                    return None;
+                }
+            };
             elements.push(elem);
 
             if self.match_value(",") {
+                
+                eprintln!("[DEBUG] comma after element");
                 self.advance();
             } else {
+                
+                eprintln!("[DEBUG] no comma, breaking");
                 break;
             }
         }
-
+        
+        eprintln!("[DEBUG] before consume ']', token = {:?}", self.current_token());
         self.consume_value("]", "Expected ']' after array literal");
+        eprintln!("[DEBUG] array literal success, {} elements", elements.len());
         Some(Box::new(ArrayLiteral::new(elements)))
     }
 
@@ -1227,15 +1283,20 @@ impl AstBuilder {
         let else_branch = if self.match_value("else") {
             self.advance();
 
-            self.consume_value("{", "Expect '{' at start of branch body");
-            self.consume_end_of_line();
+            if self.match_value("if") {
+                let inner_if = self.parse_if_statement()?;
+                Some(inner_if)
+            } else {
+                self.consume_value("{", "Expect '{' at start of branch body");
+                self.consume_end_of_line();
 
-            let else_block = self.parse_block();
+                let else_block = self.parse_block();
 
-            self.consume_value("}", "Expect '}' at end of branch body");
-            self.consume_end_of_line();
+                self.consume_value("}", "Expect '}' at end of branch body");
+                self.consume_end_of_line();
 
-            else_block.map(|b| b as Box<dyn Statement>)
+                else_block.map(|b| b as Box<dyn Statement>)
+            }
         } else {
             None
         };
@@ -1277,4 +1338,10 @@ impl AstBuilder {
         self.consume_end_of_line();
         Some(Box::new(ContinueStatement::new()))
     }
+}
+
+// Helpers out of the AST builder
+
+fn as_number(expr: &Box<dyn Expression>) -> Option<f64> {
+    expr.as_any().downcast_ref::<NumberLiteral>().map(|n| n.get_value())
 }

@@ -1,0 +1,18 @@
+module main
+
+struct Rectangle {
+    width: int,
+    height: int
+}
+
+impl Rectangle {
+    func area(self): int {
+        return self.width * self.height
+    }
+}
+
+func main(): int {
+    var rect: Rectangle = Rectangle{width: 10, height: 20}
+    io.print(rect.area())
+    return 0
+}

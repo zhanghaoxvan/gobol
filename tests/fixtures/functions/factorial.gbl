@@ -1,0 +1,14 @@
+module main
+
+func factorial(n: int): int {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+func main(): int {
+    var result = factorial(5)
+    io.print(result)
+    return 0
+}

@@ -1,0 +1,10 @@
+module main
+
+func missing_return(): int {
+    var x = 10
+}
+
+func main(): int {
+    missing_return()
+    return 0
+}

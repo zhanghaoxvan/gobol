@@ -1,0 +1,21 @@
+module main
+
+func is_prime(n: int): bool {
+    if n < 2 { return false }
+    var i = 2
+    while i * i <= n {
+        if n % i == 0 { return false }
+        i += 1
+    }
+    return true
+}
+
+func main(): int {
+    for i in 0..30 {
+        if is_prime(i) {
+            io.print(i)
+            io.print(" ")
+        }
+    }
+    return 0
+}

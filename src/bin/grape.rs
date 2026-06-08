@@ -201,7 +201,7 @@ fn cmd_init() -> Result<()> {
         let content = r#"// Your Gobol code here
 // Run with: grape run
 
-fn main() {
+func main() {
     println("Hello from Gobol!");
 }
 "#;
@@ -378,7 +378,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
     let is_verbose = args.iter().any(|a| a == "--verbose");
     let no_check = args.iter().any(|a| a == "--no-check");
 
-    println!("🏃 Running Gobol program...");
+    println!(" Running Gobol program...");
 
     if !Path::new("grape.toml").exists() {
         return Err(GrapeError::NotFound(
@@ -390,7 +390,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
     
     // 检查锁文件
     if !no_check && !Path::new("grape.lock").exists() {
-        println!("⚠ grape.lock not found, generating...");
+        println!("grape.lock not found, generating...");
         update_lock_file(&config)?;
     } else if !no_check {
         verify_lock_file(&config)?;

@@ -1,0 +1,17 @@
+module main
+
+func main(): int {
+    var arr: int[] = []
+    arr.add(10)
+    arr.add(20)
+    arr.add(30)
+    
+    io.print(arr.len())
+    io.print(" ")
+    io.print(arr[0])
+    io.print(" ")
+    io.print(arr[1])
+    io.print(" ")
+    io.print(arr[2])
+    return 0
+}

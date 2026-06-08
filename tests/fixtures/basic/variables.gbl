@@ -1,0 +1,14 @@
+module main
+
+func main(): int {
+    var x: int = 42
+    var y = 3.14
+    val name: str = "Gobol"
+    
+    io.print(x)
+    io.print(" ")
+    io.print(y)
+    io.print(" ")
+    io.print(name)
+    return 0
+}

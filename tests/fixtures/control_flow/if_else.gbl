@@ -1,0 +1,12 @@
+module main
+
+func main(): int {
+    var x = 10
+    
+    if x > 5 {
+        io.print("greater")
+    } else {
+        io.print("less")
+    }
+    return 0
+}

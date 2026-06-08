@@ -1,0 +1,14 @@
+module main
+
+struct Point {
+    x: int,
+    y: int
+}
+
+func main(): int {
+    var p: Point = Point{x: 10, y: 20}
+    io.print(p.x)
+    io.print(" ")
+    io.print(p.y)
+    return 0
+}

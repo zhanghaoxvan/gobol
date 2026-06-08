@@ -1,0 +1,16 @@
+module main
+
+func fib(n: int): int {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+func main(): int {
+    for i in 0..10 {
+        io.print(fib(i))
+        io.print(" ")
+    }
+    return 0
+}

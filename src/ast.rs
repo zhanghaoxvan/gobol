@@ -47,6 +47,7 @@ pub trait AstVisitor {
     fn visit_format_string(&mut self, _node: &FormatString) {}
     fn visit_range_expression(&mut self, _node: &RangeExpression) {}
     fn visit_array_literal(&mut self, _node: &ArrayLiteral) {}
+    fn visit_struct_literal(&mut self, _node: &StructLiteral) {}
 }
 
 // ==================== Node ====================
@@ -197,6 +198,45 @@ impl Type for ArrayType {
         // 对于数组类型，返回完整类型名不方便，使用 get_full_name
         // 但为了 trait 兼容，返回基础类型名
         self.get_base_type_name()
+    }
+    fn as_type(&self) -> &dyn Type {
+        self
+    }
+    fn as_type_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ==================== NullableType ====================
+
+pub struct NullableType {
+    pub inner_type: Box<dyn Type>,
+}
+
+impl NullableType {
+    pub fn new(inner_type: Box<dyn Type>) -> Self {
+        NullableType { inner_type }
+    }
+
+    pub fn get_inner_type(&self) -> &dyn Type {
+        &*self.inner_type
+    }
+}
+
+impl AstNode for NullableType {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_basic_type(self.inner_type.as_any().downcast_ref::<BasicType>().unwrap_or_else(|| {
+            panic!("NullableType inner must be BasicType");
+        }));
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Type for NullableType {
+    fn get_name(&self) -> &str {
+        self.inner_type.get_name()
     }
     fn as_type(&self) -> &dyn Type {
         self
@@ -1688,6 +1728,54 @@ impl AstNode for ArrayLiteral {
 }
 
 impl Expression for ArrayLiteral {
+    fn as_expression(&self) -> &dyn Expression {
+        self
+    }
+}
+
+// ==================== StructFieldInit ====================
+
+pub enum StructFieldInit {
+    /// Named field: `x: 10`
+    Named { name: String, value: Box<dyn Expression> },
+    /// Positional field: `10` (matched to field by position)
+    Positional(Box<dyn Expression>),
+}
+
+// ==================== StructLiteral ====================
+
+pub struct StructLiteral {
+    type_name: String,
+    fields: Vec<StructFieldInit>,
+}
+
+impl StructLiteral {
+    pub fn new(type_name: impl Into<String>, fields: Vec<StructFieldInit>) -> Self {
+        StructLiteral {
+            type_name: type_name.into(),
+            fields,
+        }
+    }
+
+    pub fn get_type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn get_fields(&self) -> &Vec<StructFieldInit> {
+        &self.fields
+    }
+}
+
+impl AstNode for StructLiteral {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_struct_literal(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Expression for StructLiteral {
     fn as_expression(&self) -> &dyn Expression {
         self
     }

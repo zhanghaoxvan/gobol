@@ -1,0 +1,7 @@
+module main
+
+func main(): int {
+    val x = 10
+    x = 20
+    return 0
+}

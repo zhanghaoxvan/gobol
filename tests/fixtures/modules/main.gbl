@@ -1,0 +1,13 @@
+module main
+
+import math
+
+func main(): int {
+    var sum = math.add(10, 20)
+    var product = math.multiply(5, 6)
+    io.print("sum: ")
+    io.print(sum)
+    io.print(" product: ")
+    io.print(product)
+    return 0
+}

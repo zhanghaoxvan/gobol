@@ -392,6 +392,13 @@ impl Environment {
         if target == source {
             return true;
         }
+        // None_ is compatible with Nullable<T>
+        if let DataType::Nullable(inner) = target {
+            if *source == DataType::None_ {
+                return true;
+            }
+            return Self::is_type_compatible(inner, source);
+        }
         if *target == DataType::Float && *source == DataType::Int {
             return true;
         }

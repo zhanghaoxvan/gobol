@@ -469,4 +469,24 @@ impl AstVisitor for AstPrinter {
         }
         print!("]");
     }
+
+    fn visit_struct_literal(&mut self, node: &StructLiteral) {
+        print!("{}", node.get_type_name());
+        print!("{{");
+        for (i, field) in node.get_fields().iter().enumerate() {
+            if i > 0 {
+                print!(", ");
+            }
+            match field {
+                StructFieldInit::Named { name, value } => {
+                    print!("{}: ", name);
+                    value.accept(self);
+                }
+                StructFieldInit::Positional(value) => {
+                    value.accept(self);
+                }
+            }
+        }
+        print!("}}");
+    }
 }

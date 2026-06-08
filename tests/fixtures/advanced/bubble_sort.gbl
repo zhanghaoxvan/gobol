@@ -1,0 +1,29 @@
+module main
+
+func bubble_sort(arr: int[]) {
+    var n = arr.len()
+    var i = 0
+    while i < n - 1 {
+        var j = 0
+        while j < n - i - 1 {
+            if arr[j] > arr[j + 1] {
+                var temp = arr[j]
+                arr[j] = arr[j + 1]
+                arr[j + 1] = temp
+            }
+            j += 1
+        }
+        i += 1
+    }
+}
+
+func main(): int {
+    var arr: int[] = [64, 34, 25, 12, 22, 11, 90]
+    bubble_sort(arr)
+    
+    for i in arr {
+        io.print(i)
+        io.print(" ")
+    }
+    return 0
+}

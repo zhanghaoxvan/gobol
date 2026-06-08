@@ -87,11 +87,11 @@ impl SemanticAnalyzer {
     pub fn print_errors(&self) {
         if self.errors.is_empty() {
             #[cfg(debug_assertions)]
-            println!("✅ Semantic analysis passed!");
+            println!("Semantic analysis passed!");
         } else {
-            println!("❌ Semantic analysis failed with {} errors:", self.errors.len());
+            println!("Semantic analysis failed with {} errors:", self.errors.len());
             for err in &self.errors {
-                println!("  ⚠️  {}", err);
+                println!("    {}", err);
             }
         }
     }

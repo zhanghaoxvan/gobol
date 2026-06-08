@@ -202,7 +202,7 @@ fn cmd_init() -> Result<()> {
 // Run with: grape run
 
 func main() {
-    println("Hello from Gobol!");
+    print("Hello from Gobol!\n")
 }
 "#;
         fs::write("main.gbl", content).map_err(GrapeError::Io)?;

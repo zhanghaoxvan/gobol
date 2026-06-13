@@ -202,7 +202,7 @@ fn cmd_init() -> Result<()> {
 // Run with: grape run
 
 func main(): int {
-    print("Hello, World!\n")
+    io.print("Hello, World!\n")
     return 0
 }
 "#;

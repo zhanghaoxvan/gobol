@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::io::{self, Write};
-
+use colored::*;
 use git2::{Repository, ResetType};
 
 // ============ 错误处理 ============
@@ -201,8 +201,9 @@ fn cmd_init() -> Result<()> {
         let content = r#"// Your Gobol code here
 // Run with: grape run
 
-func main() {
-    print("Hello from Gobol!\n")
+func main(): int {
+    print("Hello, World!\n")
+    return 0
 }
 "#;
         fs::write("main.gbl", content).map_err(GrapeError::Io)?;
@@ -378,7 +379,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
     let is_verbose = args.iter().any(|a| a == "--verbose");
     let no_check = args.iter().any(|a| a == "--no-check");
 
-    println!(" Running Gobol program...");
+    println!("{}", " Running Gobol program...".bold().green());
 
     if !Path::new("grape.toml").exists() {
         return Err(GrapeError::NotFound(

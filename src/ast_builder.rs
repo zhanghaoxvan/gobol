@@ -663,7 +663,7 @@ impl AstBuilder {
     }
 
     fn parse_block(&mut self) -> Option<Box<Block>> {
-        
+        #[cfg(debug_assertions)]
         eprintln!("[DEBUG] parse_block: token = {:?}", self.current_token());
         let mut block = Block::new();
 
@@ -722,6 +722,7 @@ impl AstBuilder {
     }
 
     fn parse_declaration(&mut self) -> Option<Box<dyn Statement>> {
+        #[cfg(debug_assertions)]
         eprintln!("[DEBUG] parse_declaration: token = {:?}", self.current_token());
         let keyword = self.current_token().value.clone();
         self.advance();
@@ -771,7 +772,7 @@ impl AstBuilder {
     }
 
     fn parse_for_statement(&mut self) -> Option<Box<dyn Statement>> {
-        
+        #[cfg(debug_assertions)]
         eprintln!("[DEBUG] parse_for_statement: token = {:?}", self.current_token());
         self.advance(); // consume 'for'
 
@@ -1146,7 +1147,7 @@ impl AstBuilder {
     }
 
     fn parse_array_literal(&mut self) -> Option<Box<dyn Expression>> {
-        
+        #[cfg(debug_assertions)]
         eprintln!("[DEBUG] parse_array_literal: current token = {:?}", self.current_token());
         self.advance(); // consume '['
 
@@ -1154,21 +1155,21 @@ impl AstBuilder {
 
         while !self.match_value("]") && !self.error_occurred {
             if self.match_value(",") {
-                
+                #[cfg(debug_assertions)]
                 eprintln!("[DEBUG] skipping comma");
                 self.advance();
                 continue;
             }
-            
+            #[cfg(debug_assertions)]
             eprintln!("[DEBUG] about to parse element, token = {:?}", self.current_token());
             let elem = match self.parse_expression() {
                 Some(e) => {
-                    
+                    #[cfg(debug_assertions)]
                     eprintln!("[DEBUG] parsed element OK");
                     e
                 }
                 None => {
-                    
+                    #[cfg(debug_assertions)]
                     eprintln!("[DEBUG] parse_expression returned None, token = {:?}", self.current_token());
                     return None;
                 }
@@ -1176,18 +1177,19 @@ impl AstBuilder {
             elements.push(elem);
 
             if self.match_value(",") {
-                
+                #[cfg(debug_assertions)]
                 eprintln!("[DEBUG] comma after element");
                 self.advance();
             } else {
-                
+                #[cfg(debug_assertions)]
                 eprintln!("[DEBUG] no comma, breaking");
                 break;
             }
         }
-        
+        #[cfg(debug_assertions)]
         eprintln!("[DEBUG] before consume ']', token = {:?}", self.current_token());
         self.consume_value("]", "Expected ']' after array literal");
+        #[cfg(debug_assertions)]
         eprintln!("[DEBUG] array literal success, {} elements", elements.len());
         Some(Box::new(ArrayLiteral::new(elements)))
     }

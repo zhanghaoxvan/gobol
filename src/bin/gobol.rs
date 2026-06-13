@@ -14,7 +14,7 @@ fn get_source(file: &str) -> String {
         Err(e) => {
             eprintln!("Error: Cannot open file '{}': {}", file, e);
             std::process::exit(1);
-    }
+        }
     };
     source
 }
@@ -29,12 +29,13 @@ fn main() {
         println!("Gobol - A test programming language");
         println!();
         println!("Usage:");
-        println!("  gobol <filename> [--verbose]    Run a Gobol script");
-        println!("  gobol --version                 Show version information");
-        println!("  gobol --help                    Show this help message");
+        println!("  gobol <filename> [--verbose] [--lib-path <path>...]    Run a Gobol script");
+        println!("  gobol --version                                        Show version information");
+        println!("  gobol --help                                           Show this help message");
         println!();
         println!("Options:");
-        println!("  --verbose, -v    Enable verbose output");
+        println!("  --verbose, -v                                          Enable verbose output");
+        println!("  --lib-path <path>                                      Add a library search path (can be used multiple times)");
         return;
     }
     if is_version {
@@ -42,9 +43,36 @@ fn main() {
         return;
     }
 
-    let is_verbose = args.iter().any(|s| s == "--verbose"); 
+    let is_verbose = args.iter().any(|s| s == "--verbose" || s == "-v");
+    
+    // Parse --lib-path arguments (support multiple)
+    let mut lib_paths_from_cli: Vec<String> = Vec::new();
+    let mut i = 1;
+    let mut filename = None;
 
-    let filename = match args.iter().skip(1).find(|s| !s.starts_with("-")) {
+    while i < args.len() {
+        if args[i] == "--lib-path" && i + 1 < args.len() {
+            // Split by comma if multiple paths are joined
+            let paths_str = &args[i + 1];
+            for p in paths_str.split(',') {
+                if !p.is_empty() {
+                    lib_paths_from_cli.push(p.to_string());
+                }
+            }
+            i += 2;
+        } else if args[i] == "--verbose" || args[i] == "-v" {
+            i += 1;
+        } else if args[i].starts_with("-") {
+            i += 1;
+        } else {
+            if filename.is_none() {
+                filename = Some(args[i].clone());
+            }
+            i += 1;
+        }
+    }
+
+    let filename = match filename {
         Some(f) => f,
         None => {
             eprintln!("Error: No filename provided");
@@ -101,7 +129,7 @@ fn main() {
         println!("======= Step 3: Semantic Analysis =======");
     }
 
-    // Build lib search paths: local script lib first, then std
+    // Build lib search paths: local script lib first, then std, then CLI paths
     let mut lib_paths = Vec::new();
 
     if let Some(parent) = Path::new(&filename).parent() {
@@ -117,8 +145,26 @@ fn main() {
         }
     }
 
-    // 3. ./std (standard library, lowest priority)
-    lib_paths.push("std".to_string());
+    // 3. CLI lib paths (--lib-path arguments)
+    for path in lib_paths_from_cli {
+        lib_paths.push(path);
+    }
+
+    // 4. std (standard library, lowest priority)
+    if let Ok(install_dir) = env::var("GOBOL_INSTALL_DIR") {
+        // Add $GOBOL_INSTALL_DIR/std
+        let std_path = Path::new(&install_dir).join("std");
+        if let Some(p) = std_path.to_str() {
+            lib_paths.push(p.to_string());
+        }
+    } else {
+        // Fallback to ./std if environment variable not set
+        lib_paths.push("std".to_string());
+    }
+
+    if is_verbose {
+        println!("Library paths: {:?}", lib_paths);
+    }
 
     let mut semantic_analyzer = SemanticAnalyzer::new();
     semantic_analyzer.set_lib_paths(lib_paths.clone());

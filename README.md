@@ -138,9 +138,13 @@ cargo run --bin gobol main.gbl
 
 ### After Installation / 安装完成后
 
-If you ran `cargo install --path .`, you can use the commands directly:
+**DO NOT USE `cargo install --path .` BECAUSE OF CARGO CANNOT COPY THE STANDARD LIBRARY TO THE INSTALLATION DIRECTORY.**
 
-如果你执行了 `cargo install --path .`，可以直接使用以下命令：
+**因为 Cargo 无法将标准库复制到安装目录，所以不要使用 `cargo install --path .`。**
+
+If you ran `python install.py`, you can use the commands directly:
+
+如果你执行了 `python install.py`，可以直接使用以下命令：
 
 ```bash
 grape init

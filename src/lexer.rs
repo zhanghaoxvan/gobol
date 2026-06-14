@@ -196,25 +196,38 @@ impl Lexer {
             break;
         }
 
+        // Capture token start position
+        let tok_line = self.line;
+        let tok_col = self.col;
+
         if self.is_source_end() {
-            return Token::new(TokenType::EndOfFile, "");
+            return Token::with_pos(TokenType::EndOfFile, "", tok_line, tok_col);
         }
 
         let current_char = self.peek();
 
         if current_char == '\n' {
             self.consume();
-            return Token::new(TokenType::EndOfLine, "\n");
+            return Token::with_pos(TokenType::EndOfLine, "\n", tok_line, tok_col);
         }
 
         if current_char.is_alphabetic() || current_char == '_' {
-            return self.parse_identifier();
+            let mut tok = self.parse_identifier();
+            tok.line = tok_line;
+            tok.col = tok_col;
+            return tok;
         }
         if current_char.is_ascii_digit() {
-            return self.parse_number();
+            let mut tok = self.parse_number();
+            tok.line = tok_line;
+            tok.col = tok_col;
+            return tok;
         }
         if current_char == '"' {
-            return self.parse_string();
+            let mut tok = self.parse_string();
+            tok.line = tok_line;
+            tok.col = tok_col;
+            return tok;
         }
 
         match current_char {
@@ -222,146 +235,148 @@ impl Lexer {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "+=");
+                    return Token::with_pos(TokenType::Operator, "+=", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, "+")
+                Token::with_pos(TokenType::Operator, "+", tok_line, tok_col)
             }
             '-' => {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "-=");
+                    return Token::with_pos(TokenType::Operator, "-=", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, "-")
+                Token::with_pos(TokenType::Operator, "-", tok_line, tok_col)
             }
             '*' => {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "*=");
+                    return Token::with_pos(TokenType::Operator, "*=", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, "*")
+                Token::with_pos(TokenType::Operator, "*", tok_line, tok_col)
             }
             '/' => {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "/=");
+                    return Token::with_pos(TokenType::Operator, "/=", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, "/")
+                Token::with_pos(TokenType::Operator, "/", tok_line, tok_col)
             }
             '%' => {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "%=");
+                    return Token::with_pos(TokenType::Operator, "%=", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, "%")
+                Token::with_pos(TokenType::Operator, "%", tok_line, tok_col)
             }
             '(' => {
                 self.consume();
-                Token::new(TokenType::Operator, "(")
+                Token::with_pos(TokenType::Operator, "(", tok_line, tok_col)
             }
             ')' => {
                 self.consume();
-                Token::new(TokenType::Operator, ")")
+                Token::with_pos(TokenType::Operator, ")", tok_line, tok_col)
             }
             '{' => {
                 self.consume();
-                Token::new(TokenType::Operator, "{")
+                Token::with_pos(TokenType::Operator, "{", tok_line, tok_col)
             }
             '}' => {
                 self.consume();
-                Token::new(TokenType::Operator, "}")
+                Token::with_pos(TokenType::Operator, "}", tok_line, tok_col)
             }
             '[' => {
                 self.consume();
-                Token::new(TokenType::Operator, "[")
+                Token::with_pos(TokenType::Operator, "[", tok_line, tok_col)
             }
             ']' => {
                 self.consume();
-                Token::new(TokenType::Operator, "]")
+                Token::with_pos(TokenType::Operator, "]", tok_line, tok_col)
             }
             '=' => {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "==");
+                    return Token::with_pos(TokenType::Operator, "==", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, "=")
+                Token::with_pos(TokenType::Operator, "=", tok_line, tok_col)
             }
             ':' => {
                 self.consume();
-                Token::new(TokenType::Operator, ":")
+                Token::with_pos(TokenType::Operator, ":", tok_line, tok_col)
             }
             '.' => {
                 self.consume();
                 if self.peek() == '.' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "..");
+                    return Token::with_pos(TokenType::Operator, "..", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, ".")
+                Token::with_pos(TokenType::Operator, ".", tok_line, tok_col)
             }
             ',' => {
                 self.consume();
-                Token::new(TokenType::Operator, ",")
+                Token::with_pos(TokenType::Operator, ",", tok_line, tok_col)
             }
             '>' => {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, ">=");
+                    return Token::with_pos(TokenType::Operator, ">=", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, ">")
+                Token::with_pos(TokenType::Operator, ">", tok_line, tok_col)
             }
             '<' => {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "<=");
+                    return Token::with_pos(TokenType::Operator, "<=", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, "<")
+                Token::with_pos(TokenType::Operator, "<", tok_line, tok_col)
             }
             '?' => {
                 self.consume();
-                Token::new(TokenType::Operator, "?")
+                Token::with_pos(TokenType::Operator, "?", tok_line, tok_col)
             }
             '&' => {
                 self.consume();
                 if self.peek() == '&' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "&&");
+                    return Token::with_pos(TokenType::Operator, "&&", tok_line, tok_col);
                 }
-                Token::new(TokenType::Unknown, "&")
+                Token::with_pos(TokenType::Unknown, "&", tok_line, tok_col)
             }
             '|' => {
                 self.consume();
                 if self.peek() == '|' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "||");
+                    return Token::with_pos(TokenType::Operator, "||", tok_line, tok_col);
                 }
-                Token::new(TokenType::Unknown, "|")
+                Token::with_pos(TokenType::Unknown, "|", tok_line, tok_col)
             }
             '!' => {
                 self.consume();
                 if self.peek() == '=' {
                     self.consume();
-                    return Token::new(TokenType::Operator, "!=");
+                    return Token::with_pos(TokenType::Operator, "!=", tok_line, tok_col);
                 }
-                Token::new(TokenType::Operator, "!")
+                Token::with_pos(TokenType::Operator, "!", tok_line, tok_col)
             }
             '@' => {
                 self.consume();
                 if self.peek() != '"' {
                     self.consume();
-                    return Token::new(TokenType::Unknown, "@");
+                    return Token::with_pos(TokenType::Unknown, "@", tok_line, tok_col);
                 }
-                let s = self.parse_string();
-                Token::new(TokenType::FormatString, s.value)
+                let mut tok = self.parse_string();
+                tok.line = tok_line;
+                tok.col = tok_col;
+                Token::with_pos(TokenType::FormatString, tok.value, tok_line, tok_col)
             }
             _ => {
                 let unknown = self.consume().to_string();
-                Token::new(TokenType::Unknown, unknown)
+                Token::with_pos(TokenType::Unknown, unknown, tok_line, tok_col)
             }
         }
     }

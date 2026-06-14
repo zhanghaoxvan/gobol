@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::ast_builder::AstBuilder;
+use crate::error::ErrorFormatter;
 use crate::lexer::Lexer;
 use crate::value::RtValue;
 use std::collections::{HashMap, HashSet};
@@ -124,6 +125,7 @@ pub struct Executor {
     breaking: bool,
     continuing: bool,
     errors: Vec<String>,
+    error_formatter: Option<ErrorFormatter>,
     expression_depth: i32,
     user_functions: HashMap<String, *const Function>,
     struct_definitions: HashMap<String, Vec<String>>,
@@ -146,6 +148,7 @@ impl Executor {
             breaking: false,
             continuing: false,
             errors: Vec::new(),
+            error_formatter: None,
             expression_depth: 0,
             user_functions: HashMap::new(),
             struct_definitions: HashMap::new(),
@@ -162,6 +165,10 @@ impl Executor {
         self.lib_paths = paths;
     }
 
+    pub fn set_error_formatter(&mut self, f: ErrorFormatter) {
+        self.error_formatter = Some(f);
+    }
+
     pub fn execute(&mut self, program: &Program) -> Result<i32, Vec<String>> {
         program.accept(self);
 
@@ -176,7 +183,12 @@ impl Executor {
     }
 
     fn error(&mut self, msg: String) {
-        self.errors.push(msg);
+        if let Some(ref f) = self.error_formatter {
+            let formatted = f.format_error(0, 0, 0, "runtime error", &msg, true);
+            self.errors.push(formatted);
+        } else {
+            self.errors.push(format!("Runtime Error: {}", msg));
+        }
     }
 
     fn push(&mut self, v: RtValue) {

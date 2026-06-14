@@ -1,5 +1,6 @@
 use gobol::ast_builder::AstBuilder;
 use gobol::ast_printer::AstPrinter;
+use gobol::error::ErrorFormatter;
 use gobol::executor::Executor;
 use gobol::lexer::Lexer;
 use gobol::semantic_analyzer::SemanticAnalyzer;
@@ -81,11 +82,14 @@ fn main() {
     };
 
     let source = get_source(&filename);
+    let source_for_errors = source.clone();
 
     if is_verbose {
         println!("===== Step 0: Reprint Source =====");
         println!("{}", source);
     }
+    let error_fmt = ErrorFormatter::new(filename.clone(), source_for_errors);
+
     let mut lexer = Lexer::new(source);
     if is_verbose {
         let mut tk = lexer.get_next_token();
@@ -105,10 +109,11 @@ fn main() {
     }
 
     let mut builder = AstBuilder::new(lexer);
+    builder.set_error_formatter(error_fmt.clone());
     let prog = builder.build();
     if builder.has_error() {
         for msg in builder.get_error_message() {
-            eprintln!("Builder Error: {}", msg);
+            eprintln!("{}", msg);
         }
         std::process::exit(1);
     }
@@ -168,6 +173,7 @@ fn main() {
 
     let mut semantic_analyzer = SemanticAnalyzer::new();
     semantic_analyzer.set_lib_paths(lib_paths.clone());
+    semantic_analyzer.set_error_formatter(error_fmt.clone());
     let semantic_passed = semantic_analyzer.analyze(&prog);
     if !semantic_passed {
         std::process::exit(1);
@@ -180,6 +186,7 @@ fn main() {
 
     let mut executor = Executor::new();
     executor.set_lib_paths(lib_paths);
+    executor.set_error_formatter(error_fmt);
     match executor.execute(&prog) {
         Ok(exit_code) => {
             if exit_code != 0 {
@@ -187,8 +194,9 @@ fn main() {
             }
         }
         Err(errors) => {
+            eprintln!("Runtime execution failed with {} error(s):", errors.len());
             for msg in &errors {
-                eprintln!("Runtime Error: {}", msg);
+                eprintln!("{}", msg);
             }
             std::process::exit(1);
         }

@@ -2,6 +2,7 @@ pub mod ast;
 pub mod ast_builder;
 pub mod ast_printer;
 pub mod environment;
+pub mod error;
 pub mod executor;
 pub mod lexer;
 pub mod semantic_analyzer;

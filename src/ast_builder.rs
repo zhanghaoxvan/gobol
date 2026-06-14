@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::ast::*;
+use crate::error::ErrorFormatter;
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenType};
 
@@ -11,6 +12,7 @@ pub struct AstBuilder {
     current_position: usize,
     error_occurred: bool,
     error_message: Vec<String>,
+    error_formatter: Option<ErrorFormatter>,
 }
 
 impl AstBuilder {
@@ -28,7 +30,12 @@ impl AstBuilder {
             current_position: 0,
             error_occurred: false,
             error_message: Vec::new(),
+            error_formatter: None,
         }
+    }
+
+    pub fn set_error_formatter(&mut self, f: ErrorFormatter) {
+        self.error_formatter = Some(f);
     }
 
     pub fn build(&mut self) -> Option<Box<Program>> {
@@ -123,7 +130,14 @@ impl AstBuilder {
 
     fn log_error(&mut self, message: &str) {
         self.error_occurred = true;
-        self.error_message.push(message.to_string());
+        let token = self.current_token();
+        if let Some(ref f) = self.error_formatter {
+            let span = if token.value.is_empty() { 1 } else { token.value.len() };
+            let formatted = f.format_error(token.line, token.col, span, "error", message, true);
+            self.error_message.push(formatted);
+        } else {
+            self.error_message.push(format!("Builder Error: {}", message));
+        }
     }
 
     // ==================== Program ====================
@@ -663,8 +677,6 @@ impl AstBuilder {
     }
 
     fn parse_block(&mut self) -> Option<Box<Block>> {
-        #[cfg(debug_assertions)]
-        eprintln!("[DEBUG] parse_block: token = {:?}", self.current_token());
         let mut block = Block::new();
 
         while self.match_type(&TokenType::EndOfFile) {
@@ -722,8 +734,6 @@ impl AstBuilder {
     }
 
     fn parse_declaration(&mut self) -> Option<Box<dyn Statement>> {
-        #[cfg(debug_assertions)]
-        eprintln!("[DEBUG] parse_declaration: token = {:?}", self.current_token());
         let keyword = self.current_token().value.clone();
         self.advance();
 
@@ -772,8 +782,6 @@ impl AstBuilder {
     }
 
     fn parse_for_statement(&mut self) -> Option<Box<dyn Statement>> {
-        #[cfg(debug_assertions)]
-        eprintln!("[DEBUG] parse_for_statement: token = {:?}", self.current_token());
         self.advance(); // consume 'for'
 
         if !self.match_type(&TokenType::Identifier) {
@@ -1147,50 +1155,32 @@ impl AstBuilder {
     }
 
     fn parse_array_literal(&mut self) -> Option<Box<dyn Expression>> {
-        #[cfg(debug_assertions)]
-        eprintln!("[DEBUG] parse_array_literal: current token = {:?}", self.current_token());
         self.advance(); // consume '['
 
         let mut elements: Vec<Box<dyn Expression>> = Vec::new();
 
         while !self.match_value("]") && !self.error_occurred {
             if self.match_value(",") {
-                #[cfg(debug_assertions)]
-                eprintln!("[DEBUG] skipping comma");
                 self.advance();
                 continue;
             }
-            #[cfg(debug_assertions)]
-            eprintln!("[DEBUG] about to parse element, token = {:?}", self.current_token());
             let elem = match self.parse_expression() {
                 Some(e) => {
-                    #[cfg(debug_assertions)]
-                    eprintln!("[DEBUG] parsed element OK");
                     e
                 }
                 None => {
-                    #[cfg(debug_assertions)]
-                    eprintln!("[DEBUG] parse_expression returned None, token = {:?}", self.current_token());
                     return None;
                 }
             };
             elements.push(elem);
 
             if self.match_value(",") {
-                #[cfg(debug_assertions)]
-                eprintln!("[DEBUG] comma after element");
                 self.advance();
             } else {
-                #[cfg(debug_assertions)]
-                eprintln!("[DEBUG] no comma, breaking");
                 break;
             }
         }
-        #[cfg(debug_assertions)]
-        eprintln!("[DEBUG] before consume ']', token = {:?}", self.current_token());
         self.consume_value("]", "Expected ']' after array literal");
-        #[cfg(debug_assertions)]
-        eprintln!("[DEBUG] array literal success, {} elements", elements.len());
         Some(Box::new(ArrayLiteral::new(elements)))
     }
 

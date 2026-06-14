@@ -34,6 +34,8 @@ impl fmt::Display for TokenType {
 pub struct Token {
     pub r#type: TokenType,
     pub value: String,
+    pub line: i32,
+    pub col: i32,
 }
 
 impl Token {
@@ -41,6 +43,17 @@ impl Token {
         Token {
             r#type,
             value: value.into(),
+            line: 0,
+            col: 0,
+        }
+    }
+
+    pub fn with_pos(r#type: TokenType, value: impl Into<String>, line: i32, col: i32) -> Self {
+        Token {
+            r#type,
+            value: value.into(),
+            line,
+            col,
         }
     }
 }

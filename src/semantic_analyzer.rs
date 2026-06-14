@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::ast_builder::AstBuilder;
 use crate::environment::*;
+use crate::error::ErrorFormatter;
 use crate::lexer::Lexer;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -12,6 +13,7 @@ pub struct SemanticAnalyzer {
     env: Environment,
     errors: Vec<String>,
     has_error: bool,
+    error_formatter: Option<ErrorFormatter>,
     current_function: String,
     current_function_return_type: DataType,
     has_return_statement: bool,
@@ -33,6 +35,7 @@ impl SemanticAnalyzer {
             env: Environment::new(),
             errors: Vec::new(),
             has_error: false,
+            error_formatter: None,
             current_function: String::new(),
             current_function_return_type: DataType::None_,
             has_return_statement: false,
@@ -47,6 +50,10 @@ impl SemanticAnalyzer {
             current_module_dir: None,
             module_aliases: HashMap::new(),
         }
+    }
+
+    pub fn set_error_formatter(&mut self, f: ErrorFormatter) {
+        self.error_formatter = Some(f);
     }
 
     pub fn set_lib_paths(&mut self, paths: Vec<String>) {
@@ -89,16 +96,21 @@ impl SemanticAnalyzer {
             #[cfg(debug_assertions)]
             println!("Semantic analysis passed!");
         } else {
-            println!("Semantic analysis failed with {} errors:", self.errors.len());
+            eprintln!("Semantic analysis failed with {} error(s):", self.errors.len());
             for err in &self.errors {
-                println!("    {}", err);
+                eprintln!("{}", err);
             }
         }
     }
 
     fn error(&mut self, msg: &str) {
-        self.errors.push(msg.to_string());
         self.has_error = true;
+        if let Some(ref f) = self.error_formatter {
+            let formatted = f.format_error(0, 0, 0, "error", msg, true);
+            self.errors.push(formatted);
+        } else {
+            self.errors.push(format!("Error: {}", msg));
+        }
     }
 
     fn get_data_type_from_ast(&mut self, tp: Option<&dyn Type>) -> DataType {

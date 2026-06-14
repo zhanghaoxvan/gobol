@@ -361,7 +361,7 @@ fn cmd_list() -> Result<()> {
     println!("Dependencies:");
     for (name, spec) in &config.dependencies {
         let optional = if spec.optional.unwrap_or(false) { " (optional)" } else { "" };
-        println!("  📦 {} = {}{}", name, spec.repo, optional);
+        println!("     {} = {}{}", name, spec.repo, optional);
         println!("       tag: {}", spec.tag);
         
         let local_path = spec.local_path();

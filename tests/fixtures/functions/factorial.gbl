@@ -1,4 +1,3 @@
-module main
 
 func factorial(n: int): int {
     if n <= 1 {

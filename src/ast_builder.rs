@@ -171,11 +171,19 @@ impl AstBuilder {
 
             match keyword.as_str() {
                 "import" => return self.parse_import(),
-                "module" => return self.parse_module(),
                 "func" => return self.parse_function(),
                 "var" | "val" => return self.parse_declaration(),
                 "for" => return self.parse_for_statement(),
                 "return" => return self.parse_return_statement(),
+                "module" => {
+                    // module keyword is deprecated — skip the line
+                    self.advance(); // consume 'module'
+                    while !self.is_end_of_line() && !self.match_type(&TokenType::EndOfFile) {
+                        self.advance();
+                    }
+                    self.consume_end_of_line();
+                    return Some(Box::new(ExportStatement::new(vec![])));
+                }
                 "struct" => return self.parse_struct_definition(),
                 "impl" => return self.parse_impl_block(),
                 "export" => return self.parse_export_statement(),
@@ -198,6 +206,11 @@ impl AstBuilder {
                     return Some(Box::new(ExportStatement::new(vec![])));
                 }
                 "if" => return self.parse_if_statement(),
+                "match" => {
+                    let match_expr = self.parse_match_expression()?;
+                    // MatchExpression implements Statement too, go through as_any
+                    return Some(Box::new(ExpressionStatement::new(Some(match_expr))));
+                }
                 "while" => return self.parse_while_statement(),
                 "break" => return self.parse_break_statement(),
                 "continue" => return self.parse_continue_statement(),
@@ -305,21 +318,6 @@ impl AstBuilder {
         self.consume_end_of_line();
 
         Some(Box::new(ExportStatement::new(names)))
-    }
-
-    fn parse_module(&mut self) -> Option<Box<dyn Statement>> {
-        self.advance(); // consume 'module'
-
-        if !self.match_type(&TokenType::Identifier) {
-            self.log_error("Expected identifier after 'module'");
-            return None;
-        }
-
-        let module_name = self.current_token().value.clone();
-        self.advance();
-        self.consume_end_of_line();
-
-        Some(Box::new(ModuleStatement::new(module_name)))
     }
 
     fn parse_struct_definition(&mut self) -> Option<Box<dyn Statement>> {
@@ -637,19 +635,27 @@ impl AstBuilder {
         let type_name = self.current_token().value.clone();
         self.advance();
 
-        // Skip <T> generic args if present (e.g., vec<T>)
+        // Parse generic type args: vec<int> or map<str,int>
+        let mut type_args: Vec<Box<dyn Type>> = Vec::new();
         if self.match_value("<") {
             self.advance();
-            let mut depth = 1;
-            while depth > 0 && !self.error_occurred {
-                if self.match_value("<") { depth += 1; }
-                else if self.match_value(">") { depth -= 1; }
-                if depth > 0 { self.advance(); }
+            while !self.match_value(">") && !self.error_occurred {
+                let arg = self.parse_type()?;
+                type_args.push(arg);
+                if self.match_value(",") {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
-            if self.match_value(">") { self.advance(); }
+            self.consume_value(">", "Expected '>' closing generic type");
         }
 
-        let mut tp: Box<dyn Type> = Box::new(BasicType::new(type_name));
+        let mut tp: Box<dyn Type> = if !type_args.is_empty() {
+            Box::new(GenericType::new(type_name.clone(), type_args))
+        } else {
+            Box::new(BasicType::new(type_name))
+        };
 
         while self.match_value("[") {
             self.advance();
@@ -789,8 +795,19 @@ impl AstBuilder {
             return None;
         }
 
-        let loop_var = self.current_token().value.clone();
+        let mut loop_vars = vec![self.current_token().value.clone()];
         self.advance();
+
+        // Support `for i, v in expr` syntax
+        if self.match_value(",") {
+            self.advance();
+            if !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected second identifier after ',' in for loop");
+                return None;
+            }
+            loop_vars.push(self.current_token().value.clone());
+            self.advance();
+        }
 
         if !(self.match_type(&TokenType::Keyword) && self.current_token().value == "in") {
             self.log_error("Expected 'in' in for loop");
@@ -808,7 +825,7 @@ impl AstBuilder {
         self.consume_value("}", "Expected '}' at end of loop body");
         self.consume_end_of_line();
 
-        Some(Box::new(ForStatement::new(loop_var, Some(range_expr), body)))
+        Some(Box::new(ForStatement::new_multi(loop_vars, Some(range_expr), body)))
     }
 
     fn parse_range_or_iterable(&mut self) -> Option<Box<dyn Expression>> {
@@ -1057,6 +1074,7 @@ impl AstBuilder {
                     return Some(Box::new(Identifier::new("self")));
                 }
                 "if" => return self.parse_if_expression(),
+                "match" => return self.parse_match_expression(),
                 "new" => return self.parse_new_expression(),
                 _ => {}
             }
@@ -1065,6 +1083,15 @@ impl AstBuilder {
         // 数组字面量: [1, 2, 3]
         if self.match_value("[") {
             return self.parse_array_literal();
+        }
+
+        // 块表达式: { stmt1; stmt2; expr }
+        if self.match_value("{") {
+            self.advance(); // consume '{'
+            self.consume_end_of_line();
+            let block = self.parse_block();
+            self.consume_value("}", "Expected '}' after block expression");
+            return block.map(|b| b as Box<dyn Expression>);
         }
 
         // 括号表达式: (1 + 2)
@@ -1228,6 +1255,83 @@ impl AstBuilder {
         let stmt = self.parse_statement()?;
         block.add_statement(stmt);
         Some(Box::new(block))
+    }
+
+    fn parse_match_expression(&mut self) -> Option<Box<dyn Expression>> {
+        self.advance(); // consume 'match'
+
+        // Parse scrutinee expression
+        let scrutinee = self.parse_expression()?;
+
+        self.consume_value("{", "Expected '{' after match scrutinee");
+        self.consume_end_of_line();
+
+        let mut arms: Vec<MatchArm> = Vec::new();
+
+        while !self.match_value("}") && !self.error_occurred {
+            self.consume_end_of_line();
+            if self.match_value("}") { break; }
+
+            // Parse pattern
+            let pattern = if self.match_value("_") {
+                self.advance();
+                MatchPattern::Wildcard
+            } else if self.match_type(&TokenType::Number) {
+                let val = self.current_token().value.clone();
+                self.advance();
+                if val.contains('.') {
+                    MatchPattern::Literal(RtValueSimple::FloatStr(val))
+                } else {
+                    MatchPattern::Literal(RtValueSimple::Int(val.parse().unwrap_or(0)))
+                }
+            } else if self.match_type(&TokenType::String) {
+                let val = self.current_token().value.clone();
+                self.advance();
+                MatchPattern::Literal(RtValueSimple::Str(val))
+            } else if self.match_type(&TokenType::Keyword) && (self.current_token().value == "true" || self.current_token().value == "false") {
+                let val = self.current_token().value == "true";
+                self.advance();
+                MatchPattern::Literal(RtValueSimple::Bool(val))
+            } else if self.match_type(&TokenType::Identifier) {
+                let name = self.current_token().value.clone();
+                self.advance();
+                MatchPattern::Variable(name)
+            } else {
+                self.log_error("Expected pattern in match arm");
+                return None;
+            };
+
+            // Expect '=>' (tokenized as '=' then '>')
+            self.consume_value("=", "Expected '=>' after match pattern");
+            self.consume_value(">", "Expected '=>' after match pattern");
+
+            // Parse arm body (single expression or block)
+            let body: Option<Box<dyn Statement>> = if self.match_value("{") {
+                self.advance();
+                self.consume_end_of_line();
+                let b = self.parse_block();
+                self.consume_value("}", "Expected '}' after match arm block");
+                b.map(|b| b as Box<dyn Statement>)
+            } else {
+                let expr = self.parse_expression()?;
+                let mut block = Block::new();
+                block.add_statement(Box::new(ExpressionStatement::new(Some(expr))));
+                Some(Box::new(block))
+            };
+
+            arms.push(MatchArm { pattern, body });
+
+            // Optional comma between arms
+            self.consume_end_of_line();
+            if self.match_value(",") {
+                self.advance();
+            }
+            self.consume_end_of_line();
+        }
+
+        self.consume_value("}", "Expected '}' after match body");
+
+        Some(Box::new(MatchExpression::new(Some(scrutinee), arms)))
     }
 
     fn parse_new_expression(&mut self) -> Option<Box<dyn Expression>> {

@@ -1,4 +1,3 @@
-module main
 
 func main(): int {
     for i in 0..5 {

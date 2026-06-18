@@ -28,7 +28,6 @@ pub trait AstVisitor {
     fn visit_declaration(&mut self, _node: &Declaration) {}
     fn visit_expression_statement(&mut self, _node: &ExpressionStatement) {}
     fn visit_import_statement(&mut self, _node: &ImportStatement) {}
-    fn visit_module_statement(&mut self, _node: &ModuleStatement) {}
     fn visit_export_statement(&mut self, _node: &ExportStatement) {}
     fn visit_struct_definition(&mut self, _node: &StructDefinition) {}
     fn visit_impl_block(&mut self, _node: &ImplBlock) {}
@@ -48,6 +47,7 @@ pub trait AstVisitor {
     fn visit_range_expression(&mut self, _node: &RangeExpression) {}
     fn visit_array_literal(&mut self, _node: &ArrayLiteral) {}
     fn visit_struct_literal(&mut self, _node: &StructLiteral) {}
+    fn visit_match_expression(&mut self, _node: &MatchExpression) {}
 }
 
 // ==================== Node ====================
@@ -246,6 +246,37 @@ impl Type for NullableType {
     }
 }
 
+// ==================== GenericType ====================
+
+pub struct GenericType {
+    pub base_name: String,
+    pub type_args: Vec<Box<dyn Type>>,
+}
+
+impl GenericType {
+    pub fn new(base_name: impl Into<String>, type_args: Vec<Box<dyn Type>>) -> Self {
+        GenericType {
+            base_name: base_name.into(),
+            type_args,
+        }
+    }
+    pub fn get_base_name(&self) -> &str { &self.base_name }
+    pub fn get_type_args(&self) -> &Vec<Box<dyn Type>> { &self.type_args }
+}
+
+impl AstNode for GenericType {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_basic_type(self.type_args.first().map(|t| t.as_any().downcast_ref::<BasicType>().unwrap_or_else(|| panic!("expected BasicType"))).unwrap_or_else(|| panic!("expected type arg")));
+    }
+    fn as_any(&self) -> &dyn Any { self }
+}
+
+impl Type for GenericType {
+    fn get_name(&self) -> &str { &self.base_name }
+    fn as_type(&self) -> &dyn Type { self }
+    fn as_type_any(&self) -> &dyn Any { self }
+}
+
 // ==================== Program ====================
 
 pub struct Program {
@@ -310,6 +341,12 @@ impl AstNode for Block {
 
 impl Statement for Block {
     fn as_statement(&self) -> &dyn Statement {
+        self
+    }
+}
+
+impl Expression for Block {
+    fn as_expression(&self) -> &dyn Expression {
         self
     }
 }
@@ -438,39 +475,6 @@ impl AstNode for ImportStatement {
 }
 
 impl Statement for ImportStatement {
-    fn as_statement(&self) -> &dyn Statement {
-        self
-    }
-}
-
-// ==================== ModuleStatement ====================
-
-pub struct ModuleStatement {
-    module_name: String,
-}
-
-impl ModuleStatement {
-    pub fn new(module_name: impl Into<String>) -> Self {
-        ModuleStatement {
-            module_name: module_name.into(),
-        }
-    }
-
-    pub fn get_module_name(&self) -> &str {
-        &self.module_name
-    }
-}
-
-impl AstNode for ModuleStatement {
-    fn accept(&self, visitor: &mut dyn AstVisitor) {
-        visitor.visit_module_statement(self);
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl Statement for ModuleStatement {
     fn as_statement(&self) -> &dyn Statement {
         self
     }
@@ -677,7 +681,7 @@ impl Statement for WhileStatement {
 // ==================== ForStatement ====================
 
 pub struct ForStatement {
-    loop_variable: String,
+    loop_variables: Vec<String>,
     iterable: Option<Box<dyn Expression>>,
     body: Option<Box<Block>>,
 }
@@ -689,14 +693,30 @@ impl ForStatement {
         body: Option<Box<Block>>,
     ) -> Self {
         ForStatement {
-            loop_variable: loop_variable.into(),
+            loop_variables: vec![loop_variable.into()],
+            iterable,
+            body,
+        }
+    }
+
+    pub fn new_multi(
+        loop_variables: Vec<String>,
+        iterable: Option<Box<dyn Expression>>,
+        body: Option<Box<Block>>,
+    ) -> Self {
+        ForStatement {
+            loop_variables,
             iterable,
             body,
         }
     }
 
     pub fn get_loop_variable(&self) -> &str {
-        &self.loop_variable
+        &self.loop_variables[0]
+    }
+
+    pub fn get_loop_variables(&self) -> &Vec<String> {
+        &self.loop_variables
     }
 
     pub fn get_iterable(&self) -> Option<&dyn Expression> {
@@ -1776,6 +1796,71 @@ impl AstNode for StructLiteral {
 }
 
 impl Expression for StructLiteral {
+    fn as_expression(&self) -> &dyn Expression {
+        self
+    }
+}
+
+// ==================== MatchPattern ====================
+
+pub enum MatchPattern {
+    Literal(RtValueSimple),
+    Wildcard,
+    Variable(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum RtValueSimple {
+    Int(i64),
+    FloatStr(String),
+    Str(String),
+    Bool(bool),
+}
+
+// ==================== MatchArm ====================
+
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub body: Option<Box<dyn Statement>>,
+}
+
+// ==================== MatchExpression ====================
+
+pub struct MatchExpression {
+    scrutinee: Option<Box<dyn Expression>>,
+    arms: Vec<MatchArm>,
+}
+
+impl MatchExpression {
+    pub fn new(scrutinee: Option<Box<dyn Expression>>, arms: Vec<MatchArm>) -> Self {
+        MatchExpression { scrutinee, arms }
+    }
+
+    pub fn get_scrutinee(&self) -> Option<&dyn Expression> {
+        self.scrutinee.as_deref().map(|e| e.as_expression())
+    }
+
+    pub fn get_arms(&self) -> &Vec<MatchArm> {
+        &self.arms
+    }
+}
+
+impl AstNode for MatchExpression {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_match_expression(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Statement for MatchExpression {
+    fn as_statement(&self) -> &dyn Statement {
+        self
+    }
+}
+
+impl Expression for MatchExpression {
     fn as_expression(&self) -> &dyn Expression {
         self
     }

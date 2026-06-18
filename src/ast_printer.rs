@@ -264,11 +264,6 @@ impl AstVisitor for AstPrinter {
         println!();
     }
 
-    fn visit_module_statement(&mut self, node: &ModuleStatement) {
-        self.print_indent();
-        println!("Module(moduleName = {})", node.get_module_name());
-    }
-
     fn visit_struct_definition(&mut self, node: &StructDefinition) {
         self.print_indent();
         print!("Struct {}(", node.get_name());

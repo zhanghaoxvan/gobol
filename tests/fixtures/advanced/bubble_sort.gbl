@@ -1,4 +1,3 @@
-module main
 
 func bubble_sort(arr: int[]) {
     var n = arr.len()

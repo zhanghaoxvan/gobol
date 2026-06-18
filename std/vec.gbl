@@ -5,7 +5,6 @@
 // or var v1: int[32] => var v1: new vec<int>()
 // it calls this library
 #[library_features(hidden = true)]
-module vec
 
 struct vec<T> {
     _data: T[]?,
@@ -19,6 +18,14 @@ impl<T> vec<T> {
         _len = 0
         _cap = 0
         return self
+    }
+
+    constructor(arr: T[]): vec<T> {
+        var v: vec<T> = vec<T>.new()
+        for item in arr {
+            v.push(item)
+        }
+        return v
     }
     
     constructor(capacity: int): vec<T> {

@@ -1,4 +1,3 @@
-module main
 
 func main(): int {
     var arr: int[] = [10, 20, 30, 40, 50]

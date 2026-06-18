@@ -280,10 +280,7 @@ impl Environment {
         let full_name = format!("{}.{}", module_name, name);
         let global_scope = &mut self.scopes[0];
 
-        if global_scope.contains_key(&full_name) {
-            return false;
-        }
-
+        // Allow duplicate declarations (e.g., from load_module + direct analysis)
         global_scope.insert(full_name, Symbol::new_function(name, module_name, return_type, 0));
         true
     }

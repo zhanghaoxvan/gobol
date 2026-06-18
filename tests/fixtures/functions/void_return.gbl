@@ -1,4 +1,3 @@
-module main
 
 func greet(name: str) {
     io.print("Hello, ")

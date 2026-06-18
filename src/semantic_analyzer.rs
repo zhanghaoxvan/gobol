@@ -60,6 +60,15 @@ impl SemanticAnalyzer {
         self.lib_paths = paths;
     }
 
+    pub fn set_main_file(&mut self, file_path: &str) {
+        // Derive module name from filename (e.g. "math.gbl" → "math")
+        if let Some(stem) = Path::new(file_path).file_stem().and_then(|s| s.to_str()) {
+            self.current_module = stem.to_string();
+        } else {
+            self.current_module = "main".to_string();
+        }
+    }
+
     pub fn analyze(&mut self, program: &Program) -> bool {
         // Register built-in modules and compiler-provided functions
         self.env.declare_module("__builtins__");
@@ -118,6 +127,18 @@ impl SemanticAnalyzer {
             Some(t) => t,
             None => return DataType::None_,
         };
+
+        // Check for GenericType: vec<int> → array type, others → struct
+        if let Some(gt) = tp.as_type_any().downcast_ref::<GenericType>() {
+            let base = gt.get_base_name();
+            if base == "vec" && !gt.get_type_args().is_empty() {
+                // vec<int> is an alias for int[]
+                let elem_type = self.get_data_type_from_ast(Some(&*gt.get_type_args()[0]));
+                return elem_type; // treated as element type (array)
+            }
+            // Other generic types — treat as struct for now
+            return DataType::Struct(base.to_string());
+        }
 
         // Check for NullableType
         if let Some(nullable) = tp.as_type_any().downcast_ref::<NullableType>() {
@@ -256,12 +277,18 @@ impl SemanticAnalyzer {
         // Save context
         let prev_module = self.current_module.clone();
 
-        // Only register declarations (module, imports, function signatures, structs)
+        // Derive module name from file path (e.g. std/math.gbl → "math")
+        let derived_module = Path::new(&file_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(module_name)
+            .to_string();
+        self.current_module = derived_module.clone();
+        self.env.declare_module(&self.current_module);
+
+        // Only register declarations (imports, function signatures, structs)
         for stmt in prog.get_statements() {
-            if let Some(mod_stmt) = stmt.as_any().downcast_ref::<ModuleStatement>() {
-                self.current_module = mod_stmt.get_module_name().to_string();
-                self.env.declare_module(&self.current_module);
-            } else if let Some(import_stmt) = stmt.as_any().downcast_ref::<ImportStatement>() {
+            if let Some(import_stmt) = stmt.as_any().downcast_ref::<ImportStatement>() {
                 let name = import_stmt.get_module_name();
                 self.load_module(&name);
                 if let Some(alias) = import_stmt.get_alias() {
@@ -331,14 +358,6 @@ impl AstVisitor for SemanticAnalyzer {
         for stmt in node.get_statements() {
             stmt.accept(self);
         }
-    }
-
-    fn visit_module_statement(&mut self, node: &ModuleStatement) {
-        let module_name = node.get_module_name().to_string();
-        #[cfg(debug_assertions)]
-        println!("  Module declaration: {}", module_name);
-        self.env.declare_module(&module_name);
-        self.current_module = module_name;
     }
 
     fn visit_struct_definition(&mut self, node: &StructDefinition) {
@@ -600,24 +619,33 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_for_statement(&mut self, node: &ForStatement) {
-        let loop_var = node.get_loop_variable().to_string();
+        let loop_vars = node.get_loop_variables().clone();
 
         self.env.enter_scope();
-        #[cfg(debug_assertions)]
-        println!("    For loop (scope {})", self.env.get_current_scope());
 
-        self.env.declare_variable(&loop_var, &DataType::Int, false);
-        #[cfg(debug_assertions)]
-        println!("      Loop variable: {} : int", loop_var);
+        // Declare index variable (first) as Int
+        self.env.declare_variable(&loop_vars[0], &DataType::Int, false);
 
         if let Some(iter) = node.get_iterable() {
             iter.accept(self);
             let iter_type = self.get_current_type();
 
             let is_valid = matches!(iter_type, DataType::Int)
-                || matches!(&iter_type, DataType::Struct(s) if s == "range");
+                || matches!(&iter_type, DataType::Struct(s) if s == "range")
+                || matches!(iter_type, DataType::Str);
             if !is_valid {
-                self.error("For loop iterable must be range expression");
+                // Also accept any array-like type (Struct, or if it's an array variable)
+                self.error("For loop iterable must be range, string, or array");
+            }
+
+            // Declare value variable (second) with appropriate type
+            if loop_vars.len() >= 2 {
+                let val_type = match &iter_type {
+                    DataType::Struct(s) if s == "range" => DataType::Int,
+                    DataType::Str => DataType::Str,
+                    _ => DataType::Int, // default for arrays
+                };
+                self.env.declare_variable(&loop_vars[1], &val_type, false);
             }
         }
 
@@ -628,7 +656,6 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         self.loop_depth -= 1;
-
         self.env.exit_scope();
     }
 
@@ -905,7 +932,13 @@ impl AstVisitor for SemanticAnalyzer {
             if let Some(left) = node.get_left() {
                 if let Some(id) = left.as_any().downcast_ref::<Identifier>() {
                     var_name = id.get_name().to_string();
-                    if let Some(sym) = self.env.lookup_symbol(&var_name) {
+                    // Check if it's a bare struct field first
+                    let is_field = self.current_impl_struct.as_ref().map_or(false, |s| {
+                        self.struct_fields.get(s).map_or(false, |f| f.contains_key(&var_name))
+                    });
+                    if is_field {
+                        is_assignable = true;
+                    } else if let Some(sym) = self.env.lookup_symbol(&var_name) {
                         if sym.is_mut {
                             is_assignable = true;
                         } else {
@@ -1101,6 +1134,54 @@ impl AstVisitor for SemanticAnalyzer {
             None => {
                 self.error(&format!("Undeclared function: '{}'", full_name));
                 self.type_stack.push(DataType::Unknown);
+            }
+        }
+    }
+
+    fn visit_match_expression(&mut self, node: &MatchExpression) {
+        // Type-check scrutinee
+        if let Some(scrut) = node.get_scrutinee() {
+            scrut.accept(self);
+            let scrut_type = self.get_current_type();
+            self.type_stack.pop();
+
+            // For each arm, type-check the body and collect return types
+            let mut result_type: Option<DataType> = None;
+            for arm in node.get_arms() {
+                // For variable patterns, declare the variable in a scope
+                if let MatchPattern::Variable(ref name) = arm.pattern {
+                    self.env.enter_scope();
+                    self.env.declare_variable(name, &scrut_type, false);
+                }
+
+                if let Some(ref body) = arm.body {
+                    body.accept(self);
+                    let arm_type = self.get_current_type();
+                    self.type_stack.pop();
+
+                    match &result_type {
+                        None => result_type = Some(arm_type.clone()),
+                        Some(existing) => {
+                            if !Environment::is_type_compatible(existing, &arm_type)
+                                && !Environment::is_type_compatible(&arm_type, existing)
+                                && arm_type != DataType::Unknown
+                                && *existing != DataType::Unknown
+                            {
+                                self.error("Match arms have incompatible types");
+                            }
+                        }
+                    }
+                }
+
+                if let MatchPattern::Variable(_) = arm.pattern {
+                    self.env.exit_scope();
+                }
+            }
+
+            if let Some(rt) = result_type {
+                self.type_stack.push(rt);
+            } else {
+                self.type_stack.push(DataType::None_);
             }
         }
     }

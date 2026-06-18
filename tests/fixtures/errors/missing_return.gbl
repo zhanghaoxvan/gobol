@@ -1,4 +1,3 @@
-module main
 
 func missing_return(): int {
     var x = 10

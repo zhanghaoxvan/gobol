@@ -172,6 +172,7 @@ fn main() {
     }
 
     let mut semantic_analyzer = SemanticAnalyzer::new();
+    semantic_analyzer.set_main_file(&filename);
     semantic_analyzer.set_lib_paths(lib_paths.clone());
     semantic_analyzer.set_error_formatter(error_fmt.clone());
     let semantic_passed = semantic_analyzer.analyze(&prog);
@@ -185,6 +186,7 @@ fn main() {
     }
 
     let mut executor = Executor::new();
+    executor.set_main_file(&filename);
     executor.set_lib_paths(lib_paths);
     executor.set_error_formatter(error_fmt);
     match executor.execute(&prog) {

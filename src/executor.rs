@@ -127,6 +127,7 @@ pub struct Executor {
     errors: Vec<String>,
     error_formatter: Option<ErrorFormatter>,
     expression_depth: i32,
+    current_impl_struct: Option<String>,
     user_functions: HashMap<String, *const Function>,
     struct_definitions: HashMap<String, Vec<String>>,
     lib_paths: Vec<String>,
@@ -150,6 +151,7 @@ impl Executor {
             errors: Vec::new(),
             error_formatter: None,
             expression_depth: 0,
+            current_impl_struct: None,
             user_functions: HashMap::new(),
             struct_definitions: HashMap::new(),
             lib_paths: vec!["lib".to_string()],
@@ -167,6 +169,14 @@ impl Executor {
 
     pub fn set_error_formatter(&mut self, f: ErrorFormatter) {
         self.error_formatter = Some(f);
+    }
+
+    pub fn set_main_file(&mut self, file_path: &str) {
+        if let Some(stem) = Path::new(file_path).file_stem().and_then(|s| s.to_str()) {
+            self.current_module = stem.to_string();
+        } else {
+            self.current_module = "main".to_string();
+        }
     }
 
     pub fn execute(&mut self, program: &Program) -> Result<i32, Vec<String>> {
@@ -199,11 +209,16 @@ impl Executor {
         self.value_stack.pop().unwrap_or(RtValue::None_)
     }
 
+    #[allow(dead_code)]
     fn call_user_function(&mut self, func: &Function, args: &[RtValue]) {
-        self.call_user_function_with_copyback(func, args, &[])
+        self.call_user_function_with_copyback(func, args, &[], None)
     }
 
-    fn call_user_function_with_copyback(&mut self, func: &Function, args: &[RtValue], copyback: &[(usize, String)]) {
+    fn call_user_function_with_copyback(&mut self, func: &Function, args: &[RtValue], copyback: &[(usize, String)], impl_struct: Option<&str>) {
+        let prev_impl = self.current_impl_struct.clone();
+        if let Some(s) = impl_struct {
+            self.current_impl_struct = Some(s.to_string());
+        }
         self.env.enter_scope();
 
         // Bind parameters to arguments
@@ -258,6 +273,7 @@ impl Executor {
             self.env.assign(&caller_var, val);
         }
 
+        self.current_impl_struct = prev_impl;
         self.push(result);
     }
 }
@@ -281,11 +297,9 @@ impl AstVisitor for Executor {
             }
         }
 
-        // Second pass: handle module/import statements (they set up context)
+        // Second pass: handle import statements (they set up context)
         for stmt in node.get_statements() {
-            if stmt.as_any().downcast_ref::<ModuleStatement>().is_some()
-                || stmt.as_any().downcast_ref::<ImportStatement>().is_some()
-            {
+            if stmt.as_any().downcast_ref::<ImportStatement>().is_some() {
                 stmt.accept(self);
             }
         }
@@ -305,10 +319,6 @@ impl AstVisitor for Executor {
         }
     }
 
-    fn visit_module_statement(&mut self, node: &ModuleStatement) {
-        self.current_module = node.get_module_name().to_string();
-    }
-
     fn visit_import_statement(&mut self, node: &ImportStatement) {
         let module_name = node.get_module_name();
         self.load_module(&module_name);
@@ -326,6 +336,9 @@ impl AstVisitor for Executor {
     }
 
     fn visit_impl_block(&mut self, node: &ImplBlock) {
+        // Track current impl struct for bare field assignment
+        let prev_impl = self.current_impl_struct.clone();
+        self.current_impl_struct = Some(node.get_struct_name().to_string());
         // Process each item in the impl block
         for item in node.get_items() {
             match item {
@@ -335,6 +348,7 @@ impl AstVisitor for Executor {
                 }
             }
         }
+        self.current_impl_struct = prev_impl;
     }
 
     fn visit_export_statement(&mut self, _node: &ExportStatement) {
@@ -342,14 +356,27 @@ impl AstVisitor for Executor {
     }
 
     fn visit_block(&mut self, node: &Block) {
+        let was_expr = self.expression_depth > 0;
+        self.expression_depth += 1;
         self.env.enter_scope();
-        for stmt in node.get_statements() {
+        let stmts = node.get_statements();
+        let len = stmts.len();
+        for (i, stmt) in stmts.iter().enumerate() {
             if self.returning || self.breaking || self.continuing || !self.errors.is_empty() {
                 break;
             }
-            stmt.accept(self);
+            let is_last = i == len - 1;
+            if is_last && was_expr {
+                // Last statement in expression context: keep value on stack
+                self.expression_depth -= 1;
+                stmt.accept(self);
+                self.expression_depth += 1;
+            } else {
+                stmt.accept(self);
+            }
         }
         self.env.exit_scope();
+        self.expression_depth -= 1;
     }
 
     fn visit_function(&mut self, node: &Function) {
@@ -473,7 +500,8 @@ impl AstVisitor for Executor {
     }
 
     fn visit_for_statement(&mut self, node: &ForStatement) {
-        let loop_var = node.get_loop_variable();
+        let loop_vars = node.get_loop_variables().clone();
+        let has_idx_val = loop_vars.len() >= 2;
 
         if let Some(iter) = node.get_iterable() {
             iter.accept(self);
@@ -482,8 +510,29 @@ impl AstVisitor for Executor {
             match iterable {
                 RtValue::Array(elems) => {
                     self.env.enter_scope();
-                    for elem in &elems {
-                        self.env.declare(loop_var, elem.clone());
+                    for (i, elem) in elems.iter().enumerate() {
+                        self.env.declare(&loop_vars[0], if has_idx_val { RtValue::Int(i as i64) } else { elem.clone() });
+                        if has_idx_val {
+                            self.env.declare(&loop_vars[1], elem.clone());
+                        }
+                        if let Some(body) = node.get_body() {
+                            body.accept(self);
+                        }
+                        if self.returning { break; }
+                        if self.continuing { self.continuing = false; continue; }
+                        if self.breaking { self.breaking = false; break; }
+                    }
+                    self.env.exit_scope();
+                }
+                RtValue::Str(s) => {
+                    self.env.enter_scope();
+                    let chars: Vec<char> = s.chars().collect();
+                    for (i, ch) in chars.iter().enumerate() {
+                        let ch_str = RtValue::Str(ch.to_string());
+                        self.env.declare(&loop_vars[0], if has_idx_val { RtValue::Int(i as i64) } else { ch_str.clone() });
+                        if has_idx_val {
+                            self.env.declare(&loop_vars[1], ch_str.clone());
+                        }
                         if let Some(body) = node.get_body() {
                             body.accept(self);
                         }
@@ -507,7 +556,10 @@ impl AstVisitor for Executor {
                     let mut i = start;
                     if step > 0 {
                         while i < end {
-                            self.env.declare(loop_var, RtValue::Int(i));
+                            self.env.declare(&loop_vars[0], RtValue::Int(i));
+                            if has_idx_val {
+                                self.env.declare(&loop_vars[1], RtValue::Int(i));
+                            }
                             if let Some(body) = node.get_body() {
                                 body.accept(self);
                             }
@@ -518,7 +570,10 @@ impl AstVisitor for Executor {
                         }
                     } else if step < 0 {
                         while i > end {
-                            self.env.declare(loop_var, RtValue::Int(i));
+                            self.env.declare(&loop_vars[0], RtValue::Int(i));
+                            if has_idx_val {
+                                self.env.declare(&loop_vars[1], RtValue::Int(i));
+                            }
                             if let Some(body) = node.get_body() {
                                 body.accept(self);
                             }
@@ -532,7 +587,7 @@ impl AstVisitor for Executor {
                 }
                 other => {
                     self.error(format!(
-                        "For loop iterable must be an array or range, got {}",
+                        "For loop iterable must be an array, string, or range, got {}",
                         other.type_name()
                     ));
                 }
@@ -564,8 +619,18 @@ impl AstVisitor for Executor {
                     // Evaluate left side value
                     if let Some(left) = node.get_left() {
                         if let Some(id) = left.as_any().downcast_ref::<Identifier>() {
-                            if let Some(existing) = self.env.lookup(id.get_name()) {
-                                let left_val = existing.clone();
+                            let name = id.get_name();
+                            let left_val = self.env.lookup(name).cloned().or_else(|| {
+                                // Check struct field
+                                self.current_impl_struct.as_ref().and_then(|_s| {
+                                    self.env.lookup("self").and_then(|sv| {
+                                        if let RtValue::Struct(_, fields) = sv {
+                                            fields.get(name).cloned()
+                                        } else { None }
+                                    })
+                                })
+                            });
+                            if let Some(left_val) = left_val {
                                 let arith_op: &str = &op[..1]; // "+=" -> "+"
                                 value = match arith_op {
                                     "+" => match (&left_val, &value) {
@@ -611,8 +676,25 @@ impl AstVisitor for Executor {
                 // Left side must be an identifier or array index
                 if let Some(left) = node.get_left() {
                     if let Some(id) = left.as_any().downcast_ref::<Identifier>() {
-                        if !self.env.assign(id.get_name(), value.clone()) {
-                            self.error(format!("Cannot assign to undeclared variable '{}'", id.get_name()));
+                        let name = id.get_name();
+                        // Check if it's a struct field in the current impl block
+                        let is_field = self.current_impl_struct.as_ref().map_or(false, |s| {
+                            self.struct_definitions.get(s).map_or(false, |fields| fields.contains(&name.to_string()))
+                        });
+                        if is_field {
+                            // Field assignment via self — update the self struct in env
+                            if let Some(self_val) = self.env.lookup("self") {
+                                if let RtValue::Struct(type_name, fields) = self_val {
+                                    let mut new_fields = fields.clone();
+                                    new_fields.insert(name.to_string(), value.clone());
+                                    self.env.assign("self", RtValue::Struct(type_name.clone(), new_fields));
+                                }
+                            }
+                            self.push(value);
+                            return;
+                        }
+                        if !self.env.assign(name, value.clone()) {
+                            self.error(format!("Cannot assign to undeclared variable '{}'", name));
                         }
                         self.push(value);
                         return;
@@ -826,6 +908,17 @@ impl AstVisitor for Executor {
 
     fn visit_identifier(&mut self, node: &Identifier) {
         let name = node.get_name();
+        // Check if it's a bare struct field access inside an impl method
+        if self.current_impl_struct.is_some() {
+            if let Some(self_val) = self.env.lookup("self") {
+                if let RtValue::Struct(_, fields) = self_val {
+                    if fields.contains_key(name) {
+                        self.push(fields[name].clone());
+                        return;
+                    }
+                }
+            }
+        }
         match self.env.lookup(name) {
             Some(v) => self.push(v.clone()),
             None => {
@@ -981,15 +1074,7 @@ impl AstVisitor for Executor {
         };
 
         if let Some(field_names) = self.struct_definitions.get(short_name) {
-            // Check if there's a user-defined constructor
-            let constructor_name = format!("{}.constructor", short_name);
-            if let Some(&func_ptr) = self.user_functions.get(&constructor_name) {
-                let func = unsafe { &*func_ptr };
-                self.call_user_function(func, &args);
-                return;
-            }
-
-            // No constructor: direct struct creation by positional field matching
+            // Direct struct creation by positional field matching
             let mut fields = HashMap::new();
             for (i, field_name) in field_names.iter().enumerate() {
                 let value = if i < args.len() {
@@ -1012,20 +1097,83 @@ impl AstVisitor for Executor {
             Err(_) => {}
         }
 
+        // Extract impl struct from qualified name (e.g. "range.constructor" → "range")
+        let impl_struct = func_name.rfind('.').map(|i| &func_name[..i]);
+
         // Try user-defined function (qualified name first, then short name)
         if let Some(&func_ptr) = self.user_functions.get(&func_name) {
             let func = unsafe { &*func_ptr };
-            self.call_user_function_with_copyback(func, &args, &array_arg_vars);
+            self.call_user_function_with_copyback(func, &args, &array_arg_vars, impl_struct);
             return;
         }
         if let Some(&func_ptr) = self.user_functions.get(short_name) {
             let func = unsafe { &*func_ptr };
-            self.call_user_function_with_copyback(func, &args, &array_arg_vars);
+            self.call_user_function_with_copyback(func, &args, &array_arg_vars, impl_struct);
             return;
         }
 
         self.error(format!("Undefined function: '{}'", func_name));
         self.push(RtValue::None_);
+    }
+
+    fn visit_match_expression(&mut self, node: &MatchExpression) {
+        let was_expr = self.expression_depth > 0;
+        self.expression_depth += 1;
+
+        // Evaluate scrutinee
+        if let Some(scrut) = node.get_scrutinee() {
+            scrut.accept(self);
+        }
+        let scrut_val = self.pop();
+
+        // Try each arm
+        let mut matched = false;
+        for arm in node.get_arms() {
+            let matches = match &arm.pattern {
+                MatchPattern::Wildcard => true,
+                MatchPattern::Variable(name) => {
+                    self.env.enter_scope();
+                    self.env.declare(name, scrut_val.clone());
+                    true
+                }
+                MatchPattern::Literal(lit) => {
+                    let lit_val = match lit {
+                        RtValueSimple::Int(n) => RtValue::Int(*n),
+                        RtValueSimple::FloatStr(s) => {
+                            if let Ok(f) = s.parse::<f64>() { RtValue::Float(f) } else { RtValue::Str(s.clone()) }
+                        }
+                        RtValueSimple::Str(s) => RtValue::Str(s.clone()),
+                        RtValueSimple::Bool(b) => RtValue::Bool(*b),
+                    };
+                    values_equal(&scrut_val, &lit_val)
+                }
+            };
+
+            if matches {
+                matched = true;
+                if let Some(ref body) = arm.body {
+                    body.accept(self);
+                }
+                if let MatchPattern::Variable(_) = &arm.pattern {
+                    self.env.exit_scope();
+                }
+                break;
+            }
+
+            if let MatchPattern::Variable(_) = &arm.pattern {
+                self.env.exit_scope();
+            }
+        }
+
+        if !matched {
+            self.error(format!("Match error: no arm matched value {}", scrut_val));
+            self.push(RtValue::None_);
+        }
+
+        self.expression_depth -= 1;
+        if !was_expr && !self.value_stack.is_empty() {
+            let _ = self.pop();
+        }
     }
 
     fn visit_struct_literal(&mut self, node: &StructLiteral) {
@@ -1529,6 +1677,11 @@ impl Executor {
             self.current_module_dir = parent.to_str().map(|s| s.to_string());
         }
 
+        // Derive module name from file path
+        if let Some(stem) = Path::new(&file_path).file_stem().and_then(|s| s.to_str()) {
+            self.current_module = stem.to_string();
+        }
+
         self.loaded_modules.insert(module_name.to_string());
         self.load_program_declarations(&prog);
         self.loaded_programs.push(prog);
@@ -1550,7 +1703,7 @@ impl Executor {
 
         // Second pass: process module declarations, nested imports, and exports
         for stmt in program.get_statements() {
-            if stmt.as_any().downcast_ref::<ModuleStatement>().is_some() {
+            if false {
                 stmt.accept(self);
             } else if let Some(import_stmt) = stmt.as_any().downcast_ref::<ImportStatement>() {
                 let name = import_stmt.get_module_name();

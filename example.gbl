@@ -1,4 +1,3 @@
-module main
 import io
 
 struct Point {
@@ -40,5 +39,39 @@ func main(): int {
     }
     
     io.print("End of Task!\n")
+
+    // New feature: match expression
+    var grade = match 85 {
+        100 => "A+",
+        90 => "A",
+        _ => "B"
+    }
+    io.print(@"Grade: {grade}\n")
+
+    // New feature: block expression
+    var doubled = {
+        var tmp = p.x + p.y
+        tmp * 2
+    }
+    io.print(@"Doubled: {doubled}\n")
+
+    // New feature: extended for (index + value)
+    var items: vec<int> = [10, 20, 30]
+    io.print("Items: ")
+    for i, v in items {
+        io.print(i)
+        io.print(":")
+        io.print(v)
+        io.print(" ")
+    }
+    io.print("\n")
+
+    // New feature: string iteration
+    io.print("Chars: ")
+    for ch in "Go" {
+        io.print(ch)
+    }
+    io.print("\n")
+
     return 0
 }

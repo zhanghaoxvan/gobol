@@ -1,5 +1,4 @@
 #[library_features(hidden = true)] // user want 'range(0, 10)' instead of 'range.range(0, 10)'
-module range
 
 // ==================== 结构定义 ====================
 struct range {
@@ -28,7 +27,7 @@ impl range {
 
     // ==================== 方法 ====================
     // 转换为 int[]
-    convert int[](self) {
+    convert int[](self): int[] {
         var result: int[]
         var i: int = _start
         
@@ -48,7 +47,7 @@ impl range {
     }
 
     // 迭代器接口（用于 for 循环）
-    iter(self) {
+    iter(self): range_iterator {
         return range_iterator(_start, _end, _step)
     }
 

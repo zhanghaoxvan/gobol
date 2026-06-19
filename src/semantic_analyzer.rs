@@ -76,6 +76,12 @@ impl SemanticAnalyzer {
         self.env.declare_function("_read", &DataType::Str, "__builtins__");
         self.env.declare_function("panic", &DataType::None_, "__builtins__");
 
+        // Register io functions as built-ins (stdlib wrappers)
+        self.env.declare_module("io");
+        self.env.declare_function("print", &DataType::None_, "io");
+        self.env.declare_function("println", &DataType::None_, "io");
+        self.env.declare_function("read", &DataType::Str, "io");
+
         // Auto-import __setup__ which loads io, range, etc. from lib/
         self.load_module("__setup__");
 
@@ -440,11 +446,27 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         // Body
+        let mut has_tail_expr = false;
         if let Some(body) = node.get_body() {
             body.accept(self);
+            // Check if last statement is a tail expression (implicit return)
+            let stmts = body.get_statements();
+            if let Some(last) = stmts.last() {
+                if let Some(es) = last.as_any().downcast_ref::<ExpressionStatement>() {
+                    if es.tail {
+                        has_tail_expr = true;
+                    }
+                }
+                // Also treat if/match/block expressions as implicit returns
+                if last.as_any().downcast_ref::<IfStatement>().is_some()
+                    || last.as_any().downcast_ref::<MatchExpression>().is_some()
+                {
+                    has_tail_expr = true;
+                }
+            }
         }
 
-        if return_type != DataType::None_ && !self.has_return_statement {
+        if return_type != DataType::None_ && !self.has_return_statement && !has_tail_expr {
             self.error(&format!(
                 "Function '{}' must return a value of type {}",
                 self.current_function,

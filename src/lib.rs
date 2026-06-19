@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod ast_builder;
 pub mod ast_printer;
+pub mod codegen_c;
 pub mod environment;
 pub mod error;
 pub mod executor;

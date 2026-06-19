@@ -69,6 +69,9 @@ impl Builtins {
         functions.insert("__builtins__._print".to_string(), builtin_print);
         functions.insert("__builtins__._read".to_string(), builtin_read);
         functions.insert("__builtins__.panic".to_string(), builtin_panic);
+        functions.insert("io.println".to_string(), builtin_println);
+        functions.insert("io.print".to_string(), builtin_print);
+        functions.insert("io.read".to_string(), builtin_read);
         Builtins { functions }
     }
 
@@ -84,6 +87,14 @@ fn builtin_print(args: &[RtValue]) -> Result<RtValue, String> {
     for arg in args {
         print!("{}", arg);
     }
+    Ok(RtValue::None_)
+}
+
+fn builtin_println(args: &[RtValue]) -> Result<RtValue, String> {
+    for arg in args {
+        print!("{}", arg);
+    }
+    println!();
     Ok(RtValue::None_)
 }
 
@@ -218,6 +229,9 @@ impl Executor {
         let prev_impl = self.current_impl_struct.clone();
         if let Some(s) = impl_struct {
             self.current_impl_struct = Some(s.to_string());
+            // Create self for constructors/methods inside impl blocks
+            let self_val = RtValue::Struct(s.to_string(), HashMap::new());
+            self.env.declare("self", self_val);
         }
         self.env.enter_scope();
 
@@ -243,8 +257,22 @@ impl Executor {
             body.accept(self);
         }
 
+        // Capture result: explicit return, or tail expression from value stack
         let result = if self.returning {
             self.return_value.clone()
+        } else if !self.value_stack.is_empty() {
+            // Check if last statement was a tail expression
+            let body = func.get_body();
+            let has_tail = body.map_or(false, |b| {
+                b.get_statements().last().map_or(false, |s| {
+                    s.as_any().downcast_ref::<ExpressionStatement>().map_or(false, |es| es.tail)
+                })
+            });
+            if has_tail {
+                self.pop()
+            } else {
+                RtValue::None_
+            }
         } else {
             RtValue::None_
         };
@@ -380,17 +408,18 @@ impl AstVisitor for Executor {
     }
 
     fn visit_function(&mut self, node: &Function) {
-        // Store function pointer with module-qualified name
-        let qualified = if self.current_module.is_empty() {
+        // For constructors/methods in impl blocks, use struct name as prefix
+        let prefix = self.current_impl_struct.as_deref().unwrap_or(&self.current_module);
+        let qualified = if prefix.is_empty() {
             node.get_name().to_string()
         } else {
-            format!("{}.{}", self.current_module, node.get_name())
+            format!("{}.{}", prefix, node.get_name())
         };
         self.user_functions.insert(
             qualified.clone(),
             node as *const Function,
         );
-        // Also register under short name for unqualified calls within the same module
+        // Also register under short name for unqualified calls
         self.user_functions.insert(
             node.get_name().to_string(),
             node as *const Function,
@@ -422,7 +451,9 @@ impl AstVisitor for Executor {
     fn visit_expression_statement(&mut self, node: &ExpressionStatement) {
         if let Some(expr) = node.get_expression() {
             expr.accept(self);
-            if self.expression_depth == 0 {
+            // Tail expressions (no semicolon) keep their value
+            // Explicit statements (with semicolon) discard their value
+            if !node.tail && self.expression_depth == 0 {
                 self.pop(); // discard result in statement context
             }
         }
@@ -700,6 +731,28 @@ impl AstVisitor for Executor {
                         return;
                     }
 
+                    if let Some(member) = left.as_any().downcast_ref::<MemberAccess>() {
+                        // self.field = value
+                        if let Some(obj) = member.get_object() {
+                            if let Some(obj_id) = obj.as_any().downcast_ref::<Identifier>() {
+                                if obj_id.get_name() == "self" {
+                                    if let Some(self_val) = self.env.lookup("self") {
+                                        if let RtValue::Struct(type_name, fields) = self_val {
+                                            let mut new_fields = fields.clone();
+                                            new_fields.insert(member.get_member().to_string(), value.clone());
+                                            self.env.assign("self", RtValue::Struct(type_name.clone(), new_fields));
+                                            self.push(value);
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.error("Invalid assignment target".to_string());
+                        self.push(RtValue::None_);
+                        return;
+                    }
+
                     if let Some(arr_idx) = left.as_any().downcast_ref::<ArrayIndex>() {
                         // Evaluate array and index
                         self.assign_array_element(arr_idx, value.clone());
@@ -872,8 +925,21 @@ impl AstVisitor for Executor {
             },
             "str" => RtValue::Str(value.to_string_val()),
             "bool" => RtValue::Bool(value.is_truthy()),
-            _ => {
-                self.error(format!("Cannot cast to unknown type '{}'", target));
+            other => {
+                // Try calling convert_TargetType method
+                let convert_name = format!("convert_{}", other);
+                if let Some(&func_ptr) = self.user_functions.get(&convert_name) {
+                    let func = unsafe { &*func_ptr };
+                    self.call_user_function_with_copyback(func, &[value], &[], None);
+                    return;
+                }
+                // Also try short name lookup
+                if let Some(&func_ptr) = self.user_functions.get(other) {
+                    let func = unsafe { &*func_ptr };
+                    self.call_user_function_with_copyback(func, &[value], &[], None);
+                    return;
+                }
+                self.error(format!("Cannot cast to '{}'", other));
                 RtValue::None_
             }
         };
@@ -1073,8 +1139,19 @@ impl AstVisitor for Executor {
             &func_name
         };
 
-        if let Some(field_names) = self.struct_definitions.get(short_name) {
-            // Direct struct creation by positional field matching
+        if let Some(_field_names) = self.struct_definitions.get(short_name) {
+            // Try calling func new() first (language.md constructor convention)
+            let new_name = format!("{}.new", short_name);
+            let constructor_name = format!("{}.constructor", short_name);
+            if let Some(&func_ptr) = self.user_functions.get(&new_name)
+                .or_else(|| self.user_functions.get(&constructor_name))
+            {
+                let func = unsafe { &*func_ptr };
+                self.call_user_function_with_copyback(func, &args, &[], Some(short_name));
+                return;
+            }
+            // Fallback: direct struct creation by positional field matching
+            let field_names = self.struct_definitions.get(short_name).unwrap();
             let mut fields = HashMap::new();
             for (i, field_name) in field_names.iter().enumerate() {
                 let value = if i < args.len() {

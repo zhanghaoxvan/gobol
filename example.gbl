@@ -1,77 +1,77 @@
-import io
+import io;
 
 struct Point {
     x: int,
-    y: int
-}
+    y: int,
+};
 
 impl Point {
     constructor(x: int, y: int) {
-        self.x = x
-        self.y = y
+        self.x = x;
+        self.y = y;
     }
-}
+};
 
 func add(p: Point): int {
-    return p.x + p.y
+    p.x + p.y
 }
 
 func main(): int {
-    var name: str = "Gobol"
-    var arr: int[10][10]
-    arr[2][2] = 114514
-    var flag: bool = true
-    io.print(@"Hello from {name}\n")
-    io.print(@"arr[2] is {arr[2][2]}!\n")
+    var name: str = "Gobol";
+    var arr: int[10][10];
+    arr[2][2] = 114514;
+    var flag: bool = true;
+    io.print(@"Hello from {name}\n");
+    io.print(@"arr[2] is {arr[2][2]}!\n");
 
     for i in 0..10 {
-        io.print(@"Number {i}\n")
+        io.print(@"Number {i}\n");
     }
 
-    var p: Point = Point(1, 2)
+    var p: Point = Point(1, 2);
     
-    io.print(@"Calc: {add(p)}\n")
+    io.print(@"Calc: {add(p)}\n");
 
     if arr[2][2] == 114514 {
-        io.print("Right!\n")
+        io.print("Right!\n");
     } else {
-        io.print("Wrong!\n")
+        io.print("Wrong!\n");
     }
     
-    io.print("End of Task!\n")
+    io.print("End of Task!\n");
 
     // New feature: match expression
     var grade = match 85 {
         100 => "A+",
         90 => "A",
         _ => "B"
-    }
-    io.print(@"Grade: {grade}\n")
+    };
+    io.print(@"Grade: {grade}\n");
 
     // New feature: block expression
     var doubled = {
-        var tmp = p.x + p.y
+        var tmp = p.x + p.y;
         tmp * 2
-    }
-    io.print(@"Doubled: {doubled}\n")
+    };
+    io.print(@"Doubled: {doubled}\n");
 
     // New feature: extended for (index + value)
-    var items: vec<int> = [10, 20, 30]
-    io.print("Items: ")
+    var items: vec<int> = [10, 20, 30];
+    io.print("Items: ");
     for i, v in items {
-        io.print(i)
-        io.print(":")
-        io.print(v)
-        io.print(" ")
+        io.print(i);
+        io.print(":");
+        io.print(v);
+        io.print(" ");
     }
-    io.print("\n")
+    io.print("\n");
 
     // New feature: string iteration
-    io.print("Chars: ")
+    io.print("Chars: ");
     for ch in "Go" {
-        io.print(ch)
+        io.print(ch);
     }
-    io.print("\n")
+    io.print("\n");
 
-    return 0
+    return 0;
 }

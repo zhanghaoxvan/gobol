@@ -100,8 +100,16 @@ impl AstBuilder {
         self.match_type(&TokenType::EndOfLine)
     }
 
+    fn is_semicolon(&self) -> bool {
+        self.match_value(";")
+    }
+
+    fn is_stmt_terminator(&self) -> bool {
+        self.is_end_of_line() || self.is_semicolon()
+    }
+
     fn consume_end_of_line(&mut self) {
-        while self.is_end_of_line() {
+        while self.is_end_of_line() || self.is_semicolon() {
             self.advance();
         }
     }
@@ -770,8 +778,18 @@ impl AstBuilder {
 
     fn parse_expression_statement(&mut self) -> Option<Box<dyn Statement>> {
         let expr = self.parse_expression()?;
+        // Check for explicit semicolon terminator
+        let has_semi = self.is_semicolon();
+        if has_semi {
+            self.advance(); // consume ';'
+        }
         self.consume_end_of_line();
-        Some(Box::new(ExpressionStatement::new(Some(expr))))
+        if has_semi {
+            Some(Box::new(ExpressionStatement::new(Some(expr))))
+        } else {
+            // No semicolon → tail expression (value-producing)
+            Some(Box::new(ExpressionStatement::new_tail(Some(expr))))
+        }
     }
 
     fn parse_return_statement(&mut self) -> Option<Box<dyn Statement>> {

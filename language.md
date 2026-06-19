@@ -1,7 +1,3 @@
-好！我们把 `language.md` 改成**中英双语对照**格式，和你原来的风格保持一致。
-
----
-
 # Gobol Language Documentation
 
 **Author**: zhanghaoxvan  

@@ -1,20 +1,23 @@
+import io;
 
-struct Point {
-    x: int,
-    y: int
-}
+struct Rect {
+    width: int,
+    height: int,
+};
 
-impl Point {
-    constructor(x: int, y: int) {
-        self.x = x
-        self.y = y
+impl Rect {
+    func new(w: int, h: int): Rect {
+        self.width = w;
+        self.height = h;
+        self
+    }
+
+    func area(self): int {
+        self.width * self.height
     }
 }
 
-func main(): int {
-    var p = Point(3, 4)
-    io.print(p.x)
-    io.print(" ")
-    io.print(p.y)
-    return 0
+func main() {
+    var r = Rect.new(10, 20);
+    io.println(@"area: {r.area()}");
 }

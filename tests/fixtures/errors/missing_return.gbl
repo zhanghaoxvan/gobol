@@ -1,9 +1,10 @@
+import io;
 
-func missing_return(): int {
-    var x = 10
+func bad(): int {
+    io.println("missing return");
+    // error: function must return a value
 }
 
-func main(): int {
-    missing_return()
-    return 0
+func main() {
+    0
 }

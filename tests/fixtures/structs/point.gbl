@@ -1,13 +1,23 @@
+import io;
 
 struct Point {
     x: int,
-    y: int
+    y: int,
+};
+
+impl Point {
+    func new(x: int, y: int): Point {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
+    func distance(self): float {
+        (self.x * self.x + self.y * self.y) as float
+    }
 }
 
-func main(): int {
-    var p: Point = Point{x: 10, y: 20}
-    io.print(p.x)
-    io.print(" ")
-    io.print(p.y)
-    return 0
+func main() {
+    var p = Point.new(3, 4);
+    io.println(@"distance: {p.distance()}");
 }

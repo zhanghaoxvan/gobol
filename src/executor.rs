@@ -69,9 +69,7 @@ impl Builtins {
         functions.insert("__builtins__._print".to_string(), builtin_print);
         functions.insert("__builtins__._read".to_string(), builtin_read);
         functions.insert("__builtins__.panic".to_string(), builtin_panic);
-        functions.insert("io.println".to_string(), builtin_println);
-        functions.insert("io.print".to_string(), builtin_print);
-        functions.insert("io.read".to_string(), builtin_read);
+        functions.insert("__builtins__.exit".to_string(), builtin_exit);
         Builtins { functions }
     }
 
@@ -90,6 +88,7 @@ fn builtin_print(args: &[RtValue]) -> Result<RtValue, String> {
     Ok(RtValue::None_)
 }
 
+#[allow(dead_code)]
 fn builtin_println(args: &[RtValue]) -> Result<RtValue, String> {
     for arg in args {
         print!("{}", arg);
@@ -115,6 +114,11 @@ fn builtin_read(_args: &[RtValue]) -> Result<RtValue, String> {
     }
 }
 
+
+fn builtin_exit(args: &[RtValue]) -> Result<RtValue, String> {
+    let code = args.first().and_then(|v| if let RtValue::Int(n) = v { Some(*n as i32) } else { None }).unwrap_or(0);
+    std::process::exit(code);
+}
 
 fn builtin_panic(args: &[RtValue]) -> Result<RtValue, String> {
     let msg = if args.is_empty() {
@@ -188,6 +192,10 @@ impl Executor {
         } else {
             self.current_module = "main".to_string();
         }
+        // Set module directory for relative imports
+        if let Some(parent) = Path::new(file_path).parent() {
+            self.current_module_dir = parent.to_str().map(|s| s.to_string());
+        }
     }
 
     pub fn execute(&mut self, program: &Program) -> Result<i32, Vec<String>> {
@@ -197,10 +205,7 @@ impl Executor {
             return Err(self.errors.clone());
         }
 
-        match &self.return_value {
-            RtValue::Int(n) => Ok(*n as i32),
-            _ => Ok(0),
-        }
+        Ok(0) // main() returns void; use exit(code) to signal
     }
 
     fn error(&mut self, msg: String) {
@@ -1642,8 +1647,12 @@ impl Executor {
                     if let Some(obj_id) = obj.as_any().downcast_ref::<Identifier>() {
                         let obj_name = obj_id.get_name();
                         let method_name = member.get_member();
-                        // Check if this is a method call on a runtime variable
-                        if self.env.lookup(obj_name).map_or(false, |v| !matches!(v, RtValue::None_)) {
+                        // Check if obj_name is a struct type definition
+                        let is_struct_type = self.struct_definitions.contains_key(obj_name);
+                        // Check if this is a method call on a runtime variable (not a struct type)
+                        if !is_struct_type
+                            && self.env.lookup(obj_name).map_or(false, |v| !matches!(v, RtValue::None_))
+                        {
                             // Method dispatch: look up method by name
                             let qualified = if self.current_module.is_empty() {
                                 method_name.to_string()
@@ -1655,7 +1664,7 @@ impl Executor {
                             }
                             return method_name.to_string();
                         }
-                        // Module-qualified call: module.func
+                        // Module-qualified call or struct constructor: module.func
                         return format!("{}.{}", obj_name, method_name);
                     }
                 }
@@ -1690,11 +1699,18 @@ impl Executor {
             if Path::new(&full).exists() {
                 return Some(full);
             }
-            // Fallback: lib/X/__setup__.gbl
             let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
             let setup_full = format!("{}/{}", lib_path, setup_relative);
             if Path::new(&setup_full).exists() {
                 return Some(setup_full);
+            }
+            let src_full = format!("{}/src/{}", lib_path, relative);
+            if Path::new(&src_full).exists() {
+                return Some(src_full);
+            }
+            let lib_full = format!("{}/lib/{}", lib_path, relative);
+            if Path::new(&lib_full).exists() {
+                return Some(lib_full);
             }
         }
         // Third: try without lib prefix
@@ -1754,10 +1770,9 @@ impl Executor {
             self.current_module_dir = parent.to_str().map(|s| s.to_string());
         }
 
-        // Derive module name from file path
-        if let Some(stem) = Path::new(&file_path).file_stem().and_then(|s| s.to_str()) {
-            self.current_module = stem.to_string();
-        }
+        // Use the full module name (import path) for function naming,
+        // so that "import lib.math as m" makes functions accessible as "lib.math.X"
+        self.current_module = module_name.to_string();
 
         self.loaded_modules.insert(module_name.to_string());
         self.load_program_declarations(&prog);

@@ -1,11 +1,10 @@
+import io;
 
-func main(): int {
-    var x = 10
-    
+func main() {
+    var x = 10;
     if x > 5 {
-        io.print("greater")
+        io.println("large");
     } else {
-        io.print("less")
+        io.println("small");
     }
-    return 0
 }

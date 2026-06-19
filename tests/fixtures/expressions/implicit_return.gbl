@@ -5,6 +5,6 @@ func add(a: int, b: int): int {
 }
 
 func main() {
-    var result = add(3, 5);
-    io.println(@"3 + 5 = {result}");
+    var result = add(5, 7);
+    io.println(@"5 + 7 = {result}");
 }

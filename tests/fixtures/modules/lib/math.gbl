@@ -1,8 +1,9 @@
-
 func add(a: int, b: int): int {
-    return a + b
+    a + b
 }
 
-func multiply(a: int, b: int): int {
-    return a * b
+func sub(a: int, b: int): int {
+    a - b
 }
+
+export(add, sub);

@@ -226,11 +226,23 @@ impl AstBuilder {
             }
         }
 
+        // Expression statements can start with: identifier, number, string, format string,
+        // certain keywords (true, false, null, self, if, match, new),
+        // and certain operators: (, !, -, +, [, {
+        let is_expr_keyword = self.match_type(&TokenType::Keyword) && matches!(
+            self.current_token().value.as_str(),
+            "true" | "false" | "null" | "self" | "if" | "match" | "new"
+        );
+        let is_expr_operator = self.match_type(&TokenType::Operator) && matches!(
+            self.current_token().value.as_str(),
+            "(" | "!" | "-" | "+" | "[" | "{"
+        );
         if self.match_type(&TokenType::Identifier)
             || self.match_type(&TokenType::Number)
             || self.match_type(&TokenType::String)
             || self.match_type(&TokenType::FormatString)
-            || (self.match_type(&TokenType::Keyword) && self.current_token().value == "self")
+            || is_expr_keyword
+            || is_expr_operator
         {
             return self.parse_expression_statement();
         }
@@ -1013,7 +1025,7 @@ impl AstBuilder {
         loop {
             if self.match_value(".") {
                 self.advance();
-                if !self.match_type(&TokenType::Identifier) {
+                if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
                     self.log_error("Expected identifier after '.'");
                     return Some(expr);
                 }

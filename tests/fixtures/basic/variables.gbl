@@ -1,13 +1,9 @@
+import io;
 
-func main(): int {
-    var x: int = 42
-    var y = 3.14
-    val name: str = "Gobol"
-    
-    io.print(x)
-    io.print(" ")
-    io.print(y)
-    io.print(" ")
-    io.print(name)
-    return 0
+func main() {
+    var x: int = 10;
+    val y: str = "hello";
+    var z = x;
+
+    io.println(@"x = {x}, y = {y}, z = {z}");
 }

@@ -1,0 +1,9 @@
+import io;
+
+func main() {
+    var doubled = {
+        var tmp = 10;
+        tmp * 2
+    };
+    io.println(@"doubled: {doubled}");
+}

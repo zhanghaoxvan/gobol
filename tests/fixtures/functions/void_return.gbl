@@ -1,10 +1,9 @@
+import io;
 
 func greet(name: str) {
-    io.print("Hello, ")
-    io.print(name)
+    io.println(@"Hello, {name}!");
 }
 
-func main(): int {
-    greet("Gobol")
-    return 0
+func main() {
+    greet("Gobol");
 }

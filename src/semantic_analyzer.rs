@@ -75,12 +75,7 @@ impl SemanticAnalyzer {
         self.env.declare_function("_print", &DataType::None_, "__builtins__");
         self.env.declare_function("_read", &DataType::Str, "__builtins__");
         self.env.declare_function("panic", &DataType::None_, "__builtins__");
-
-        // Register io functions as built-ins (stdlib wrappers)
-        self.env.declare_module("io");
-        self.env.declare_function("print", &DataType::None_, "io");
-        self.env.declare_function("println", &DataType::None_, "io");
-        self.env.declare_function("read", &DataType::Str, "io");
+        self.env.declare_function("exit", &DataType::None_, "__builtins__");
 
         // Auto-import __setup__ which loads io, range, etc. from lib/
         self.load_module("__setup__");
@@ -219,15 +214,26 @@ impl SemanticAnalyzer {
 
         // Second: check each lib path
         for lib_path in &self.lib_paths {
+            // <lib_path>/<module>.gbl
             let full = format!("{}/{}", lib_path, relative);
             if Path::new(&full).exists() {
                 return Some(full);
             }
-            // Fallback: lib/X/__setup__.gbl
+            // <lib_path>/<module>/__setup__.gbl
             let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
             let setup_full = format!("{}/{}", lib_path, setup_relative);
             if Path::new(&setup_full).exists() {
                 return Some(setup_full);
+            }
+            // <lib_path>/src/<module>.gbl (for grape packages)
+            let src_full = format!("{}/src/{}", lib_path, relative);
+            if Path::new(&src_full).exists() {
+                return Some(src_full);
+            }
+            // <lib_path>/lib/<module>.gbl
+            let lib_full = format!("{}/lib/{}", lib_path, relative);
+            if Path::new(&lib_full).exists() {
+                return Some(lib_full);
             }
         }
         // Third: try without lib prefix

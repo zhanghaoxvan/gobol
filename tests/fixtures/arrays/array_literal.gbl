@@ -1,8 +1,9 @@
+import io;
 
-func main(): int {
-    var arr: int[] = [1, 2, 3, 4, 5]
-    for i in arr {
-        io.print(i)
+func main() {
+    var arr: int[] = [1, 2, 3, 4, 5];
+    for i, v in arr {
+        io.print(v);
     }
-    return 0
+    io.print("\n");
 }

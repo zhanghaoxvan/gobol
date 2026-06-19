@@ -69,9 +69,7 @@ impl Builtins {
         functions.insert("__builtins__._print".to_string(), builtin_print);
         functions.insert("__builtins__._read".to_string(), builtin_read);
         functions.insert("__builtins__.panic".to_string(), builtin_panic);
-        functions.insert("io.println".to_string(), builtin_println);
-        functions.insert("io.print".to_string(), builtin_print);
-        functions.insert("io.read".to_string(), builtin_read);
+        functions.insert("__builtins__.exit".to_string(), builtin_exit);
         Builtins { functions }
     }
 
@@ -115,6 +113,11 @@ fn builtin_read(_args: &[RtValue]) -> Result<RtValue, String> {
     }
 }
 
+
+fn builtin_exit(args: &[RtValue]) -> Result<RtValue, String> {
+    let code = args.first().and_then(|v| if let RtValue::Int(n) = v { Some(*n as i32) } else { None }).unwrap_or(0);
+    std::process::exit(code);
+}
 
 fn builtin_panic(args: &[RtValue]) -> Result<RtValue, String> {
     let msg = if args.is_empty() {
@@ -197,10 +200,7 @@ impl Executor {
             return Err(self.errors.clone());
         }
 
-        match &self.return_value {
-            RtValue::Int(n) => Ok(*n as i32),
-            _ => Ok(0),
-        }
+        Ok(0) // main() returns void; use exit(code) to signal
     }
 
     fn error(&mut self, msg: String) {
@@ -1690,11 +1690,18 @@ impl Executor {
             if Path::new(&full).exists() {
                 return Some(full);
             }
-            // Fallback: lib/X/__setup__.gbl
             let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
             let setup_full = format!("{}/{}", lib_path, setup_relative);
             if Path::new(&setup_full).exists() {
                 return Some(setup_full);
+            }
+            let src_full = format!("{}/src/{}", lib_path, relative);
+            if Path::new(&src_full).exists() {
+                return Some(src_full);
+            }
+            let lib_full = format!("{}/lib/{}", lib_path, relative);
+            if Path::new(&lib_full).exists() {
+                return Some(lib_full);
             }
         }
         // Third: try without lib prefix

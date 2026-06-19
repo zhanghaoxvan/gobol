@@ -1,8 +1,8 @@
 import io;
 
 func main() {
-    for i in 0..10 {
-        io.print(i);
+    for ch in "Gobol" {
+        io.print(ch);
     }
     io.print("\n");
 }

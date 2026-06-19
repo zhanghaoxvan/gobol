@@ -1,5 +1,5 @@
+import io;
 
-func main(): int {
-    io.print("Hello, World!")
-    return 0
+func main() {
+    io.println("Hello, World!");
 }

@@ -1,17 +1,28 @@
+import io;
 
 struct Rectangle {
     width: int,
-    height: int
-}
+    height: int,
+};
 
 impl Rectangle {
+    func new(w: int, h: int): Rectangle {
+        self.width = w;
+        self.height = h;
+        self
+    }
+
     func area(self): int {
-        return self.width * self.height
+        self.width * self.height
+    }
+
+    func perimeter(self): int {
+        2 * (self.width + self.height)
     }
 }
 
-func main(): int {
-    var rect: Rectangle = Rectangle{width: 10, height: 20}
-    io.print(rect.area())
-    return 0
+func main() {
+    var r = Rectangle.new(3, 4);
+    io.println(@"area: {r.area()}");
+    io.println(@"perimeter: {r.perimeter()}");
 }

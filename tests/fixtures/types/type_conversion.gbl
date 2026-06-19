@@ -1,14 +1,23 @@
+import io;
 
-func main(): int {
-    var a: int = 42
-    var b: float = a as float
-    var c: str = a as str
-    var d: bool = 1 as bool
-    
-    io.print(b)
-    io.print(" ")
-    io.print(c)
-    io.print(" ")
-    io.print(d)
-    return 0
+struct Point {
+    x: int,
+    y: int,
+};
+
+impl Point {
+    func new(x: int, y: int): Point {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
+    convert str(self): str {
+        @"({self.x}, {self.y})"
+    }
+}
+
+func main() {
+    var p = Point.new(3, 4);
+    io.println(@"p as str = {p as str}");
 }

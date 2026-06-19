@@ -1,16 +1,11 @@
-import __builtins__
-
 func print(s: str) {
     __builtins__._print(s)
 }
 
 func println(s: str) {
-    __builtins__._print(s);
-    __builtins__._print("\n");
+    __builtins__._print(s)
 }
 
 func read(): str {
     __builtins__._read()
 }
-
-export(print, println, read)

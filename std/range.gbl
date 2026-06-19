@@ -1,37 +1,35 @@
-#[library_features(hidden = true)] // user want 'range(0, 10)' instead of 'range.range(0, 10)'
+#[library_features(hidden = true)]
 
-// ==================== 结构定义 ====================
 struct range {
     _start: int,
     _end: int,
     _step: int
-};
+}
 
-// ==================== 构造函数 ====================
+struct range_iterator {
+    _current: int,
+    _end: int,
+    _step: int
+}
+
 impl range {
-    // 构造函数 1: range(start, end)
-    constructor(start: int, end: int): range {
+    func new(start: int, end: int): range {
         _start = start;
         _end = end;
         _step = 1;
         self
     }
 
-    // 构造函数 2: range(start, end, step)
-    constructor(start: int, end: int, step: int): range {
+    func new(start: int, end: int, step: int): range {
         _start = start;
         _end = end;
         _step = step;
         self
     }
 
-    // ==================== 方法 ====================
-    // 转换为 int[]
     convert int[](self): int[] {
         var result: int[];
         var i: int = _start;
-        
-        // 支持正步进和负步进
         if _step > 0 {
             while i < _end {
                 result.add(i);
@@ -46,35 +44,19 @@ impl range {
         result
     }
 
-    // 迭代器接口（用于 for 循环）
     iter(self): range_iterator {
         range_iterator(_start, _end, _step)
     }
 
-    // 获取起始值
-    func start(self): int {
-        _start
-    }
+    func start(self): int { _start }
+    func end(self): int { _end }
+    func step(self): int { _step }
 
-    // 获取结束值
-    func end(self): int {
-        _end
-    }
-
-    // 获取步长
-    func step(self): int {
-        _step
-    }
-
-    // 获取长度（元素个数）
     func len(self): int {
-        if _step == 0 {
-            return 0;
-        }
+        if _step == 0 { return 0; }
         (_end - _start + _step - 1) / _step
     }
 
-    // 判断是否包含某个值
     func contains(self, value: int): bool {
         if _step > 0 {
             value >= _start && value < _end && (value - _start) % _step == 0
@@ -82,39 +64,26 @@ impl range {
             value <= _start && value > _end && (value - _start) % _step == 0
         }
     }
-};
-
-// ==================== 迭代器 ====================
-struct range_iterator {
-    _current: int,
-    _end: int,
-    _step: int
-};
+}
 
 impl range_iterator {
-    constructor(current: int, end: int, step: int): range_iterator {
+    func new(current: int, end: int, step: int): range_iterator {
         _current = current;
         _end = end;
         _step = step;
         self
     }
 
-    // 迭代器协议：next() 返回 (value, has_next)
     func next(self): (int, bool) {
         if _step > 0 {
-            if _current >= _end {
-                return (0, false);
-            }
+            if _current >= _end { return (0, false); }
         } else {
-            if _current <= _end {
-                return (0, false);
-            }
+            if _current <= _end { return (0, false); }
         }
-        
         var value: int = _current;
         _current += _step;
         (value, true)
     }
-};
+}
 
-export(range, range_iterator);
+export(range, range_iterator)

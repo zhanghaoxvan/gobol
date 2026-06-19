@@ -1,13 +1,14 @@
+import io;
 
-func main(): int {
+func main() {
     for i in 0..10 {
         if i % 2 == 0 {
-            continue
+            continue;
         }
-        if i > 7 {
-            break
+        if i > 5 {
+            break;
         }
-        io.print(i)
+        io.print(i);
     }
-    return 0
+    io.print("\n");
 }

@@ -10,136 +10,158 @@ struct vec<T> {
     _data: T[]?,
     _len: int,
     _cap: int
-}
+};
 
 impl<T> vec<T> {
     constructor(): vec<T> {
-        _data = null
-        _len = 0
-        _cap = 0
-        return self
+        _data = null;
+        _len = 0;
+        _cap = 0;
+        self
     }
 
     constructor(arr: T[]): vec<T> {
-        var v: vec<T> = vec<T>.new()
+        var v: vec<T> = vec<T>();
         for item in arr {
-            v.push(item)
+            v.push(item);
         }
-        return v
+        v
     }
     
     constructor(capacity: int): vec<T> {
-        _data = new T[capacity]?
-        _len = 0
-        _cap = capacity
-        return self
+        _data = new T[capacity]?;
+        _len = 0;
+        _cap = capacity;
+        self
     }
     
-    func len(self): int { return _len }
-    func cap(self): int { return _cap }
-    func is_empty(self): bool { return _len == 0 }
+    func len(self): int {
+        _len
+    }
+    
+    func cap(self): int {
+        _cap
+    }
+    
+    func is_empty(self): bool {
+        _len == 0
+    }
     
     func get(self, index: int): T {
-        if index < 0 || index >= _len { panic("index out of bounds") }
-        return _data[index]
+        if index < 0 || index >= _len { 
+            panic("index out of bounds"); 
+        }
+        _data[index]
     }
     
     func set(self, index: int, value: T) {
-        if index < 0 || index >= _len { panic("index out of bounds") }
-        _data[index] = value
+        if index < 0 || index >= _len { 
+            panic("index out of bounds"); 
+        }
+        _data[index] = value;
     }
     
     func push(self, value: T) {
-        if _len >= _cap { _grow(self) }
-        if _data == null {
-            _data = new T[4]?
-            _cap = 4
+        if _len >= _cap { 
+            _grow(self); 
         }
-        _data[_len] = value
-        _len += 1
+        if _data == null {
+            _data = new T[4]?;
+            _cap = 4;
+        }
+        _data[_len] = value;
+        _len += 1;
     }
     
     func pop(self): T {
-        if _len == 0 { panic("pop from empty vec") }
-        _len -= 1
-        var value: T = _data[_len]
-        _data[_len] = null
-        return value
+        if _len == 0 { 
+            panic("pop from empty vec"); 
+        }
+        _len -= 1;
+        var value: T = _data[_len];
+        _data[_len] = null;
+        value
     }
     
     convert T[](self): T[] {
-        var result: T[] = new T[_len]
+        var result: T[] = new T[_len];
         for i in 0.._len {
-            result[i] = _data[i]
+            result[i] = _data[i];
         }
-        return result
+        result
     }
     
     iter(self) {
-        return vec_iterator(_data, _len)
+        vec_iterator(_data, _len)
     }
-}
+};
 
 func _grow<T>(self: vec<T>) {
-    var new_cap: int = if _cap == 0 { 4 } else { _cap * 2 }
-    var new_data: T[] = new T[new_cap]?
+    var new_cap: int = if _cap == 0 { 4 } else { _cap * 2 };
+    var new_data: T[] = new T[new_cap]?;
     for i in 0.._len {
-        new_data[i] = _data[i]
+        new_data[i] = _data[i];
     }
-    _data = new_data
-    _cap = new_cap
+    _data = new_data;
+    _cap = new_cap;
 }
 
 struct vec_iterator<T> {
     _data: T[]?,
     _len: int,
     _index: int
-}
+};
 
 impl<T> vec_iterator<T> {
     constructor(data: T[]?, len: int): vec_iterator<T> {
-        _data = data
-        _len = len
-        _index = 0
-        return self
+        _data = data;
+        _len = len;
+        _index = 0;
+        self
     }
     
     func next(self): (T, bool) {
-        if _index >= _len { return (null, false) }
-        var value: T = _data[_index]
-        _index += 1
-        return (value, true)
+        if _index >= _len { 
+            return (null, false); 
+        }
+        var value: T = _data[_index];
+        _index += 1;
+        (value, true)
     }
-}
+};
 
 // ==================== 运算符重载（全局函数）====================
 operator [](self: vec<T>, index: int): T {
-    return self.get(index)
+    self.get(index)
 }
 
 operator []=(self: vec<T>, index: int, value: T) {
-    self.set(index, value)
+    self.set(index, value);
 }
 
 operator +(left: vec<T>, right: vec<T>): vec<T> {
-    var result: vec<T> = vec<T>.new()
+    var result: vec<T> = vec<T>.new();
     for i in 0..left.len() {
-        result.push(left[i])
+        result.push(left[i]);
     }
     for i in 0..right.len() {
-        result.push(right[i])
+        result.push(right[i]);
     }
-    return result
+    result
 }
 
 operator ==(left: vec<T>, right: vec<T>): bool {
-    if left.len() != right.len() { return false }
-    for i in 0..left.len() {
-        if left[i] != right[i] { return false }
+    if left.len() != right.len() { 
+        return false; 
     }
-    return true
+    for i in 0..left.len() {
+        if left[i] != right[i] { 
+            return false; 
+        }
+    }
+    true
 }
 
 // ==================== 导出 ====================
 #[internal]
-export(vec)
+export(vec);

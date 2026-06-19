@@ -57,16 +57,20 @@ impl ErrorFormatter {
         let span = if span == 0 { 1 } else { span };
 
         let mut out = String::new();
-        // Line number
-        out.push_str(&format!("  \u{1b}[34m{}\u{1b}[0m | ", line));
-        // Source line
+        
+        // 行号宽度 + 前缀
+        let line_str = format!("{}", line);
+        let prefix = format!("  {} | ", line_str);
+        
+        // 输出源行
+        out.push_str(&format!("\u{1b}[34m{}\u{1b}[0m", prefix));
         out.push_str(source_line);
         out.push('\n');
-        // Caret
-        out.push_str("    | ");
-        for _ in 0..col {
-            out.push(' ');
-        }
+        
+        // 下划线：确保前缀长度一致
+        let prefix_len = prefix.len();
+        let spaces_before_caret = " ".repeat(prefix_len + col);
+        out.push_str(&spaces_before_caret);
         out.push_str("\u{1b}[31m");
         out.push('^');
         for _ in 1..span {
@@ -86,18 +90,26 @@ impl ErrorFormatter {
         let span = if span == 0 { 1 } else { span };
 
         let mut out = String::new();
-        out.push_str(&format!("  {} | ", line));
+
+        // 行号前缀：固定格式 "  {} | "
+        let line_str = format!("{}", line);
+        let prefix = format!("  {} | ", line_str);
+
+        // 输出源行
+        out.push_str(&prefix);
         out.push_str(source_line);
         out.push('\n');
-        out.push_str("    | ");
-        for _ in 0..col {
-            out.push(' ');
-        }
+
+        // 下划线：前缀长度 + 列偏移
+        let prefix_len = prefix.len();
+        let spaces_before_caret = " ".repeat(prefix_len + col);
+        out.push_str(&spaces_before_caret);
         out.push('^');
         for _ in 1..span {
             out.push('~');
         }
         out.push('\n');
+
         out
     }
 

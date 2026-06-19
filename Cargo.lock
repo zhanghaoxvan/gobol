@@ -99,6 +99,7 @@ dependencies = [
 name = "gobol"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "colored",
  "git2",
  "serde",

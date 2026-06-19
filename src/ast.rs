@@ -884,11 +884,16 @@ impl Statement for Declaration {
 
 pub struct ExpressionStatement {
     expression: Option<Box<dyn Expression>>,
+    pub tail: bool, // true if no semicolon follows (block return value)
 }
 
 impl ExpressionStatement {
     pub fn new(expression: Option<Box<dyn Expression>>) -> Self {
-        ExpressionStatement { expression }
+        ExpressionStatement { expression, tail: false }
+    }
+
+    pub fn new_tail(expression: Option<Box<dyn Expression>>) -> Self {
+        ExpressionStatement { expression, tail: true }
     }
 
     pub fn get_expression(&self) -> Option<&dyn Expression> {

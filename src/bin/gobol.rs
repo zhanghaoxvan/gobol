@@ -1,5 +1,6 @@
 use gobol::ast_builder::AstBuilder;
 use gobol::ast_printer::AstPrinter;
+use gobol::codegen_c::CodeGenC;
 use gobol::error::ErrorFormatter;
 use gobol::executor::Executor;
 use gobol::lexer::Lexer;
@@ -31,11 +32,14 @@ fn main() {
         println!();
         println!("Usage:");
         println!("  gobol <filename> [--verbose] [--lib-path <path>...]    Run a Gobol script");
+        println!("  gobol <filename> --compile [-o <out>]                  Compile to native binary via C");
         println!("  gobol --version                                        Show version information");
         println!("  gobol --help                                           Show this help message");
         println!();
         println!("Options:");
         println!("  --verbose, -v                                          Enable verbose output");
+        println!("  --compile, -c                                          Compile to native binary (via C)");
+        println!("  -o <file>                                              Output file name (with --compile)");
         println!("  --lib-path <path>                                      Add a library search path (can be used multiple times)");
         return;
     }
@@ -45,6 +49,10 @@ fn main() {
     }
 
     let is_verbose = args.iter().any(|s| s == "--verbose" || s == "-v");
+    let is_compile = args.iter().any(|s| s == "--compile" || s == "-c");
+    let out_name = args.iter().position(|s| s == "-o")
+        .and_then(|i| args.get(i + 1).cloned())
+        .unwrap_or_else(|| "a.out".to_string());
     
     // Parse --lib-path arguments (support multiple)
     let mut lib_paths_from_cli: Vec<String> = Vec::new();
@@ -178,6 +186,25 @@ fn main() {
     let semantic_passed = semantic_analyzer.analyze(&prog);
     if !semantic_passed {
         std::process::exit(1);
+    }
+
+    if is_compile {
+        if is_verbose {
+            println!();
+            println!("======= Step 4: C Codegen =======");
+        }
+        let mut codegen = CodeGenC::new();
+        let c_source = codegen.generate(&prog);
+        if is_verbose {
+            println!("{}", c_source);
+        }
+        match CodeGenC::compile(&c_source, &out_name) {
+            Ok(exit_code) => std::process::exit(exit_code),
+            Err(e) => {
+                eprintln!("Compilation failed: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     if is_verbose {

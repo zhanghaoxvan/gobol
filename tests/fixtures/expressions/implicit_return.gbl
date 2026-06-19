@@ -1,0 +1,10 @@
+import io;
+
+func add(a: int, b: int): int {
+    a + b
+}
+
+func main() {
+    var result = add(5, 7);
+    io.println(@"5 + 7 = {result}");
+}

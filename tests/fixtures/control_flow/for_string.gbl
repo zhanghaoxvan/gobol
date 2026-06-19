@@ -1,0 +1,8 @@
+import io;
+
+func main() {
+    for ch in "Gobol" {
+        io.print(ch);
+    }
+    io.print("\n");
+}

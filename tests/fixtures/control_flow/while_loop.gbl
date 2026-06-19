@@ -1,9 +1,10 @@
+import io;
 
-func main(): int {
-    var i = 0
+func main() {
+    var i = 0;
     while i < 5 {
-        io.print(i)
-        i += 1
+        io.print(i);
+        i += 1;
     }
-    return 0
+    io.print("\n");
 }

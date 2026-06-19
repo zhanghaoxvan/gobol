@@ -16,7 +16,7 @@ func add(p: Point): int {
     p.x + p.y
 }
 
-func main(): int {
+func main() {
     var name: str = "Gobol";
     var arr: int[10][10];
     arr[2][2] = 114514;
@@ -73,5 +73,4 @@ func main(): int {
     }
     io.print("\n");
 
-    return 0;
 }

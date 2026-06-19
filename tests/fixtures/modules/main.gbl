@@ -1,12 +1,7 @@
+import io;
+import lib.math as m;
 
-import math
-
-func main(): int {
-    var sum = math.add(10, 20)
-    var product = math.multiply(5, 6)
-    io.print("sum: ")
-    io.print(sum)
-    io.print(" product: ")
-    io.print(product)
-    return 0
+func main() {
+    var result = m.add(5, 3);
+    io.println(@"5 + 3 = {result}");
 }

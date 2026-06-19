@@ -1,6 +1,6 @@
+import io;
 
-func main(): int {
-    val x = 10
-    x = 20
-    return 0
+func main() {
+    val x = 10;
+    x = 20;  // error: cannot assign to constant
 }

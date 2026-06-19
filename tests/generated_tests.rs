@@ -220,3 +220,51 @@ fn test_types_type_conversion() {
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
 }
+
+/// 用例：expressions/match_expr.gbl | 预期正常运行
+#[test]
+fn test_expressions_match_expr() {
+    let path = fixture_path("fixtures/expressions/match_expr.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：expressions/block_expr.gbl | 预期正常运行
+#[test]
+fn test_expressions_block_expr() {
+    let path = fixture_path("fixtures/expressions/block_expr.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：expressions/implicit_return.gbl | 预期正常运行
+#[test]
+fn test_expressions_implicit_return() {
+    let path = fixture_path("fixtures/expressions/implicit_return.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：control_flow/for_index_value.gbl | 预期正常运行
+#[test]
+fn test_control_flow_for_index_value() {
+    let path = fixture_path("fixtures/control_flow/for_index_value.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：control_flow/for_string.gbl | 预期正常运行
+#[test]
+fn test_control_flow_for_string() {
+    let path = fixture_path("fixtures/control_flow/for_string.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：types/println.gbl | 预期正常运行
+#[test]
+fn test_types_println() {
+    let path = fixture_path("fixtures/types/println.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}

@@ -163,16 +163,15 @@ fn main() {
         lib_paths.push(path);
     }
 
-    // 4. std (standard library, lowest priority)
+    // 4. ./std (development stdlib, before installed)
+    lib_paths.push("std".to_string());
+
+    // 5. $GOBOL_INSTALL_DIR/std (installed stdlib, lowest priority)
     if let Ok(install_dir) = env::var("GOBOL_INSTALL_DIR") {
-        // Add $GOBOL_INSTALL_DIR/std
         let std_path = Path::new(&install_dir).join("std");
         if let Some(p) = std_path.to_str() {
             lib_paths.push(p.to_string());
         }
-    } else {
-        // Fallback to ./std if environment variable not set
-        lib_paths.push("std".to_string());
     }
 
     if is_verbose {

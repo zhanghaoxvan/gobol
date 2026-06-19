@@ -67,6 +67,10 @@ impl SemanticAnalyzer {
         } else {
             self.current_module = "main".to_string();
         }
+        // Set module directory for relative imports
+        if let Some(parent) = Path::new(file_path).parent() {
+            self.current_module_dir = parent.to_str().map(|s| s.to_string());
+        }
     }
 
     pub fn analyze(&mut self, program: &Program) -> bool {
@@ -75,12 +79,7 @@ impl SemanticAnalyzer {
         self.env.declare_function("_print", &DataType::None_, "__builtins__");
         self.env.declare_function("_read", &DataType::Str, "__builtins__");
         self.env.declare_function("panic", &DataType::None_, "__builtins__");
-
-        // Register io functions as built-ins (stdlib wrappers)
-        self.env.declare_module("io");
-        self.env.declare_function("print", &DataType::None_, "io");
-        self.env.declare_function("println", &DataType::None_, "io");
-        self.env.declare_function("read", &DataType::Str, "io");
+        self.env.declare_function("exit", &DataType::None_, "__builtins__");
 
         // Auto-import __setup__ which loads io, range, etc. from lib/
         self.load_module("__setup__");
@@ -219,15 +218,26 @@ impl SemanticAnalyzer {
 
         // Second: check each lib path
         for lib_path in &self.lib_paths {
+            // <lib_path>/<module>.gbl
             let full = format!("{}/{}", lib_path, relative);
             if Path::new(&full).exists() {
                 return Some(full);
             }
-            // Fallback: lib/X/__setup__.gbl
+            // <lib_path>/<module>/__setup__.gbl
             let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
             let setup_full = format!("{}/{}", lib_path, setup_relative);
             if Path::new(&setup_full).exists() {
                 return Some(setup_full);
+            }
+            // <lib_path>/src/<module>.gbl (for grape packages)
+            let src_full = format!("{}/src/{}", lib_path, relative);
+            if Path::new(&src_full).exists() {
+                return Some(src_full);
+            }
+            // <lib_path>/lib/<module>.gbl
+            let lib_full = format!("{}/lib/{}", lib_path, relative);
+            if Path::new(&lib_full).exists() {
+                return Some(lib_full);
             }
         }
         // Third: try without lib prefix
@@ -283,13 +293,9 @@ impl SemanticAnalyzer {
         // Save context
         let prev_module = self.current_module.clone();
 
-        // Derive module name from file path (e.g. std/math.gbl → "math")
-        let derived_module = Path::new(&file_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(module_name)
-            .to_string();
-        self.current_module = derived_module.clone();
+        // Use the full module name (import path) for function naming,
+        // so that "import lib.math as m" makes functions accessible as "lib.math.X"
+        self.current_module = module_name.to_string();
         self.env.declare_module(&self.current_module);
 
         // Only register declarations (imports, function signatures, structs)
@@ -322,6 +328,10 @@ impl SemanticAnalyzer {
                             let func_name = func.get_name().to_string();
                             let return_type = self.get_data_type_from_ast(func.get_return_type());
                             self.env.declare_function(&func_name, &return_type, &self.current_module);
+                            // Also register with struct name prefix for Type.method() calls
+                            if let Some(ref struct_name) = self.current_impl_struct {
+                                self.env.declare_function(&func_name, &return_type, struct_name);
+                            }
                         }
                     }
                 }
@@ -410,6 +420,9 @@ impl AstVisitor for SemanticAnalyzer {
         println!("  Import module: {} (alias: {:?})", module_name, node.get_alias());
 
         self.load_module(&module_name);
+        if let Some(alias) = node.get_alias() {
+            self.module_aliases.insert(alias.to_string(), module_name);
+        }
     }
 
     fn visit_function(&mut self, node: &Function) {
@@ -425,6 +438,11 @@ impl AstVisitor for SemanticAnalyzer {
                 self.current_module, func_name
             ));
             return;
+        }
+
+        // Also register with struct name prefix for Type.method() calls
+        if let Some(ref struct_name) = self.current_impl_struct {
+            self.env.declare_function(&func_name, &return_type, struct_name);
         }
 
         // Save context
@@ -1090,20 +1108,25 @@ impl AstVisitor for SemanticAnalyzer {
             return;
         }
 
+        // Resolve module aliases (e.g., "import lib.math as m" → "m" maps to "lib.math")
+        let resolved_module = self.module_aliases.get(&module_name)
+            .cloned()
+            .unwrap_or_else(|| module_name.clone());
+
         // Build lookup name. For method calls (obj.method), resolve via struct type
-        let full_name = if module_name != self.current_module {
-            // Check if module_name is a variable (not a module) → method dispatch
-            let is_var = self.env.lookup_symbol(&module_name)
+        let full_name = if resolved_module != self.current_module {
+            // Check if resolved_module is a variable (not a module) → method dispatch
+            let is_var = self.env.lookup_symbol(&resolved_module)
                 .map_or(false, |s| s.symbol_type != SymbolType::Module);
             if is_var {
                 // For struct types, look up method in current module
                 // For arrays, the method is handled by the executor
                 format!("{}.{}", self.current_module, func_name)
             } else {
-                format!("{}.{}", module_name, func_name)
+                format!("{}.{}", resolved_module, func_name)
             }
         } else {
-            format!("{}.{}", module_name, func_name)
+            format!("{}.{}", resolved_module, func_name)
         };
 
         // Try qualified lookup, then short-name lookup

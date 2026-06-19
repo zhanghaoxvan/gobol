@@ -1,15 +1,15 @@
+import io;
 
 func fib(n: int): int {
     if n <= 1 {
-        return n
+        return n;
     }
-    return fib(n - 1) + fib(n - 2)
+    fib(n - 1) + fib(n - 2)
 }
 
-func main(): int {
+func main() {
     for i in 0..10 {
-        io.print(fib(i))
-        io.print(" ")
+        io.print(fib(i));
     }
-    return 0
+    io.print("\n");
 }

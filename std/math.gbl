@@ -51,6 +51,20 @@ func floor(x: float): float {
     i as float
 }
 
+// 平方根（牛顿迭代法）
+func sqrt(x: float): float {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    var guess = x;
+    var i = 0;
+    while i < 100 {
+        guess = (guess + x / guess) / 2.0;
+        i += 1;
+    }
+    guess
+}
+
 // 向上取整
 func ceil(x: float): float {
     if x == 0 { 
@@ -62,3 +76,5 @@ func ceil(x: float): float {
     }
     i as float   // ← 隐式返回（无分号）
 }
+
+export(abs, max, min, trunc, floor, ceil, sqrt, PI, E, TAU)

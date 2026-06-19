@@ -137,7 +137,7 @@ fn print_help() {
     println!("  grape remove <name>      Remove a dependency");
     println!("  grape update [name]      Update dependencies");
     println!("  grape list               List all dependencies");
-    println!("  grape run [--verbose]    Run the Gobol program");
+    println!("  grape run [--verbose] [--compile]  Run the Gobol program");
     println!("  grape clean              Clean cached packages");
     println!("  grape version            Show the version");
     println!("  grape help               Show this help message");
@@ -198,12 +198,10 @@ fn cmd_init() -> Result<()> {
     println!("✓ Project initialized successfully");
 
     if !Path::new("main.gbl").exists() {
-        let content = r#"// Your Gobol code here
-// Run with: grape run
+        let content = r#"import io
 
-func main(): int {
-    io.print("Hello, World!\n")
-    return 0
+func main() {
+    io.println("Hello, World!")
 }
 "#;
         fs::write("main.gbl", content).map_err(GrapeError::Io)?;
@@ -377,6 +375,7 @@ fn cmd_list() -> Result<()> {
 
 fn cmd_run(args: &[String]) -> Result<()> {
     let is_verbose = args.iter().any(|a| a == "--verbose");
+    let is_compile = args.iter().any(|a| a == "--compile" || a == "-c");
     let no_check = args.iter().any(|a| a == "--no-check");
 
     println!("{}", " Running Gobol program...".bold().green());
@@ -419,6 +418,9 @@ fn cmd_run(args: &[String]) -> Result<()> {
 
     let mut cmd = std::process::Command::new("gobol");
 
+    if is_compile {
+        cmd.arg("--compile");
+    }
     for path in &lib_paths {
         cmd.arg("--lib-path").arg(path);
     }

@@ -1,13 +1,12 @@
+import io;
 
-func main(): int {
-    var x = 42
-    
-    if x < 10 {
-        io.print("small")
-    } else if x < 50 {
-        io.print("medium")
+func main() {
+    var x = 7;
+    if x > 10 {
+        io.println(">10");
+    } else if x > 5 {
+        io.println(">5");
     } else {
-        io.print("large")
+        io.println("<=5");
     }
-    return 0
 }

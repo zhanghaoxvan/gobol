@@ -1,5 +1,5 @@
+import io;
 
-func main(): int {
-    io.print(undefined_var)
-    return 0
+func main() {
+    io.println(x);  // error: undefined variable
 }

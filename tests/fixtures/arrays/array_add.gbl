@@ -1,16 +1,12 @@
+import io;
 
-func main(): int {
-    var arr: int[] = []
-    arr.add(10)
-    arr.add(20)
-    arr.add(30)
-    
-    io.print(arr.len())
-    io.print(" ")
-    io.print(arr[0])
-    io.print(" ")
-    io.print(arr[1])
-    io.print(" ")
-    io.print(arr[2])
-    return 0
+func main() {
+    var arr: int[] = [];
+    arr.add(10);
+    arr.add(20);
+    arr.add(30);
+    for i in arr {
+        io.print(i);
+    }
+    io.print("\n");
 }

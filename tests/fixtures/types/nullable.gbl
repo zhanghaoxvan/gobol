@@ -1,10 +1,12 @@
+import io;
 
-func main(): int {
-    var opt: int? = null
-    opt = 42
-    
-    if opt != null {
-        io.print(opt)
+func main() {
+    var opt: int? = null;
+    if opt == null {
+        io.println("opt is null");
     }
-    return 0
+    opt = 42;
+    if opt != null {
+        io.println(@"opt is {opt}");
+    }
 }

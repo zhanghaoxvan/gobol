@@ -1,0 +1,10 @@
+import io;
+
+func main() {
+    var grade = match 85 {
+        100 => "A+",
+        90 => "A",
+        _ => "B"
+    };
+    io.println(@"grade: {grade}");
+}

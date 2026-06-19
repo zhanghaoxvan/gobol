@@ -1,7 +1,8 @@
+import io;
 
-func main(): int {
-    for i in 0..5 {
-        io.print(i)
+func main() {
+    for i in 0..10 {
+        io.print(i);
     }
-    return 0
+    io.print("\n");
 }

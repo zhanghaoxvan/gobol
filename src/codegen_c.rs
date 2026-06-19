@@ -25,6 +25,7 @@ impl CodeGenC {
         self.emit_line("#include <stdint.h>");
         self.emit_line("#include <stdbool.h>");
         self.emit_line("#include <string.h>");
+        self.emit_line("#include <stdlib.h>");
         self.emit_line("");
         // ── built-in: _print ──
         self.emit_line("void gobol_print(const char* s) {");
@@ -110,9 +111,9 @@ impl AstVisitor for CodeGenC {
     fn visit_function(&mut self, node: &Function) {
         let name = node.get_name();
         let ret_type = if name == "main" {
+            DataType::Int // main always returns int in C
+        } else if node.get_return_type().is_some() {
             DataType::Int
-        } else if let Some(_rt) = node.get_return_type() {
-            DataType::Int // simplified for now
         } else {
             DataType::None_
         };
@@ -309,6 +310,15 @@ impl AstVisitor for CodeGenC {
                         // __builtins__._read → gobol_read
                         if mod_name == "__builtins__" && func == "_read" {
                             self.emit("gobol_read()");
+                            return;
+                        }
+                        // __builtins__.exit / exit → exit()
+                        if mod_name == "__builtins__" && func == "exit" {
+                            self.emit("exit(");
+                            if let Some(args) = node.get_arguments() {
+                                if let Some(a) = args.first() { a.accept(self); }
+                            }
+                            self.emit(")");
                             return;
                         }
                     }

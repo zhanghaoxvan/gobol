@@ -27,6 +27,7 @@ pub struct SemanticAnalyzer {
     loaded_programs: Vec<Box<Program>>,
     current_module_dir: Option<String>,
     module_aliases: HashMap<String, String>,
+    current_generic_params: Vec<String>,
 }
 
 impl SemanticAnalyzer {
@@ -49,6 +50,7 @@ impl SemanticAnalyzer {
             loaded_programs: Vec::new(),
             current_module_dir: None,
             module_aliases: HashMap::new(),
+            current_generic_params: Vec::new(),
         }
     }
 
@@ -166,6 +168,10 @@ impl SemanticAnalyzer {
             "str" => DataType::Str,
             "bool" => DataType::Bool,
             name => {
+                // Allow current function's generic type parameters
+                if self.current_generic_params.iter().any(|g| g == name) {
+                    return DataType::Struct(name.to_string());
+                }
                 if self.struct_fields.contains_key(name) {
                     return DataType::Struct(name.to_string());
                 }
@@ -308,8 +314,11 @@ impl SemanticAnalyzer {
                 }
             } else if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
                 let func_name = func.get_name().to_string();
+                let prev_generic = self.current_generic_params.clone();
+                self.current_generic_params = func.get_generic_params().clone();
                 let return_type = self.get_data_type_from_ast(func.get_return_type());
                 self.env.declare_function(&func_name, &return_type, &self.current_module);
+                self.current_generic_params = prev_generic;
             } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
                 let struct_name = struct_def.get_name().to_string();
                 let mut fields = HashMap::new();
@@ -326,12 +335,15 @@ impl SemanticAnalyzer {
                     match item {
                         ImplItem::Constructor(func) | ImplItem::Method(func) | ImplItem::Convert(func) => {
                             let func_name = func.get_name().to_string();
+                            let prev_generic = self.current_generic_params.clone();
+                            self.current_generic_params = func.get_generic_params().clone();
                             let return_type = self.get_data_type_from_ast(func.get_return_type());
                             self.env.declare_function(&func_name, &return_type, &self.current_module);
                             // Also register with struct name prefix for Type.method() calls
                             if let Some(ref struct_name) = self.current_impl_struct {
                                 self.env.declare_function(&func_name, &return_type, struct_name);
                             }
+                            self.current_generic_params = prev_generic;
                         }
                     }
                 }
@@ -430,6 +442,10 @@ impl AstVisitor for SemanticAnalyzer {
         #[cfg(debug_assertions)]
         println!("  Function: {}", func_name);
 
+        // Set generic params BEFORE type resolution
+        let prev_generic_params = self.current_generic_params.clone();
+        self.current_generic_params = node.get_generic_params().clone();
+
         let return_type = self.get_data_type_from_ast(node.get_return_type());
 
         if !self.env.declare_function(&func_name, &return_type, &self.current_module) {
@@ -437,6 +453,7 @@ impl AstVisitor for SemanticAnalyzer {
                 "Failed to declare function '{}.{}'",
                 self.current_module, func_name
             ));
+            self.current_generic_params = prev_generic_params;
             return;
         }
 
@@ -497,6 +514,7 @@ impl AstVisitor for SemanticAnalyzer {
         self.current_function = prev_function;
         self.current_function_return_type = prev_return_type;
         self.has_return_statement = prev_has_return;
+        self.current_generic_params = prev_generic_params;
     }
 
     fn visit_parameter(&mut self, node: &Parameter) {

@@ -1,9 +1,9 @@
-func print(s: str) {
-    __builtins__._print(s)
+func print<T>(value: T) {
+    __builtins__._print(value as str)
 }
 
-func println(s: str) {
-    __builtins__._print(s)
+func println<T>(value: T) {
+    print(@"{value}\n")
 }
 
 func read(): str {

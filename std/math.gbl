@@ -74,7 +74,7 @@ func ceil(x: float): float {
     if x > 0 && x != i as float {
         return (i + 1) as float;
     }
-    i as float   // ← 隐式返回（无分号）
+    i as float
 }
 
 export(abs, max, min, trunc, floor, ceil, sqrt, PI, E, TAU)

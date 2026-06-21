@@ -1,10 +1,12 @@
 pub mod ast;
 pub mod ast_builder;
 pub mod ast_printer;
+pub mod ccompiler;
 pub mod codegen_c;
+// pub mod executor;
+pub mod ir;
 pub mod environment;
 pub mod error;
-pub mod executor;
 pub mod lexer;
 pub mod semantic_analyzer;
 pub mod token;

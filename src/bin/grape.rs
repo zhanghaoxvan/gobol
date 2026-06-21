@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::io::{self, Write};
+use std::process;
 use colored::*;
 use git2::{Repository, ResetType};
 
@@ -115,12 +116,13 @@ fn run_command(args: &[String]) -> Result<()> {
         "list" => cmd_list(),
         "run" => cmd_run(&args[2..]),
         "clean" => cmd_clean(),
+        "build" => cmd_build(&args[2..]),
         "help" | "--help" => {
             print_help();
             Ok(())
         }
         "version" | "--version" => {
-            println!("Grape version: 0.2.0, binding with Gobol 0.1.0");
+            println!("Grape version: 0.1.0, binding with Gobol 0.1.0");
             Ok(())
         }
         _ => Err(GrapeError::NotFound(format!("Unknown command: {}", args[1]))),
@@ -137,7 +139,8 @@ fn print_help() {
     println!("  grape remove <name>      Remove a dependency");
     println!("  grape update [name]      Update dependencies");
     println!("  grape list               List all dependencies");
-    println!("  grape run [--verbose] [--compile]  Run the Gobol program");
+    println!("  grape run [--verbose]    Build and run the Gobol program");
+    println!("  grape build [-o <file>]  Compile to a native binary");
     println!("  grape clean              Clean cached packages");
     println!("  grape version            Show the version");
     println!("  grape help               Show this help message");
@@ -194,6 +197,8 @@ fn cmd_init() -> Result<()> {
     let toml_str = toml::to_string_pretty(&config).map_err(|e| GrapeError::Toml(e.to_string()))?;
     fs::write("grape.toml", toml_str).map_err(GrapeError::Io)?;
     fs::create_dir_all(".grape/packages").map_err(GrapeError::Io)?;
+    fs::create_dir_all("lib").map_err(GrapeError::Io)?;
+    fs::create_dir_all("lib/c").map_err(GrapeError::Io)?;
 
     println!("✓ Project initialized successfully");
 
@@ -210,8 +215,9 @@ func main() {
 
     println!("\nNext steps:");
     println!("  1. Edit grape.toml to configure your project");
-    println!("  2. Add dependencies: grape add user/repo@tag");
-    println!("  3. Run your program: grape run");
+    println!("  2. Add your own gobol modules in lib/ (e.g. lib/utils.gbl)");
+    println!("  3. Add dependencies: grape add user/repo@tag");
+    println!("  4. Run your program: grape run");
     
     Ok(())
 }
@@ -375,7 +381,6 @@ fn cmd_list() -> Result<()> {
 
 fn cmd_run(args: &[String]) -> Result<()> {
     let is_verbose = args.iter().any(|a| a == "--verbose");
-    let is_compile = args.iter().any(|a| a == "--compile" || a == "-c");
     let no_check = args.iter().any(|a| a == "--no-check");
 
     println!("{}", " Running Gobol program...".bold().green());
@@ -387,8 +392,12 @@ fn cmd_run(args: &[String]) -> Result<()> {
     }
 
     let config = read_grape_toml()?;
-    
-    // 检查锁文件
+
+    let out_name = args.iter()
+        .position(|a| a == "-o" || a == "--output")
+        .and_then(|i| args.get(i + 1).cloned())
+        .unwrap_or_else(|| config.project.name.clone());
+
     if !no_check && !Path::new("grape.lock").exists() {
         println!("grape.lock not found, generating...");
         update_lock_file(&config)?;
@@ -398,51 +407,51 @@ fn cmd_run(args: &[String]) -> Result<()> {
 
     let entry_file = &config.project.entry;
     if !Path::new(entry_file).exists() {
-        return Err(GrapeError::NotFound(
-            format!("Entry file '{}' not found.", entry_file)
-        ));
+        return Err(GrapeError::NotFound(format!("Entry file '{}' not found.", entry_file)));
     }
 
-    // 确保所有依赖都已下载
     ensure_dependencies_downloaded(&config)?;
-
     let lib_paths = build_lib_paths(&config);
 
     if is_verbose {
         println!("Project: {}", config.project.name);
-        println!("Version: {}", config.project.version);
         println!("Entry: {}", entry_file);
-        println!("Dependencies: {:?}", config.dependencies.keys().collect::<Vec<_>>());
+        println!("Output: {}", out_name);
         println!("Lib paths: {:?}", lib_paths);
     }
 
-    let mut cmd = std::process::Command::new("gobol");
-
-    if is_compile {
-        cmd.arg("--compile");
-    }
-    for path in &lib_paths {
-        cmd.arg("--lib-path").arg(path);
+    let mut cmd = process::Command::new("gobol");
+    cmd.arg("-o").arg(&out_name);
+    for path in &lib_paths { cmd.arg("--lib-path").arg(path); }
+    if is_verbose { cmd.arg("--verbose"); }
+    // Pass through extra flags from caller (e.g. --no-run from grape build)
+    for a in args {
+        if a == "-c" {
+            cmd.arg(a);
+        }
     }
     cmd.arg(entry_file);
-
-    if is_verbose {
-        println!("Running: {:?}", cmd);
-    }
 
     let status = cmd.status().map_err(|_| {
         GrapeError::CommandFailed("Failed to run gobol. Make sure gobol is installed.".to_string())
     })?;
 
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        process::exit(status.code().unwrap_or(1));
     }
-    
     Ok(())
 }
 
+fn cmd_build(args: &[String]) -> Result<()> {
+    // grape build = compile only
+    let mut build_args: Vec<String> = args.to_vec();
+    build_args.push("-c".to_string());
+    cmd_run(&build_args)
+}
+
+
 fn cmd_clean() -> Result<()> {
-    println!("🧹 Cleaning cached packages...");
+    println!("Cleaning cached packages...");
     
     let packages_dir = Path::new(".grape/packages");
     if packages_dir.exists() {

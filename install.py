@@ -17,6 +17,8 @@ from pathlib import Path
 import argparse
 
 
+__version__ = "0.1.0"
+
 # ==================== Configuration ====================
 
 def get_default_install_dir():
@@ -197,7 +199,12 @@ if __name__ == "__main__":
     parser.add_argument("--install-dir", help="Installation directory")
     parser.add_argument("--no-build", action="store_true", help="Skip building (use existing binaries)")
     parser.add_argument("--uninstall", action="store_true", help="Uninstall")
+    parser.add_argument("--version", action="store_true", help="Show version and exit")
     args = parser.parse_args()
+
+    if args.version:
+        print(f"Gobol Installer {__version__}, Binding with Gobol {__version__}")
+        sys.exit(0)
 
     if args.uninstall:
         target_dir = Path(args.install_dir) if args.install_dir else get_default_install_dir()
@@ -210,7 +217,16 @@ if __name__ == "__main__":
     print("=" * 60)
 
     install_dir = args.install_dir or os.environ.get("GOBOL_INSTALL_DIR") or get_default_install_dir()
-    target_dir = Path(install_dir) / "gobol"
+
+    if args.install_dir:
+        # 命令行指定：加 /gobol
+        target_dir = Path(install_dir) / "gobol"
+    elif os.environ.get("GOBOL_INSTALL_DIR"):
+        # 环境变量：直接使用（用户已经指定完整路径）
+        target_dir = Path(install_dir)
+    else:
+        # 默认：加 /gobol
+        target_dir = Path(install_dir) / "gobol"
     print(f"[INFO] Install directory: {target_dir}")
 
     if not args.no_build:

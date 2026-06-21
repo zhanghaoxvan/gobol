@@ -391,6 +391,7 @@ pub struct Function {
     parameters: Option<Vec<Box<Parameter>>>,
     return_type: Option<Box<dyn Type>>,
     body: Option<Box<Block>>,
+    generic_params: Vec<String>,
 }
 
 impl Function {
@@ -405,7 +406,13 @@ impl Function {
             parameters,
             return_type,
             body,
+            generic_params: Vec::new(),
         }
+    }
+
+    pub fn with_generic_params(mut self, params: Vec<String>) -> Self {
+        self.generic_params = params;
+        self
     }
 
     pub fn get_name(&self) -> &str {
@@ -414,6 +421,10 @@ impl Function {
 
     pub fn get_parameters(&self) -> Option<&Vec<Box<Parameter>>> {
         self.parameters.as_ref()
+    }
+
+    pub fn get_generic_params(&self) -> &Vec<String> {
+        &self.generic_params
     }
 
     pub fn get_return_type(&self) -> Option<&dyn Type> {

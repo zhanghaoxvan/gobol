@@ -562,15 +562,23 @@ impl AstBuilder {
         self.advance();
 
         // Handle <T> generic params on functions
+        let mut generic_params = Vec::new();
         if self.match_value("<") {
             self.advance();
-            let mut depth = 1;
-            while depth > 0 && !self.error_occurred {
-                if self.match_value("<") { depth += 1; }
-                else if self.match_value(">") { depth -= 1; }
-                if depth > 0 { self.advance(); }
+            while !self.match_value(">") && !self.error_occurred {
+                if self.match_type(&TokenType::Identifier) {
+                    generic_params.push(self.current_token().value.clone());
+                    self.advance();
+                    if self.match_value(",") { self.advance(); }
+                } else if self.match_value("<") || self.match_value(">") {
+                    // Nested generics: skip token but break if it's the closing >
+                    if self.match_value(">") { break; }
+                    self.advance();
+                } else {
+                    break;
+                }
             }
-            if self.match_value(">") { self.advance(); }
+            self.consume_value(">", "Expected '>' closing generic params");
         }
 
         self.consume_value("(", "Expected '(' after function name");
@@ -597,12 +605,9 @@ impl AstBuilder {
             None
         };
 
-        Some(Box::new(Function::new(
-            func_name,
-            params,
-            return_type,
-            body,
-        )))
+        let func = Function::new(func_name, params, return_type, body)
+            .with_generic_params(generic_params);
+        Some(Box::new(func))
     }
 
     fn parse_parameter_list(&mut self) -> Option<Vec<Box<Parameter>>> {

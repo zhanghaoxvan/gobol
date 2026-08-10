@@ -23,6 +23,7 @@ pub struct IRFunction {
     pub is_main: bool,
     pub is_method: bool,
     pub struct_name: Option<String>,
+    pub intrinsic: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +113,7 @@ pub struct IRBuilder {
     expr_stack: Vec<IRExpr>,
     in_function: bool,
     in_impl: bool,
+    block_depth: usize,
     
     // 泛型上下文
     generic_stack: Vec<HashMap<String, DataType>>,
@@ -141,6 +143,7 @@ impl IRBuilder {
             expr_stack: Vec::new(),
             in_function: false,
             in_impl: false,
+            block_depth: 0,
             generic_stack: Vec::new(),
             structs: HashMap::new(),
             methods: HashMap::new(),
@@ -185,6 +188,25 @@ impl IRBuilder {
 
     fn pop_expr(&mut self) -> IRExpr {
         self.expr_stack.pop().unwrap_or(IRExpr::None)
+    }
+
+    /// Maps an operator string to its trait method name.
+    /// Returns None for operators that should stay as Binary (logical, bitwise, etc.)
+    fn operator_to_method(op: &str) -> Option<&str> {
+        match op {
+            "+" => Some("add"),
+            "-" => Some("sub"),
+            "*" => Some("mul"),
+            "/" => Some("div"),
+            "%" => Some("rem"),
+            "==" => Some("eq"),
+            "!=" => Some("ne"),
+            "<" => Some("lt"),
+            ">" => Some("gt"),
+            "<=" => Some("le"),
+            ">=" => Some("ge"),
+            _ => None, // &&, ||, &, |, ^ stay as Binary
+        }
     }
 
     fn push_generic_scope(&mut self, params: &[String]) {
@@ -349,7 +371,7 @@ impl IRBuilder {
 
     fn build_arm_body(&mut self, arm: &MatchArm) -> IRBlock {
         let mut block = IRBlock { statements: Vec::new() };
-        
+
         // 如果是变量模式，在 body 中声明变量
         if let MatchPattern::Variable(name) = &arm.pattern {
             // 这里需要从 scrutinee 推导类型，暂时用 Unknown
@@ -367,7 +389,10 @@ impl IRBuilder {
             // 使用子构建器处理 body
             let mut sub_builder = IRBuilder::new();
             sub_builder.generic_stack = self.generic_stack.clone();
-            
+            // Set block_depth > 1 so tail expressions don't generate Returns,
+            // but instead leave values on the expression stack for the parent context
+            sub_builder.block_depth = 2;
+
             if let Some(block_node) = body.as_any().downcast_ref::<Block>() {
                 for stmt in block_node.get_statements() {
                     stmt.accept(&mut sub_builder);
@@ -375,10 +400,16 @@ impl IRBuilder {
             } else {
                 body.accept(&mut sub_builder);
             }
-            
+
+            // Extract the last expression value if a tail expression was processed
+            let last_val = sub_builder.pop_expr();
             block.statements.extend(sub_builder.current_block);
+            // Push the value as an expression statement so it gets captured
+            if !matches!(last_val, IRExpr::None) {
+                block.statements.push(IRStmt::Expression(last_val));
+            }
         }
-        
+
         block
     }
 
@@ -500,7 +531,7 @@ impl AstVisitor for IRBuilder {
         self.push_generic_scope(&generic_params);
 
         // 解析参数
-        let params: Vec<IRParam> = node.get_parameters()
+        let mut params: Vec<IRParam> = node.get_parameters()
             .map(|ps| {
                 ps.iter()
                     .map(|p| {
@@ -520,6 +551,17 @@ impl AstVisitor for IRBuilder {
             })
             .unwrap_or_default();
 
+        // For methods without explicit self parameter (e.g., constructors),
+        // prepend self as the first parameter
+        if is_method && !params.iter().any(|p| p.name == "self") {
+            if let Some(ref sname) = self.current_struct {
+                params.insert(0, IRParam {
+                    name: "self".to_string(),
+                    ty: DataType::Struct(sname.clone()),
+                });
+            }
+        }
+
         // 解析返回类型
         let return_type = if is_main {
             DataType::Int
@@ -533,7 +575,7 @@ impl AstVisitor for IRBuilder {
         // 创建 IR 函数
         let full_name = if is_method {
             if let Some(s) = &self.current_struct {
-                format!("{}.{}", s, name)
+                format!("{}::{}", s, name)
             } else {
                 name.clone()
             }
@@ -550,6 +592,7 @@ impl AstVisitor for IRBuilder {
             is_main,
             is_method,
             struct_name: self.current_struct.clone(),
+            intrinsic: Attribute::get_attr_value(node.get_attributes(), "intrinsic").map(|s| s.to_string()),
         });
 
         // 处理函数体
@@ -578,11 +621,39 @@ impl AstVisitor for IRBuilder {
     fn visit_declaration(&mut self, node: &Declaration) {
         let name = node.get_name().to_string();
         let ty = self.ast_type_to_data_type(node.get_type());
-        
+
         let init = if let Some(init_expr) = node.get_initializer() {
-            init_expr.accept(self);
-            let expr = self.pop_expr();
-            Some(expr)
+            // Handle block expressions specially: extract the tail expression value
+            if let Some(block) = init_expr.as_any().downcast_ref::<Block>() {
+                // Process block statements with a sub-builder
+                let mut sub = IRBuilder::new();
+                sub.generic_stack = self.generic_stack.clone();
+                sub.structs = self.structs.clone();
+                sub.in_function = self.in_function;
+                for stmt in block.get_statements() {
+                    stmt.accept(&mut sub);
+                }
+                // Extract the value from the last Return statement (block expression result)
+                let mut expr = IRExpr::None;
+                for stmt in sub.current_block.iter_mut().rev() {
+                    if let IRStmt::Return(Some(val)) = stmt {
+                        expr = val.clone();
+                        // Convert Return → Expression so it doesn't exit the function
+                        *stmt = IRStmt::Expression(val.clone());
+                        break;
+                    } else if matches!(stmt, IRStmt::Return(None)) {
+                        *stmt = IRStmt::Expression(IRExpr::None);
+                        break;
+                    }
+                }
+                // Copy sub-builder's statements to the parent block
+                self.current_block.extend(sub.current_block);
+                Some(expr)
+            } else {
+                init_expr.accept(self);
+                let expr = self.pop_expr();
+                Some(expr)
+            }
         } else {
             None
         };
@@ -594,7 +665,7 @@ impl AstVisitor for IRBuilder {
         if let Some(expr) = node.get_expression() {
             expr.accept(self);
             let ir_expr = self.pop_expr();
-            
+
             if node.tail {
                 self.current_block.push(IRStmt::Return(Some(ir_expr)));
             } else {
@@ -740,10 +811,21 @@ impl AstVisitor for IRBuilder {
                 let real_op = &op[..1]; // "+=" → "+", "-=" → "-", etc.
                 left.accept(self);  // push left again as the value operand
                 let left_val = self.pop_expr();
-                IRExpr::Binary {
-                    op: real_op.to_string(),
-                    left: Box::new(left_val),
-                    right: Box::new(right_val),
+                // Convert to method call via trait
+                let method = Self::operator_to_method(real_op);
+                if let Some(method_name) = method {
+                    IRExpr::MethodCall {
+                        object: Box::new(left_val),
+                        method: method_name.to_string(),
+                        args: vec![right_val],
+                        generic_args: Vec::new(),
+                    }
+                } else {
+                    IRExpr::Binary {
+                        op: real_op.to_string(),
+                        left: Box::new(left_val),
+                        right: Box::new(right_val),
+                    }
                 }
             };
 
@@ -769,20 +851,33 @@ impl AstVisitor for IRBuilder {
             return;
         }
         
-        // 普通二元运算
+        // Operand expressions
         let left = node.get_left().unwrap();
         left.accept(self);
         let left_expr = self.pop_expr();
-        
+
         let right = node.get_right().unwrap();
         right.accept(self);
         let right_expr = self.pop_expr();
-        
-        self.push_expr(IRExpr::Binary {
-            op,
-            left: Box::new(left_expr),
-            right: Box::new(right_expr),
-        });
+
+        // Convert arithmetic/comparison operators to trait method calls
+        let method = Self::operator_to_method(&op);
+        if let Some(method_name) = method {
+            // Binary op → MethodCall via trait (e.g. a + b → a.add(b))
+            self.push_expr(IRExpr::MethodCall {
+                object: Box::new(left_expr),
+                method: method_name.to_string(),
+                args: vec![right_expr],
+                generic_args: Vec::new(),
+            });
+        } else {
+            // Logical/bitwise operators: keep as Binary
+            self.push_expr(IRExpr::Binary {
+                op,
+                left: Box::new(left_expr),
+                right: Box::new(right_expr),
+            });
+        }
     }
 
     fn visit_unary_expression(&mut self, node: &UnaryExpression) {
@@ -833,6 +928,17 @@ impl AstVisitor for IRBuilder {
                 self.push_expr(IRExpr::MethodCall {
                     object: Box::new(object),
                     method,
+                    args,
+                    generic_args,
+                });
+                return;
+            }
+
+            // 命名空间路径调用 (::): std::io::println(args)
+            if let Some(path_access) = callee_expr.as_any().downcast_ref::<PathAccess>() {
+                let func_name = path_access.get_full_name();
+                self.push_expr(IRExpr::Call {
+                    func: func_name,
                     args,
                     generic_args,
                 });
@@ -979,10 +1085,34 @@ impl AstVisitor for IRBuilder {
         }
 
         // 4. match 表达式的结果
-        // 在 IR 层面，match 表达式的值就是最后一个匹配的 arm 的值
-        // 但我们无法确定哪个 arm 会匹配，所以用 None 占位
-        // 后续代码生成器需要特殊处理 match 表达式
-        self.push_expr(IRExpr::None);
+        // Try to find a wildcard/default arm value to use as the match result
+        let match_result = arms.last()
+            .and_then(|arm| {
+                if matches!(arm.pattern, MatchPattern::Wildcard) {
+                    arm.body.as_ref().and_then(|body| {
+                        if let Some(block) = body.as_any().downcast_ref::<Block>() {
+                            block.get_statements().last().and_then(|last_stmt| {
+                                if let Some(es) = last_stmt.as_any().downcast_ref::<ExpressionStatement>() {
+                                    es.get_expression().map(|e| {
+                                        let mut sub = IRBuilder::new();
+                                        e.accept(&mut sub);
+                                        sub.pop_expr()
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(IRExpr::Literal(LitValue::Int(0)));
+
+        self.push_expr(match_result);
     }
 
     fn visit_range_expression(&mut self, node: &RangeExpression) {

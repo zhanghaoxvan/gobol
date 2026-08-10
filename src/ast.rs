@@ -2,6 +2,50 @@
 
 use std::any::Any;
 
+// ==================== Attribute ====================
+
+/// Represents a `#[name]`, `#[name("value")]`, or `#[name(key = "value")]` attribute.
+#[derive(Debug, Clone)]
+pub struct Attribute {
+    pub name: String,
+    pub value: Option<String>,
+    pub named: Vec<(String, String)>,
+}
+
+impl Attribute {
+    pub fn new(name: impl Into<String>) -> Self {
+        Attribute {
+            name: name.into(),
+            value: None,
+            named: Vec::new(),
+        }
+    }
+
+    pub fn with_value(mut self, value: impl Into<String>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    pub fn with_named(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
+        self.named.push((key.into(), val.into()));
+        self
+    }
+
+    pub fn has_attr(attrs: &[Attribute], name: &str) -> bool {
+        attrs.iter().any(|a| a.name == name)
+    }
+
+    pub fn get_attr_value<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a str> {
+        attrs.iter().find(|a| a.name == name).and_then(|a| a.value.as_deref())
+    }
+
+    pub fn get_attr_named<'a>(attrs: &'a [Attribute], name: &str, key: &str) -> Option<&'a str> {
+        attrs.iter()
+            .find(|a| a.name == name)
+            .and_then(|a| a.named.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()))
+    }
+}
+
 // ==================== Visitor ====================
 
 pub trait AstVisitor {
@@ -31,11 +75,13 @@ pub trait AstVisitor {
     fn visit_export_statement(&mut self, _node: &ExportStatement) {}
     fn visit_struct_definition(&mut self, _node: &StructDefinition) {}
     fn visit_impl_block(&mut self, _node: &ImplBlock) {}
+    fn visit_trait_definition(&mut self, _node: &TraitDefinition) {}
     fn visit_binary_expression(&mut self, _node: &BinaryExpression) {}
     fn visit_unary_expression(&mut self, _node: &UnaryExpression) {}
     fn visit_cast_expression(&mut self, _node: &CastExpression) {}
     fn visit_function_call(&mut self, _node: &FunctionCall) {}
     fn visit_member_access(&mut self, _node: &MemberAccess) {}
+    fn visit_path_access(&mut self, _node: &PathAccess) {}
     fn visit_array_index(&mut self, _node: &ArrayIndex) {}
     fn visit_grouped_expression(&mut self, _node: &GroupedExpression) {}
     fn visit_identifier(&mut self, _node: &Identifier) {}
@@ -392,6 +438,7 @@ pub struct Function {
     return_type: Option<Box<dyn Type>>,
     body: Option<Box<Block>>,
     generic_params: Vec<String>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl Function {
@@ -407,11 +454,17 @@ impl Function {
             return_type,
             body,
             generic_params: Vec::new(),
+            attributes: Vec::new(),
         }
     }
 
     pub fn with_generic_params(mut self, params: Vec<String>) -> Self {
         self.generic_params = params;
+        self
+    }
+
+    pub fn with_attributes(mut self, attrs: Vec<Attribute>) -> Self {
+        self.attributes = attrs;
         self
     }
 
@@ -433,6 +486,10 @@ impl Function {
 
     pub fn get_body(&self) -> Option<&Block> {
         self.body.as_deref()
+    }
+
+    pub fn get_attributes(&self) -> &Vec<Attribute> {
+        &self.attributes
     }
 }
 
@@ -472,7 +529,7 @@ impl ImportStatement {
     }
 
     pub fn get_module_name(&self) -> String {
-        self.path.join(".")
+        self.path.join("::")
     }
 }
 
@@ -533,6 +590,7 @@ pub struct StructDefinition {
     name: String,
     fields: Vec<StructField>,
     generic_params: Vec<String>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl StructDefinition {
@@ -541,12 +599,19 @@ impl StructDefinition {
             name: name.into(),
             fields,
             generic_params,
+            attributes: Vec::new(),
         }
+    }
+
+    pub fn with_attributes(mut self, attrs: Vec<Attribute>) -> Self {
+        self.attributes = attrs;
+        self
     }
 
     pub fn get_name(&self) -> &str { &self.name }
     pub fn get_fields(&self) -> &Vec<StructField> { &self.fields }
     pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
+    pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
 }
 
 impl AstNode for StructDefinition {
@@ -572,6 +637,7 @@ pub struct ImplBlock {
     struct_name: String,
     generic_params: Vec<String>,
     items: Vec<ImplItem>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl ImplBlock {
@@ -580,11 +646,17 @@ impl ImplBlock {
             struct_name: struct_name.into(),
             generic_params,
             items,
+            attributes: Vec::new(),
         }
+    }
+    pub fn with_attributes(mut self, attrs: Vec<Attribute>) -> Self {
+        self.attributes = attrs;
+        self
     }
     pub fn get_struct_name(&self) -> &str { &self.struct_name }
     pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
     pub fn get_items(&self) -> &Vec<ImplItem> { &self.items }
+    pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
 }
 
 impl AstNode for ImplBlock {
@@ -595,6 +667,53 @@ impl AstNode for ImplBlock {
 }
 
 impl Statement for ImplBlock {
+    fn as_statement(&self) -> &dyn Statement { self }
+}
+
+// ==================== TraitDefinition ====================
+
+pub struct TraitMethod {
+    pub name: String,
+    pub parameters: Vec<Box<Parameter>>,
+    pub return_type: Option<Box<dyn Type>>,
+}
+
+pub struct TraitDefinition {
+    name: String,
+    methods: Vec<TraitMethod>,
+    generic_params: Vec<String>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl TraitDefinition {
+    pub fn new(name: impl Into<String>, methods: Vec<TraitMethod>, generic_params: Vec<String>) -> Self {
+        TraitDefinition {
+            name: name.into(),
+            methods,
+            generic_params,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn with_attributes(mut self, attrs: Vec<Attribute>) -> Self {
+        self.attributes = attrs;
+        self
+    }
+
+    pub fn get_name(&self) -> &str { &self.name }
+    pub fn get_methods(&self) -> &Vec<TraitMethod> { &self.methods }
+    pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
+    pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
+}
+
+impl AstNode for TraitDefinition {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_trait_definition(self);
+    }
+    fn as_any(&self) -> &dyn Any { self }
+}
+
+impl Statement for TraitDefinition {
     fn as_statement(&self) -> &dyn Statement { self }
 }
 
@@ -1091,6 +1210,45 @@ impl Expression for FunctionCall {
     fn as_expression(&self) -> &dyn Expression {
         self
     }
+}
+
+// ==================== PathAccess ====================
+
+/// Namespace path access using `::` separator (e.g. `std::io::println`).
+/// `path` holds the namespace segments, `member` is the final identifier.
+pub struct PathAccess {
+    pub path: Vec<String>,
+    pub member: String,
+}
+
+impl PathAccess {
+    pub fn new(path: Vec<String>, member: impl Into<String>) -> Self {
+        PathAccess {
+            path,
+            member: member.into(),
+        }
+    }
+
+    /// Returns the full qualified name like "std::io::println".
+    pub fn get_full_name(&self) -> String {
+        let mut parts = self.path.clone();
+        parts.push(self.member.clone());
+        parts.join("::")
+    }
+
+    pub fn get_path(&self) -> &Vec<String> { &self.path }
+    pub fn get_member(&self) -> &str { &self.member }
+}
+
+impl AstNode for PathAccess {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_path_access(self);
+    }
+    fn as_any(&self) -> &dyn Any { self }
+}
+
+impl Expression for PathAccess {
+    fn as_expression(&self) -> &dyn Expression { self }
 }
 
 // ==================== MemberAccess ====================

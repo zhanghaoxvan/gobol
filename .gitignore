@@ -4,3 +4,8 @@
 /target
 
 grape.toml
+
+# Test/build artifacts
+*.out
+*.out.c
+*.exe

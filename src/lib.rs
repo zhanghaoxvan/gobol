@@ -1,9 +1,7 @@
 pub mod ast;
 pub mod ast_builder;
 pub mod ast_printer;
-pub mod ccompiler;
-pub mod codegen_c;
-// pub mod executor;
+pub mod cranelift;
 pub mod ir;
 pub mod environment;
 pub mod error;

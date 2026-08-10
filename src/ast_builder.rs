@@ -64,6 +64,112 @@ impl AstBuilder {
         &self.error_message
     }
 
+    // ==================== Attribute parsing ====================
+
+    /// Parse a sequence of `#[...]` attributes.
+    /// Handles: `#[name]`, `#[name("value")]`, `#[name(key = "value")]`, `#[name(key = "v", k2 = "v2")]`
+    fn parse_attributes(&mut self) -> Vec<Attribute> {
+        let mut attrs = Vec::new();
+        while self.match_value("#[") {
+            self.advance(); // consume '#['
+            if !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected attribute name after '#['");
+                while !self.match_value("]") && !self.match_type(&TokenType::EndOfFile) {
+                    self.advance();
+                }
+                if self.match_value("]") { self.advance(); }
+                continue;
+            }
+            let name = self.current_token().value.clone();
+            self.advance();
+
+            let mut attr = Attribute::new(name);
+
+            // Parse attribute arguments: (args) or (key = value, ...)
+            if self.match_value("(") {
+                self.advance(); // consume '('
+                while !self.match_value(")") && !self.match_type(&TokenType::EndOfFile) {
+                    // Check for named arg: key = "value"
+                    if self.match_type(&TokenType::Identifier) {
+                        let key = self.current_token().value.clone();
+                        let next = self.peek_next_token();
+                        if next.value == "=" {
+                            self.advance(); // consume key
+                            self.advance(); // consume '='
+                            let val = self.parse_attribute_value();
+                            attr.named.push((key, val));
+                        } else {
+                            // Positional string value
+                            self.advance(); // consume key (treated as value)
+                            let val = self.parse_attribute_value();
+                            attr.value = Some(val);
+                        }
+                    } else if self.match_type(&TokenType::String) {
+                        let val = self.current_token().value.clone();
+                        self.advance();
+                        attr.value = Some(val);
+                    } else {
+                        // Just consume whatever token is there
+                        self.advance();
+                    }
+                    if self.match_value(",") {
+                        self.advance();
+                    }
+                }
+                if self.match_value(")") {
+                    self.advance(); // consume ')'
+                }
+            }
+
+            if !self.match_value("]") {
+                self.log_error("Expected ']' to close attribute");
+            } else {
+                self.advance(); // consume ']'
+            }
+            attrs.push(attr);
+        }
+        attrs
+    }
+
+    /// Parse a string or identifier value inside attribute parentheses.
+    /// Parse a possibly `::`-qualified name like "std::io::println" or "int".
+    /// Returns the full qualified name string.
+    fn parse_qualified_name(&mut self) -> Option<String> {
+        if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+            return None;
+        }
+        let mut name = self.current_token().value.clone();
+        self.advance();
+        while self.match_value("::") {
+            self.advance(); // consume '::'
+            if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+                return None;
+            }
+            name.push_str("::");
+            name.push_str(&self.current_token().value);
+            self.advance();
+        }
+        Some(name)
+    }
+
+    fn parse_attribute_value(&mut self) -> String {
+        if self.match_type(&TokenType::String) {
+            let val = self.current_token().value.clone();
+            self.advance();
+            val
+        } else if self.match_type(&TokenType::Identifier) {
+            let val = self.current_token().value.clone();
+            self.advance();
+            val
+        } else if self.match_type(&TokenType::Number) {
+            let val = self.current_token().value.clone();
+            self.advance();
+            val
+        } else {
+            String::new()
+        }
+    }
+
     // ==================== Helpers ====================
 
     fn current_token(&self) -> &Token {
@@ -174,12 +280,15 @@ impl AstBuilder {
     // ==================== Statement ====================
 
     fn parse_statement(&mut self) -> Option<Box<dyn Statement>> {
+        // Parse attributes first — they can precede struct, impl, func, trait
+        let attrs = self.parse_attributes();
+
         if self.match_type(&TokenType::Keyword) {
             let keyword = self.current_token().value.clone();
 
             match keyword.as_str() {
                 "import" => return self.parse_import(),
-                "func" => return self.parse_function(),
+                "func" => return self.parse_function(attrs),
                 "var" | "val" => return self.parse_declaration(),
                 "for" => return self.parse_for_statement(),
                 "return" => return self.parse_return_statement(),
@@ -192,8 +301,9 @@ impl AstBuilder {
                     self.consume_end_of_line();
                     return Some(Box::new(ExportStatement::new(vec![])));
                 }
-                "struct" => return self.parse_struct_definition(),
-                "impl" => return self.parse_impl_block(),
+                "struct" => return self.parse_struct_definition(attrs),
+                "impl" => return self.parse_impl_block(attrs),
+                "trait" => return self.parse_trait_definition(attrs),
                 "export" => return self.parse_export_statement(),
                 "operator" => {
                     // Skip operator definition at top level
@@ -268,11 +378,11 @@ impl AstBuilder {
         let mut path = vec![self.current_token().value.clone()];
         self.advance();
 
-        // Handle "import a.b.c"
-        while self.match_value(".") {
-            self.advance(); // consume '.'
+        // Handle "import a.b.c" or "import a::b::c"
+        while self.match_value(".") || self.match_value("::") {
+            self.advance(); // consume '.' or '::'
             if !self.match_type(&TokenType::Identifier) {
-                self.log_error("Expected identifier after '.' in import path");
+                self.log_error("Expected identifier after separator in import path");
                 return None;
             }
             path.push(self.current_token().value.clone());
@@ -340,16 +450,16 @@ impl AstBuilder {
         Some(Box::new(ExportStatement::new(names)))
     }
 
-    fn parse_struct_definition(&mut self) -> Option<Box<dyn Statement>> {
+    fn parse_struct_definition(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
         self.advance(); // consume 'struct'
 
-        if !self.match_type(&TokenType::Identifier) {
-            self.log_error("Expected struct name");
-            return None;
-        }
-
-        let name = self.current_token().value.clone();
-        self.advance();
+        let name = match self.parse_qualified_name() {
+            Some(n) => n,
+            None => {
+                self.log_error("Expected struct name");
+                return None;
+            }
+        };
 
         let mut generic_params = Vec::new();
         if self.match_value("<") {
@@ -396,10 +506,10 @@ impl AstBuilder {
         self.consume_value("}", "Expected '}' after struct body");
         self.consume_end_of_line();
 
-        Some(Box::new(StructDefinition::new(name, fields, generic_params)))
+        Some(Box::new(StructDefinition::new(name, fields, generic_params).with_attributes(attrs)))
     }
 
-    fn parse_impl_block(&mut self) -> Option<Box<dyn Statement>> {
+    fn parse_impl_block(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
         self.advance(); // consume 'impl'
 
         let mut generic_params = Vec::new();
@@ -415,12 +525,13 @@ impl AstBuilder {
             else { self.advance(); }
         }
 
-        if !self.match_type(&TokenType::Identifier) {
-            self.log_error("Expected struct name after 'impl'");
-            return None;
-        }
-        let struct_name = self.current_token().value.clone();
-        self.advance();
+        let struct_name = match self.parse_qualified_name() {
+            Some(n) => n,
+            None => {
+                self.log_error("Expected struct/trait name after 'impl'");
+                return None;
+            }
+        };
 
         // Optionally <T> after struct name
         if self.match_value("<") {
@@ -492,7 +603,80 @@ impl AstBuilder {
         self.consume_value("}", "Expected '}' after impl block");
         self.consume_end_of_line();
 
-        Some(Box::new(ImplBlock::new(struct_name, generic_params, items)))
+        Some(Box::new(ImplBlock::new(struct_name, generic_params, items).with_attributes(attrs)))
+    }
+
+    fn parse_trait_definition(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
+        self.advance(); // consume 'trait'
+
+        let name = match self.parse_qualified_name() {
+            Some(n) => n,
+            None => {
+                self.log_error("Expected trait name");
+                return None;
+            }
+        };
+
+        let mut generic_params = Vec::new();
+        if self.match_value("<") {
+            self.advance();
+            loop {
+                if !self.match_type(&TokenType::Identifier) { break; }
+                generic_params.push(self.current_token().value.clone());
+                self.advance();
+                if self.match_value(",") { self.advance(); } else { break; }
+            }
+            if !self.match_value(">") { self.log_error("Expected '>'"); }
+            else { self.advance(); }
+        }
+
+        self.consume_end_of_line();
+        self.consume_value("{", "Expected '{' at start of trait body");
+        self.consume_end_of_line();
+
+        let mut methods = Vec::new();
+        while !self.match_value("}") && !self.error_occurred {
+            self.consume_end_of_line();
+            if self.match_value("}") { break; }
+
+            // Parse method signature: func name(params): ret_type
+            // func keyword is optional in trait defs
+            if self.match_type(&TokenType::Keyword) && self.current_token().value == "func" {
+                self.advance(); // consume 'func'
+            }
+
+            if !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected method name in trait definition");
+                break;
+            }
+            let method_name = self.current_token().value.clone();
+            self.advance();
+
+            self.consume_value("(", "Expected '(' for trait method parameters");
+
+            let params = self.parse_parameter_list();
+
+            self.consume_value(")", "Expected ')' after parameters");
+
+            let mut return_type = None;
+            if self.match_value(":") {
+                self.advance();
+                return_type = self.parse_type();
+            }
+
+            methods.push(TraitMethod {
+                name: method_name,
+                parameters: params.unwrap_or_default(),
+                return_type,
+            });
+
+            self.consume_end_of_line();
+        }
+
+        self.consume_value("}", "Expected '}' after trait body");
+        self.consume_end_of_line();
+
+        Some(Box::new(TraitDefinition::new(name, methods, generic_params).with_attributes(attrs)))
     }
 
     fn parse_method(&mut self, keyword: &str) -> Option<Function> {
@@ -550,7 +734,7 @@ impl AstBuilder {
         Some(Function::new(method_name, params, return_type, body))
     }
 
-    fn parse_function(&mut self) -> Option<Box<dyn Statement>> {
+    fn parse_function(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
         self.advance(); // consume 'func'
 
         if !self.match_type(&TokenType::Identifier) {
@@ -606,7 +790,8 @@ impl AstBuilder {
         };
 
         let func = Function::new(func_name, params, return_type, body)
-            .with_generic_params(generic_params);
+            .with_generic_params(generic_params)
+            .with_attributes(attrs);
         Some(Box::new(func))
     }
 
@@ -657,8 +842,20 @@ impl AstBuilder {
             return None;
         }
 
-        let type_name = self.current_token().value.clone();
+        let mut type_name = self.current_token().value.clone();
         self.advance();
+
+        // Handle :: namespace paths in types: std::int
+        while self.match_value("::") {
+            self.advance(); // consume '::'
+            if !self.match_type(&TokenType::Keyword) && !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected type name after '::'");
+                return None;
+            }
+            type_name.push_str("::");
+            type_name.push_str(&self.current_token().value);
+            self.advance();
+        }
 
         // Parse generic type args: vec<int> or map<str,int>
         let mut type_args: Vec<Box<dyn Type>> = Vec::new();
@@ -1057,17 +1254,23 @@ impl AstBuilder {
     }
 
     fn parse_primary(&mut self) -> Option<Box<dyn Expression>> {
-        // 标识符 (可能是变量名或结构体类型名)
+        // 标识符 (可能是变量名或结构体类型名，也可能是 :: 命名空间路径)
         if self.match_type(&TokenType::Identifier) {
             let name = self.current_token().value.clone();
             self.advance();
-            
+
+            // 检查是否是 :: 命名空间路径: std::io::println
+            if self.match_value("::") {
+                self.advance(); // consume '::'
+                return self.parse_path_access(name);
+            }
+
             // 检查是否是结构体字面量: TypeName { ... }
             // 通过大写开头判断类型名（遵循Go命名约定）
             if self.match_value("{") && name.chars().next().map_or(false, |c| c.is_uppercase()) {
                 return self.parse_struct_literal(Box::new(Identifier::new(name)));
             }
-            
+
             return Some(Box::new(Identifier::new(name)));
         }
 
@@ -1144,6 +1347,28 @@ impl AstBuilder {
 
         self.log_error(&format!("Unexpected token in expression: {}", self.current_token().value));
         None
+    }
+
+    /// Parse a `::`-separated namespace path: `std::io::println`
+    /// Called after the first identifier and `::` have been consumed.
+    fn parse_path_access(&mut self, first: String) -> Option<Box<dyn Expression>> {
+        let mut path = vec![first];
+        loop {
+            // Accept both Identifier and Keyword tokens in paths
+            if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+                self.log_error("Expected identifier after '::'");
+                return None;
+            }
+            let segment = self.current_token().value.clone();
+            self.advance();
+
+            if self.match_value("::") {
+                self.advance(); // consume '::'
+                path.push(segment);
+            } else {
+                return Some(Box::new(PathAccess::new(path, segment)));
+            }
+        }
     }
 
     fn parse_function_call(&mut self, callee: Box<dyn Expression>) -> Option<Box<dyn Expression>> {

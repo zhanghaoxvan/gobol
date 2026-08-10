@@ -165,12 +165,13 @@ fn test_functions_void_return() {
     result.assert_success();
 }
 
-/// 用例：modules/lib/math.gbl | 预期正常运行
+/// 用例：modules/lib/math.gbl | 预期编译通过（库文件，无main）
 #[test]
 fn test_modules_lib_math() {
     let path = fixture_path("fixtures/modules/lib/math.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
-    result.assert_success();
+    // Library file without main — expect runtime error (no main function)
+    result.assert_failure(ExitCode::RuntimePanic);
 }
 
 /// 用例：modules/main.gbl | 预期正常运行
@@ -265,6 +266,46 @@ fn test_control_flow_for_string() {
 #[test]
 fn test_types_println() {
     let path = fixture_path("fixtures/types/println.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：traits/add.gbl | 预期正常运行
+#[test]
+fn test_traits_add() {
+    let path = fixture_path("fixtures/traits/add.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：traits/operator_chain.gbl | 预期正常运行
+#[test]
+fn test_traits_operator_chain() {
+    let path = fixture_path("fixtures/traits/operator_chain.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：traits/custom_struct.gbl | 预期正常运行
+#[test]
+fn test_traits_custom_struct() {
+    let path = fixture_path("fixtures/traits/custom_struct.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：namespace/import.gbl | 预期正常运行
+#[test]
+fn test_namespace_import() {
+    let path = fixture_path("fixtures/namespace/import.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：namespace/path_access.gbl | 预期正常运行
+#[test]
+fn test_namespace_path_access() {
+    let path = fixture_path("fixtures/namespace/path_access.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
 }

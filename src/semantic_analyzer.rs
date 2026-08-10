@@ -263,7 +263,13 @@ impl SemanticAnalyzer {
             return;
         }
 
-        let path_parts: Vec<String> = module_name.split('.').map(|s| s.to_string()).collect();
+        // Split by :: first, then by . for backward compat
+        let path_parts: Vec<String> = module_name
+            .split("::")
+            .flat_map(|s| s.split('.'))
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         let base_dir = self.current_module_dir.clone();
         let file_path = match self.resolve_module_path(&path_parts, base_dir.as_deref()) {
             Some(p) => p,
@@ -355,9 +361,9 @@ impl SemanticAnalyzer {
                     let original_key = if parts.len() > 1 {
                         let mod_part = parts[0];
                         let resolved_mod = self.module_aliases.get(mod_part).map(|s| s.as_str()).unwrap_or(mod_part);
-                        format!("{}.{}", resolved_mod, short)
+                        format!("{}::{}", resolved_mod, short)
                     } else {
-                        format!("{}.{}", self.current_module, name)
+                        format!("{}::{}", self.current_module, name)
                     };
                     if let Some(sym) = self.env.lookup_symbol(&original_key) {
                         let return_type = sym.data_type.clone();
@@ -793,10 +799,10 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         // Look up in current module
-        let full_name = format!("{}.{}", self.current_module, name);
+        let full_name = format!("{}::{}", self.current_module, name);
         let sym = self.env.lookup_symbol(&full_name)
             .or_else(|| {
-                let builtin = format!("__builtins__.{}", name);
+                let builtin = format!("__builtins__::{}", name);
                 self.env.lookup_symbol(&builtin)
             })
             .or_else(|| self.env.lookup_symbol(name));
@@ -1104,6 +1110,11 @@ impl AstVisitor for SemanticAnalyzer {
         if let Some(callee) = node.get_callee() {
             if let Some(id) = callee.as_any().downcast_ref::<Identifier>() {
                 func_name = id.get_name().to_string();
+            } else if let Some(path_access) = callee.as_any().downcast_ref::<PathAccess>() {
+                // :: namespace path: std::io::println
+                // path = ["std", "io"], member = "println" → module = "std::io", func = "println"
+                module_name = path_access.get_path().join("::");
+                func_name = path_access.get_member().to_string();
             } else if let Some(member) = callee.as_any().downcast_ref::<MemberAccess>() {
                 if let Some(obj) = member.get_object() {
                     if let Some(obj_id) = obj.as_any().downcast_ref::<Identifier>() {
@@ -1139,12 +1150,12 @@ impl AstVisitor for SemanticAnalyzer {
             if is_var {
                 // For struct types, look up method in current module
                 // For arrays, the method is handled by the executor
-                format!("{}.{}", self.current_module, func_name)
+                format!("{}::{}", self.current_module, func_name)
             } else {
-                format!("{}.{}", resolved_module, func_name)
+                format!("{}::{}", resolved_module, func_name)
             }
         } else {
-            format!("{}.{}", resolved_module, func_name)
+            format!("{}::{}", resolved_module, func_name)
         };
 
         // Try qualified lookup, then short-name lookup
@@ -1310,7 +1321,7 @@ impl AstVisitor for SemanticAnalyzer {
                     let mut is_spread = false;
                     if let Some(id) = value.as_any().downcast_ref::<Identifier>() {
                         let id_name = id.get_name();
-                        let full_name = format!("{}.{}", self.current_module, id_name);
+                        let full_name = format!("{}::{}", self.current_module, id_name);
                         if let Some(sym) = self.env.lookup_symbol(&full_name)
                             .or_else(|| self.env.lookup_symbol(id_name))
                         {
@@ -1404,7 +1415,7 @@ impl AstVisitor for SemanticAnalyzer {
                 }
 
                 // Check module-level lookup (existing behavior)
-                let full_name = format!("{}.{}", obj_name, member);
+                let full_name = format!("{}::{}", obj_name, member);
                 if let Some(sym) = self.env.lookup_symbol(&full_name) {
                     self.type_stack.push(sym.data_type.clone());
                     return;

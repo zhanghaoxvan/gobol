@@ -305,6 +305,10 @@ impl Lexer {
             }
             ':' => {
                 self.consume();
+                if self.peek() == ':' {
+                    self.consume();
+                    return Token::with_pos(TokenType::Operator, "::", tok_line, tok_col);
+                }
                 Token::with_pos(TokenType::Operator, ":", tok_line, tok_col)
             }
             ';' => {

@@ -1,0 +1,51 @@
+// Float type — bound to native f64
+#[builtin("float64")]
+struct float {}
+
+// Float trait implementations using intrinsic runtime functions
+impl float {
+    #[intrinsic("f64_add")]
+    func add(self, other: float): float {
+        self
+    }
+
+    #[intrinsic("f64_sub")]
+    func sub(self, other: float): float {
+        self
+    }
+
+    #[intrinsic("f64_mul")]
+    func mul(self, other: float): float {
+        self
+    }
+
+    #[intrinsic("f64_div")]
+    func div(self, other: float): float {
+        self
+    }
+
+    #[intrinsic("f64_eq")]
+    func eq(self, other: float): bool {
+        false
+    }
+
+    #[intrinsic("f64_lt")]
+    func lt(self, other: float): bool {
+        false
+    }
+
+    #[intrinsic("f64_le")]
+    func le(self, other: float): bool {
+        false
+    }
+
+    #[intrinsic("f64_gt")]
+    func gt(self, other: float): bool {
+        false
+    }
+
+    #[intrinsic("f64_ge")]
+    func ge(self, other: float): bool {
+        false
+    }
+}

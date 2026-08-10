@@ -277,7 +277,7 @@ impl Environment {
             self.scopes.push(HashMap::new());
         }
 
-        let full_name = format!("{}.{}", module_name, name);
+        let full_name = format!("{}::{}", module_name, name);
         let global_scope = &mut self.scopes[0];
 
         // Allow duplicate declarations (e.g., from load_module + direct analysis)

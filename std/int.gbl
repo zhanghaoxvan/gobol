@@ -1,0 +1,57 @@
+// Integer type — bound to native int32 via #[builtin]
+#[builtin("int32")]
+struct int {}
+
+// Add trait implementation for int using intrinsic runtime functions
+impl int {
+    #[intrinsic("i32_add")]
+    func add(self, other: int): int {
+        // intrinsic: body replaced by direct C runtime call
+        self
+    }
+
+    #[intrinsic("i32_sub")]
+    func sub(self, other: int): int {
+        self
+    }
+
+    #[intrinsic("i32_mul")]
+    func mul(self, other: int): int {
+        self
+    }
+
+    #[intrinsic("i32_div")]
+    func div(self, other: int): int {
+        self
+    }
+
+    #[intrinsic("i32_rem")]
+    func rem(self, other: int): int {
+        self
+    }
+
+    #[intrinsic("i32_eq")]
+    func eq(self, other: int): bool {
+        false
+    }
+
+    #[intrinsic("i32_lt")]
+    func lt(self, other: int): bool {
+        false
+    }
+
+    #[intrinsic("i32_le")]
+    func le(self, other: int): bool {
+        false
+    }
+
+    #[intrinsic("i32_gt")]
+    func gt(self, other: int): bool {
+        false
+    }
+
+    #[intrinsic("i32_ge")]
+    func ge(self, other: int): bool {
+        false
+    }
+}

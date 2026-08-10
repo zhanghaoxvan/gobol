@@ -66,15 +66,12 @@ pub fn init_test_env() {
 
 pub fn run_gobol(file_path: &str, _verbose: bool) -> TestResult {
     init_test_env();
-    
-    // 使用 cargo 运行，自动处理路径和构建
+
+    // Run via JIT (Cranelift) — the only backend after CodeGenC removal.
     let output = Command::new("cargo")
-        .args(["run", "--release", "--", file_path])
+        .args(["run", "--release", "--bin", "gobol", "--", file_path])
         .output()
-        .expect("执行 gobol 失败");
-    
-    // 清理输出文件（用 match 处理可能的失败）
-    let _ = std::fs::remove_file(format!("{}.out", file_path));
+        .expect("failed to run gobol");
 
     TestResult {
         success: output.status.success(),

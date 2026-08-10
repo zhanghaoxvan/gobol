@@ -411,13 +411,14 @@ def add_path_windows(target_str):
     if "EXISTS" in result.stdout:
         print(f"[INFO] {target_str} already in User PATH")
     else:
-        add_cmd = (
-            '$p = [Environment]::GetEnvironmentVariable("PATH", "User"); '
-            f'if ($p -notlike "*{target_str}*") {{ '
-            f'[Environment]::SetEnvironmentVariable("PATH", '
-            f'if ($p) {{ "$p;{target_str}" }} else {{ "{target_str}" }}, "User"); '
-            'Write-Output "ADDED" }}'
-        )
+        add_cmd = f'''
+$p = [Environment]::GetEnvironmentVariable("PATH", "User")
+if ($p -notlike "*{target_str}*") {{
+    $newPath = if ($p) {{ "$p;{target_str}" }} else {{ "{target_str}" }}
+    [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
+    Write-Output "ADDED"
+}}
+'''
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", add_cmd],
             capture_output=True, text=True,

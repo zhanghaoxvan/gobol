@@ -7,7 +7,6 @@ Layout created under ~/.gobol/:
         bin/                       # symlinks/copies of the active toolchain
             gobol[.exe]
             grape[.exe]
-            gobolup[.exe]          # version-manager shim
         lib/                       # runtime files
             std/                   # Gobol standard library (*.gbl)
             c/                     # C companion runtime (*.c)
@@ -188,7 +187,6 @@ def install_version(tag, no_build=False, verbose=False):
 
     # 4. Install stdlib + runtime C companions
     install_std_into(vlib)
-    install_gobolup_into(vbin)
 
     # 5. Activate this version
     activate_version(tag)
@@ -227,19 +225,6 @@ def install_std_into(target_lib):
             shutil.rmtree(dst_c)
         shutil.copytree(src_c, dst_c)
         print(f"[ OK ] std/c/ -> {dst_c}")
-
-
-def install_gobolup_into(target_bin):
-    """Install the gobolup shim (this script) into <target_bin>/gobolup."""
-    self_path = Path(__file__).resolve()
-    dst = target_bin / (f"gobolup{binary_suffix()}")
-    try:
-        shutil.copy2(self_path, dst)
-        if not is_windows():
-            dst.chmod(0o755)
-        print(f"[ OK ] gobolup -> {dst}")
-    except Exception as e:
-        print(f"[WARN] Could not install gobolup: {e}")
 
 
 # ==================== Activate / switch ====================
@@ -542,7 +527,7 @@ def read_cargo_version():
 
 def main():
     p = argparse.ArgumentParser(
-        prog="gobolup",
+        prog="install.py",
         description="Gobol installer & version manager (rustup-style).",
     )
     p.add_argument("--version", action="store_true", help="Show installer version and exit")

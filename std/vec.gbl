@@ -94,6 +94,23 @@ impl<T> vec<T> {
     iter(self) {
         vec_iterator(_data, _len)
     }
+
+    // Index/IndexMut trait implementations.
+    // index(i) returns the element value.
+    // index_mut(i) returns a Ref<T> pointing directly at the element slot,
+    // enabling `v[i] = x` to desugar to `v.index_mut(i).write(x)`.
+
+    func index(self, index: int): T {
+        self.get(index)
+    }
+
+    func index_mut(self, index: int): Ref<T> {
+        if index < 0 || index >= _len {
+            panic("index out of bounds");
+        }
+        var addr = gobol_array_elem_addr(_data, index);
+        Ref<T>::new(addr)
+    }
 };
 
 func _grow<T>(self: vec<T>) {
@@ -140,7 +157,7 @@ operator []=(self: vec<T>, index: int, value: T) {
 }
 
 operator +(left: vec<T>, right: vec<T>): vec<T> {
-    var result: vec<T> = vec<T>.new();
+    var result: vec<T> = vec<T>::new();
     for i in 0..left.len() {
         result.push(left[i]);
     }
@@ -162,6 +179,3 @@ operator ==(left: vec<T>, right: vec<T>): bool {
     true
 }
 
-// ==================== 导出 ====================
-#[internal]
-export(vec);

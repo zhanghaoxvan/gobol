@@ -1,12 +1,12 @@
-import io;
+import std;
 
 func main() {
     var opt: int? = null;
     if opt == null {
-        io.println("opt is null");
+        io::println("opt is null");
     }
     opt = 42;
     if opt != null {
-        io.println(@"opt is {opt}");
+        io::println(@"opt is {opt}");
     }
 }

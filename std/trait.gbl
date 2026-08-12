@@ -1,35 +1,6 @@
-// Core Trait definitions for Gobol standard library
-// These traits define the operator protocol — binary operators (+,-,*,/,%)
-// are desugared to method calls on the corresponding trait.
-// Traits are namespaced with :: paths.
-
-trait std::ops::Add<T> {
-    func add(self, other: T): T
-}
-
-trait std::ops::Sub<T> {
-    func sub(self, other: T): T
-}
-
-trait std::ops::Mul<T> {
-    func mul(self, other: T): T
-}
-
-trait std::ops::Div<T> {
-    func div(self, other: T): T
-}
-
-trait std::ops::Rem<T> {
-    func rem(self, other: T): T
-}
-
-trait std::cmp::Eq<T> {
-    func eq(self, other: T): bool
-}
-
-trait std::cmp::Cmp<T> {
-    func lt(self, other: T): bool
-    func le(self, other: T): bool
-    func gt(self, other: T): bool
-    func ge(self, other: T): bool
-}
+// std/trait.gbl — Re-export module for std::ops and std::cmp traits.
+//
+// Semantic analyzer auto-loads this file via `load_module("trait")` so that
+// `impl std::ops::Add for int` style impl blocks in int.gbl resolve correctly.
+import ops;
+import cmp;

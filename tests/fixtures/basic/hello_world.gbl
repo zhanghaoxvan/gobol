@@ -1,5 +1,5 @@
-import io;
+import std;
 
 func main() {
-    io.println("Hello, World!");
+    io::println("Hello, World!");
 }

@@ -1,4 +1,4 @@
-import io;
+import std;
 
 func bubble_sort(arr: int[]) {
     var n = arr.len();
@@ -17,7 +17,7 @@ func main() {
     var arr: int[] = [5, 3, 8, 1, 9, 2];
     bubble_sort(arr);
     for i in arr {
-        io.print(i);
+        io::print(i);
     }
-    io.print("\n");
+    io::print("\n");
 }

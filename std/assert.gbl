@@ -1,0 +1,15 @@
+// Assertion module.
+//
+// assert(cond) in --debug mode: if cond is false, panic with file() + line().
+// In --release mode, assert(...) calls are completely removed (zero overhead).
+
+// assert is handled specially by the compiler — when #[debug] applies,
+// it expands to a runtime check. This file provides a fallback stub so
+// that import resolution succeeds.
+#[debug]
+func assert(cond: bool) {
+    if !cond {
+        debug::println("assertion failed");
+        panic();
+    }
+}

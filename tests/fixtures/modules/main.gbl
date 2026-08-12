@@ -1,7 +1,7 @@
-import io;
+import std;
 import lib.math as m;
 
 func main() {
-    var result = m.add(5, 3);
-    io.println(@"5 + 3 = {result}");
+    var result = m::add(5, 3);
+    io::println(@"5 + 3 = {result}");
 }

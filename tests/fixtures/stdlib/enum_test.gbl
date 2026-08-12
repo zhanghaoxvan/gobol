@@ -1,0 +1,35 @@
+import io;
+
+// Simple unit enum — lowered to tagged struct
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+// Enum with payload
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+func main(): int {
+    io::println("=== Enum test ===");
+
+    // Unit variants
+    var c = Color::Red();
+    io::println("Color::Red created");
+
+    var g = Color::Green();
+    io::println("Color::Green created");
+
+    // Option::Some with value
+    var opt = Option::Some(42);
+    io::println("Option::Some(42) created");
+
+    // Option::None
+    var none = Option::None();
+    io::println("Option::None created");
+
+    0
+}

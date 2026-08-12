@@ -1,0 +1,11 @@
+// Debug I/O module.
+//
+// debug::print / debug::println write to stderr ONLY when compiled in --debug mode.
+// In --release mode, these functions are completely removed by the compiler (zero overhead).
+import builtins;
+
+#[debug]
+func print<T>(value: T) { builtins::gobol_eprint(value as str); }
+
+#[debug]
+func println<T>(value: T) { builtins::gobol_eprintln(value as str); }

@@ -1,0 +1,31 @@
+// std/mem.gbl — Unified New / Drop memory protocol.
+//
+// Every owned value type in the standard library is expected to conform to
+// these two traits so the compiler can reason about construction and
+// cleanup uniformly:
+//
+//   • New  — default construction (equivalent to a zero-arg constructor).
+//            This is the trait that backs the `new Type(args)` syntax; the
+//            arity-0 variant is used for type constructors like `Vec::new()`.
+//   • Drop — explicit destruction. When a value goes out of scope, the
+//            compiler is responsible for inserting a call to `drop(self)`
+//            so any heap-allocated resources are released.
+
+// Re-export the constructor trait previously defined in `new.gbl`.
+// #[dynamic_args] signals to the semantic analyser that implementers are
+// free to define their own parameter list for `new` (e.g.
+// `func new(start: int, end: int): Range`).  The compiler skips
+// signature checking against the trait declaration and instead relies on
+// the concrete impl-block signature, enabling `new Type(args)` syntax for
+// any arity.
+trait New<T> {
+    #[dynamic_args]
+    func new(): T
+}
+
+// Drop — complementary trait for `New`. Values that own heap memory or
+// other resources (file handles, sockets, Ref<T> owning references) MUST
+// implement `Drop` so calls to `drop(self)` release the memory.
+trait Drop {
+    func drop(self)
+}

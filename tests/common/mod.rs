@@ -1,10 +1,13 @@
 use std::process::Command;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use std::time::Instant;
 
 static INIT: Once = Once::new();
+// Serialize gobol build invocations so parallel tests don't fight over the
+// cargo target dir lock / linker.
+static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -54,6 +57,15 @@ impl TestResult {
     }
 }
 
+/// Path to the prebuilt `gobol` release binary.
+fn gobol_binary() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("target");
+    p.push("release");
+    p.push("gobol");
+    p
+}
+
 pub fn init_test_env() {
     INIT.call_once(|| {
         let status = Command::new("cargo")
@@ -67,17 +79,59 @@ pub fn init_test_env() {
 pub fn run_gobol(file_path: &str, _verbose: bool) -> TestResult {
     init_test_env();
 
-    // Run via JIT (Cranelift) — the only backend after CodeGenC removal.
-    let output = Command::new("cargo")
-        .args(["run", "--release", "--bin", "gobol", "--", file_path])
+    let temp_dir = std::env::temp_dir();
+    let nanos = Instant::now().elapsed().as_nanos();
+    let pid = std::process::id();
+    let temp_bin = temp_dir.join(format!("gobol_test_bin_{}_{}.out", pid, nanos));
+
+    // Run the prebuilt gobol binary directly (avoid `cargo run` which
+    // contends on the target dir lock when tests run in parallel).
+    let _guard = BUILD_LOCK.lock().unwrap();
+    let build_output = Command::new(gobol_binary())
+        .args([
+            "build", file_path, "-o", temp_bin.to_str().unwrap(),
+        ])
         .output()
-        .expect("failed to run gobol");
+        .expect("failed to run gobol build");
+    drop(_guard);
+
+    let build_stdout = String::from_utf8_lossy(&build_output.stdout).to_string();
+    let build_stderr = String::from_utf8_lossy(&build_output.stderr).to_string();
+    let build_success = build_output.status.success();
+
+    if !build_success {
+        let _ = fs::remove_file(&temp_bin);
+        return TestResult {
+            success: false,
+            stdout: build_stdout,
+            stderr: build_stderr,
+            exit_code: ExitCode::CompileError as i32,
+        };
+    }
+
+    let run_output = Command::new(&temp_bin)
+        .output()
+        .expect("failed to run compiled binary");
+
+    let run_stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
+    let run_stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
+    let run_exit_code = run_output.status.code().unwrap_or(ExitCode::RuntimePanic as i32);
+
+    let _ = fs::remove_file(&temp_bin);
+
+    let final_exit_code = if run_output.status.success() {
+        ExitCode::Success as i32
+    } else if run_exit_code == ExitCode::RuntimePanic as i32 {
+        ExitCode::RuntimePanic as i32
+    } else {
+        ExitCode::RuntimePanic as i32
+    };
 
     TestResult {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: output.status.code().unwrap_or(1),
+        success: run_output.status.success(),
+        stdout: format!("{}{}", build_stdout, run_stdout),
+        stderr: format!("{}{}", build_stderr, run_stderr),
+        exit_code: final_exit_code,
     }
 }
 

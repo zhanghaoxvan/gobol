@@ -1,4 +1,4 @@
-// cranelift.rs — JIT backend. Lowers GobolIR to native machine code via Cranelift.
+// cranelift.rs — AOT backend. Lowers GobolIR to native machine code via Cranelift ObjectModule.
 //
 // Supports the Gobol grammar: variables (var/val) with type inference, all
 // primitive types (int/float/bool/str), arithmetic & comparison operators,
@@ -10,157 +10,9 @@ use crate::ir::*;
 use cranelift_codegen::ir::{self, types, AbiParam, Inst, InstBuilder, MemFlagsData};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::HashMap;
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-
-// ==================== Runtime ====================
-//
-// These extern "C" functions are compiled into the host process and registered
-// with the JIT so generated code can call them. They mirror std/c/__builtins__.c
-// so that the JIT backend is self-contained.
-
-#[repr(C)]
-struct GobolArray {
-    data: *mut i64,
-    len: i64,
-    cap: i64,
-}
-
-extern "C" fn gobol_print(s: *const c_char) {
-    if !s.is_null() {
-        unsafe {
-            let bytes = CStr::from_ptr(s).to_bytes();
-            use std::io::Write;
-            let _ = std::io::stdout().write_all(bytes);
-        }
-    }
-}
-
-extern "C" fn gobol_println(s: *const c_char) {
-    if !s.is_null() {
-        unsafe {
-            let bytes = CStr::from_ptr(s).to_bytes();
-            use std::io::Write;
-            let _ = std::io::stdout().write_all(bytes);
-            let _ = std::io::stdout().write_all(b"\n");
-        }
-    }
-}
-
-extern "C" fn gobol_read() -> *mut c_char {
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-    while line.ends_with('\n') || line.ends_with('\r') {
-        line.pop();
-    }
-    CString::new(line).unwrap_or_else(|_| CString::new("").unwrap()).into_raw()
-}
-
-extern "C" fn gobol_str_int(n: i64) -> *mut c_char {
-    CString::new(n.to_string()).unwrap_or_else(|_| CString::new("").unwrap()).into_raw()
-}
-
-extern "C" fn gobol_str_float(f: f64) -> *mut c_char {
-    CString::new(format!("{}", f)).unwrap_or_else(|_| CString::new("").unwrap()).into_raw()
-}
-
-extern "C" fn gobol_str_bool(b: i8) -> *mut c_char {
-    let s = if b != 0 { "true" } else { "false" };
-    CString::new(s).unwrap().into_raw()
-}
-
-extern "C" fn gobol_str_cat(a: *const c_char, b: *const c_char) -> *mut c_char {
-    let a = if a.is_null() { "" } else { unsafe { CStr::from_ptr(a).to_str().unwrap_or("") } };
-    let b = if b.is_null() { "" } else { unsafe { CStr::from_ptr(b).to_str().unwrap_or("") } };
-    CString::new(format!("{}{}", a, b)).unwrap_or_else(|_| CString::new("").unwrap()).into_raw()
-}
-
-extern "C" fn gobol_str_eq(a: *const c_char, b: *const c_char) -> i8 {
-    let a = if a.is_null() { "" } else { unsafe { CStr::from_ptr(a).to_str().unwrap_or("") } };
-    let b = if b.is_null() { "" } else { unsafe { CStr::from_ptr(b).to_str().unwrap_or("") } };
-    if a == b { 1 } else { 0 }
-}
-
-extern "C" fn gobol_alloc(size: i64) -> *mut u8 {
-    let len = size.max(0) as usize;
-    let mut v = vec![0u8; len];
-    let ptr = v.as_mut_ptr();
-    std::mem::forget(v);
-    ptr
-}
-
-extern "C" fn gobol_array_new() -> *mut GobolArray {
-    Box::into_raw(Box::new(GobolArray { data: std::ptr::null_mut(), len: 0, cap: 0 }))
-}
-
-extern "C" fn gobol_array_add(arr: *mut GobolArray, val: i64) {
-    if arr.is_null() {
-        return;
-    }
-    unsafe {
-        let arr = &mut *arr;
-        if arr.len >= arr.cap {
-            let new_cap = if arr.cap == 0 { 8 } else { arr.cap * 2 };
-            let mut new_data = vec![0i64; new_cap as usize];
-            if !arr.data.is_null() {
-                std::ptr::copy_nonoverlapping(arr.data, new_data.as_mut_ptr(), arr.len as usize);
-            }
-            arr.data = new_data.as_mut_ptr();
-            std::mem::forget(new_data);
-            arr.cap = new_cap;
-        }
-        arr.data.add(arr.len as usize).write(val);
-        arr.len += 1;
-    }
-}
-
-extern "C" fn gobol_array_len(arr: *mut GobolArray) -> i64 {
-    if arr.is_null() { 0 } else { unsafe { (*arr).len } }
-}
-
-extern "C" fn gobol_array_get(arr: *mut GobolArray, i: i64) -> i64 {
-    if arr.is_null() {
-        return 0;
-    }
-    unsafe {
-        let arr = &*arr;
-        if i < 0 || i >= arr.len {
-            0
-        } else {
-            arr.data.add(i as usize).read()
-        }
-    }
-}
-
-extern "C" fn gobol_array_set(arr: *mut GobolArray, i: i64, val: i64) {
-    if arr.is_null() {
-        return;
-    }
-    unsafe {
-        let arr = &mut *arr;
-        if i >= 0 && i < arr.len {
-            arr.data.add(i as usize).write(val);
-        }
-    }
-}
-
-extern "C" fn gobol_str_len(s: *const c_char) -> i64 {
-    if s.is_null() { 0 } else { unsafe { CStr::from_ptr(s).to_bytes().len() as i64 } }
-}
-
-extern "C" fn gobol_str_get(s: *const c_char, i: i64) -> i64 {
-    if s.is_null() {
-        return 0;
-    }
-    unsafe {
-        let bytes = CStr::from_ptr(s).to_bytes();
-        if i < 0 || i >= bytes.len() as i64 { 0 } else { bytes[i as usize] as i64 }
-    }
-}
+use std::collections::{HashMap, HashSet};
 
 // ==================== TypeResolver ====================
 
@@ -174,6 +26,8 @@ extern "C" fn gobol_str_get(s: *const c_char, i: i64) -> i64 {
 pub struct TypeResolver {
     /// struct name -> definition
     structs: HashMap<String, IRStruct>,
+    /// Struct names that opt out of GC via #[no_gc].
+    no_gc_structs: HashSet<String>,
     /// IR function name -> return type (user functions + runtime imports)
     func_return_types: HashMap<String, DataType>,
     /// variable name -> type (per-function, reset between functions)
@@ -184,6 +38,7 @@ impl TypeResolver {
     pub fn new() -> Self {
         let mut r = TypeResolver {
             structs: HashMap::new(),
+            no_gc_structs: HashSet::new(),
             func_return_types: HashMap::new(),
             var_types: HashMap::new(),
         };
@@ -195,6 +50,9 @@ impl TypeResolver {
 
     pub fn register_structs(&mut self, structs: &[IRStruct]) {
         for s in structs {
+            if s.attributes.contains(&"no_gc".to_string()) {
+                self.no_gc_structs.insert(s.name.clone());
+            }
             self.structs.insert(s.name.clone(), s.clone());
         }
     }
@@ -208,6 +66,8 @@ impl TypeResolver {
         let entries: &[(&str, DataType)] = &[
             ("gobol_print", DataType::None_),
             ("gobol_println", DataType::None_),
+            ("gobol_eprint", DataType::None_),
+            ("gobol_eprintln", DataType::None_),
             ("gobol_read", DataType::Str),
             ("gobol_str_int", DataType::Str),
             ("gobol_str_float", DataType::Str),
@@ -216,12 +76,40 @@ impl TypeResolver {
             ("gobol_str_eq", DataType::Bool),
             ("gobol_str_len", DataType::Int),
             ("gobol_str_get", DataType::Int),
+            ("gobol_str_contains", DataType::Bool),
+            ("gobol_str_trim", DataType::Str),
+            ("gobol_str_replace", DataType::Str),
+            ("gobol_math_sin", DataType::Float),
+            ("gobol_math_cos", DataType::Float),
+            ("gobol_math_pow", DataType::Float),
+            ("gobol_fs_open", DataType::Int),
+            ("gobol_fs_read_all", DataType::Str),
+            ("gobol_fs_write", DataType::Int),
+            ("gobol_fs_close", DataType::None_),
+            ("gobol_fs_exists", DataType::Bool),
+            ("gobol_tcp_connect", DataType::Int),
+            ("gobol_tcp_send", DataType::Int),
+            ("gobol_tcp_recv", DataType::Str),
+            ("gobol_tcp_close", DataType::None_),
+            ("gobol_tcp_bind", DataType::Int),
+            ("gobol_tcp_accept", DataType::Int),
             ("gobol_alloc", DataType::Int),
             ("gobol_array_new", DataType::Unknown),
             ("gobol_array_add", DataType::None_),
             ("gobol_array_len", DataType::Int),
             ("gobol_array_get", DataType::Int),
             ("gobol_array_set", DataType::None_),
+            ("gobol_mem_load", DataType::Int),
+            ("gobol_mem_store", DataType::None_),
+            ("gobol_array_elem_addr", DataType::Int),
+            // GC / manual heap dispatch used by the compiler when a
+            // `new` allocation is respectively gc-managed (default) or
+            // opted out via a `#[no_gc]` annotation.
+            ("gobol_gc_alloc", DataType::Int),
+            ("gobol_gc_mark", DataType::None_),
+            ("gobol_gc_sweep", DataType::None_),
+            ("gobol_malloc", DataType::Int),
+            ("gobol_free", DataType::None_),
         ];
         for (name, ty) in entries {
             self.func_return_types.insert(name.to_string(), ty.clone());
@@ -242,6 +130,10 @@ impl TypeResolver {
 
     pub fn has_struct(&self, name: &str) -> bool {
         self.structs.contains_key(name)
+    }
+
+    pub fn is_no_gc(&self, name: &str) -> bool {
+        self.no_gc_structs.contains(name)
     }
 
     // ---- layout ----
@@ -304,10 +196,15 @@ impl TypeResolver {
     /// Falls back to `DataType::Int` for unknown functions (preserving
     /// previous behaviour without hard-coding specific names).
     pub fn func_return_type(&self, name: &str) -> DataType {
-        self.func_return_types
-            .get(name)
-            .cloned()
-            .unwrap_or(DataType::Int)
+        if let Some(dt) = self.func_return_types.get(name) {
+            return dt.clone();
+        }
+        // Try short name (strip :: module prefix) for cross-module calls
+        let short = name.rsplit("::").next().unwrap_or(name);
+        if let Some(dt) = self.func_return_types.get(short) {
+            return dt.clone();
+        }
+        DataType::Int
     }
 
     /// Return type of an intrinsic arithmetic method on a primitive type.
@@ -338,6 +235,9 @@ impl TypeResolver {
             // String methods
             (DataType::Str, "len") => Some(DataType::Int),
             (DataType::Str, "get") => Some(DataType::Int),
+            (DataType::Str, "contains") => Some(DataType::Bool),
+            (DataType::Str, "trim") => Some(DataType::Str),
+            (DataType::Str, "replace") => Some(DataType::Str),
             _ => None,
         }
     }
@@ -443,13 +343,101 @@ impl TypeResolver {
     }
 }
 
+// ==================== Variadic stubs ====================
+
+/// A C wrapper stub needed for a variadic `extern "C"` call site.
+///
+/// C variadic functions (e.g. `printf`) cannot be called directly through a
+/// single fixed-arity Cranelift signature.  For each distinct arity used at a
+/// call site, the backend declares a non-variadic import symbol
+/// `__gobol_va_<name>_<arity>` and generates a matching C wrapper that
+/// forwards to the real variadic function.
+#[derive(Debug, Clone)]
+pub struct VariadicStub {
+    /// The original extern "C" function name (e.g. `printf`).
+    pub func_name: String,
+    /// Total number of arguments at this call site (fixed + variadic).
+    pub arity: usize,
+    /// The Gobol type of each argument, used to pick the correct C type.
+    pub param_types: Vec<DataType>,
+    /// The function's return type.
+    pub return_type: DataType,
+}
+
+impl VariadicStub {
+    /// Symbol name used in the object file and the C stub file.
+    pub fn symbol_name(&self) -> String {
+        let clean = self.func_name.replace("::", "_").replace('.', "_");
+        format!("__gobol_va_{}_{}", clean, self.arity)
+    }
+
+    /// Map a Gobol type to the C parameter type used in the stub.
+    fn c_type(dt: &DataType) -> &'static str {
+        match dt {
+            DataType::Float => "double",
+            DataType::Bool => "int",
+            DataType::None_ => "void",
+            DataType::Int
+            | DataType::Str
+            | DataType::Unknown
+            | DataType::Struct(_)
+            | DataType::Nullable(_) => "long",
+        }
+    }
+
+    /// Generate the C source for this stub.
+    pub fn c_source(&self) -> String {
+        let sym = self.symbol_name();
+        let ret_c = Self::c_type(&self.return_type);
+        let params: Vec<String> = self
+            .param_types
+            .iter()
+            .enumerate()
+            .map(|(i, dt)| format!("{} a{}", Self::c_type(dt), i))
+            .collect();
+        let params_joined = if params.is_empty() {
+            "void".to_string()
+        } else {
+            params.join(", ")
+        };
+        // Forward each argument, casting str args to const char* (Gobol str is
+        // an opaque pointer; the real C function expects a string pointer).
+        let forward_args: Vec<String> = (0..self.arity)
+            .map(|i| {
+                if matches!(self.param_types[i], DataType::Str) {
+                    format!("(const char*)a{}", i)
+                } else {
+                    format!("a{}", i)
+                }
+            })
+            .collect();
+        let call_args = forward_args.join(", ");
+        let ret_stmt = if matches!(self.return_type, DataType::None_) {
+            format!("{}({});", self.func_name, call_args)
+        } else {
+            format!("return {}({});", self.func_name, call_args)
+        };
+        format!(
+            "{ret_c} {sym}({params}) {{ {ret_stmt} }}\n",
+            ret_c = ret_c,
+            sym = sym,
+            params = params_joined,
+            ret_stmt = ret_stmt,
+        )
+    }
+}
+
 // ==================== Backend ====================
 
-pub struct CraneliftBackend<M: Module> {
-    module: M,
+pub struct CraneliftBackend {
+    module: ObjectModule,
     fn_ctx: FunctionBuilderContext,
-    /// IR function name -> symbol name (e.g. "Point::new" -> "gbl_Point_new")
-    func_symbols: HashMap<String, String>,
+    /// (IR function name, arity) -> symbol name.
+    /// Arity is the number of IR-level parameters (including implicit `self`
+    /// for methods). Including arity in the key allows overloaded methods
+    /// like `Range::new(start, end)` and `Range::new(start, end, step)` to
+    /// coexist with distinct symbol names.
+    func_symbols: HashMap<(String, usize), String>,
     /// symbol name -> FuncId (user-defined functions + runtime imports)
     func_ids: HashMap<String, cranelift_module::FuncId>,
     /// string literal text -> DataId
@@ -458,6 +446,12 @@ pub struct CraneliftBackend<M: Module> {
     constructors: HashMap<String, bool>,
     /// centralised type inference / layout / return-type lookup
     type_resolver: TypeResolver,
+
+    /// IR function names that are `extern "C"` variadic (declared with `...`).
+    /// These are never declared directly; per-arity stubs are used instead.
+    variadic_funcs: std::collections::HashSet<String>,
+    /// Collected per-arity stubs, deduplicated by (name, arity).
+    variadic_stubs: Vec<VariadicStub>,
 
     // --- per-function translation state (reset each function) ---
     variables: HashMap<String, Variable>,
@@ -471,7 +465,7 @@ pub struct CraneliftBackend<M: Module> {
     diverged: bool,
 }
 
-impl<M: Module> CraneliftBackend<M> {
+impl CraneliftBackend {
     /// Compile the IR to JIT machine code. After this, `get_function_ptr` works.
     pub fn compile_ir(&mut self, ir: &GobolIR) -> Result<(), String> {
         // Collect struct definitions and constructor names.
@@ -483,12 +477,20 @@ impl<M: Module> CraneliftBackend<M> {
                 }
                 // Register method return types in the TypeResolver.
                 self.type_resolver.register_function(&m.name, m.return_type.clone());
+                // Also register with struct prefix for operator desugaring
+                let prefixed = format!("{}::{}", imp.struct_name, m.name);
+                self.type_resolver.register_function(&prefixed, m.return_type.clone());
             }
         }
         // Register user function return types.
         for f in &ir.functions {
             if !f.is_main {
                 self.type_resolver.register_function(&f.name, f.return_type.clone());
+            }
+            // Collect variadic extern "C" functions — these use per-arity stubs
+            // instead of a single fixed signature.
+            if f.is_variadic {
+                self.variadic_funcs.insert(f.name.clone());
             }
         }
 
@@ -504,6 +506,9 @@ impl<M: Module> CraneliftBackend<M> {
         }
         for imp in &ir.impls {
             for m in &imp.methods {
+                // declare_user_function registers (m.name, arity) -> symbol.
+                // m.name is already in "Struct::method" form (set by IRBuilder),
+                // so no additional alias registration is needed.
                 self.declare_user_function(m)?;
             }
         }
@@ -542,6 +547,16 @@ impl<M: Module> CraneliftBackend<M> {
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         self.declare_import("gobol_println", sig);
+
+        // void gobol_eprint(const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_eprint", sig);
+
+        // void gobol_eprintln(const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_eprintln", sig);
 
         // char* read()
         let sig = self.module.make_signature();
@@ -598,6 +613,21 @@ impl<M: Module> CraneliftBackend<M> {
         sig.returns.push(AbiParam::new(types::I64));
         self.declare_import("gobol_alloc", sig);
 
+        // ptr gobol_gc_alloc(i64) — GC-tracked allocation (default)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_gc_alloc", sig);
+
+        // void gobol_gc_mark(ptr)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_gc_mark", sig);
+
+        // void gobol_gc_sweep()
+        let sig = self.module.make_signature();
+        self.declare_import("gobol_gc_sweep", sig);
+
         // ptr gobol_array_new()
         let sig = self.module.make_signature();
         let mut sig = sig;
@@ -629,6 +659,178 @@ impl<M: Module> CraneliftBackend<M> {
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
         self.declare_import("gobol_array_set", sig);
+
+        // ---- Ref<T> runtime ----
+        // i64 gobol_mem_load(i64 addr)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_mem_load", sig);
+
+        // void gobol_mem_store(i64 addr, i64 val)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_mem_store", sig);
+
+        // i64 gobol_array_elem_addr(ptr arr, i64 i)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_array_elem_addr", sig);
+
+        // ---- string extension methods ----
+        // i64 gobol_str_contains(const char*, const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_str_contains", sig);
+
+        // char* gobol_str_trim(const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_str_trim", sig);
+
+        // char* gobol_str_replace(const char*, const char*, const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_str_replace", sig);
+
+        // ---- math intrinsics ----
+        // f64 gobol_math_sin(f64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::F64));
+        self.declare_import("gobol_math_sin", sig);
+
+        // f64 gobol_math_cos(f64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::F64));
+        self.declare_import("gobol_math_cos", sig);
+
+        // f64 gobol_math_pow(f64, f64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::F64));
+        self.declare_import("gobol_math_pow", sig);
+
+        // ---- fs intrinsics ----
+        // i64 gobol_fs_open(const char*, const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_fs_open", sig);
+
+        // char* gobol_fs_read_all(i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_fs_read_all", sig);
+
+        // i64 gobol_fs_write(i64, const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_fs_write", sig);
+
+        // void gobol_fs_close(i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_fs_close", sig);
+
+        // i64 gobol_fs_exists(const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_fs_exists", sig);
+
+        // ---- net intrinsics ----
+        // i64 gobol_tcp_connect(const char*, i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_connect", sig);
+
+        // i64 gobol_tcp_send(i64, const char*)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_send", sig);
+
+        // char* gobol_tcp_recv(i64, i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_recv", sig);
+
+        // void gobol_tcp_close(i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_close", sig);
+
+        // i64 gobol_tcp_bind(const char*, i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_bind", sig);
+
+        // i64 gobol_tcp_accept(i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_accept", sig);
+
+        // ---- thread / channel concurrency runtime ----
+
+        // i64 gobol_thread_spawn(i64 func_ptr, i64 arg)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_thread_spawn", sig);
+
+        // i64 gobol_thread_join(i64 thread_id)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_thread_join", sig);
+
+        // i64 gobol_chan_create()
+        let mut sig = self.module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_chan_create", sig);
+
+        // i64 gobol_chan_send(i64 chan, i64 data)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_chan_send", sig);
+
+        // i64 gobol_chan_recv(i64 chan)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_chan_recv", sig);
+
+        // void gobol_chan_destroy(i64 chan)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_chan_destroy", sig);
     }
 
     fn declare_import(&mut self, name: &str, sig: ir::Signature) {
@@ -643,8 +845,37 @@ impl<M: Module> CraneliftBackend<M> {
     }
 
     fn declare_user_function(&mut self, f: &IRFunction) -> Result<(), String> {
-        let sym = Self::func_symbol(&f.name);
-        self.func_symbols.insert(f.name.clone(), sym.clone());
+        let is_extern = matches!(&f.intrinsic, Some(v) if v.starts_with("extern:"));
+        let arity = f.params.len();
+        // Variadic extern "C" functions are never declared with a fixed
+        // signature — per-arity stubs are declared lazily at call sites.
+        // We still register the name in `func_symbols` so call resolution
+        // can find it, mapping it to the bare name as a sentinel.
+        if is_extern && f.is_variadic {
+            self.func_symbols.insert((f.name.clone(), arity), f.name.clone());
+            return Ok(());
+        }
+        // extern "C" functions use the original C symbol name as the linker
+        // symbol (no gbl_ prefix, no arity suffix, no module prefix).
+        // After import processing, f.name may be `builtins::gobol_print`, but
+        // the intrinsic field holds the bare name `extern:gobol_print`.
+        let sym = if is_extern {
+            f.intrinsic.as_ref()
+                .and_then(|i| i.strip_prefix("extern:"))
+                .unwrap_or(&f.name)
+                .to_string()
+        } else {
+            Self::func_symbol(&f.name, arity)
+        };
+        self.func_symbols.insert((f.name.clone(), arity), sym.clone());
+
+        // Extern functions may already be declared as runtime imports
+        // (e.g., gobol_print is both in declare_runtime_functions and in
+        // builtins.gbl's extern "C" block).  Skip duplicate declarations.
+        if is_extern && self.func_ids.contains_key(&sym) {
+            return Ok(());
+        }
+
         let mut sig = self.module.make_signature();
         for p in &f.params {
             sig.params.push(AbiParam::new(self.data_type_to_clif(&p.ty)?));
@@ -653,24 +884,36 @@ impl<M: Module> CraneliftBackend<M> {
         if !matches!(f.return_type, DataType::None_) {
             sig.returns.push(AbiParam::new(self.data_type_to_clif(&f.return_type)?));
         }
+        let linkage = if is_extern { Linkage::Import } else { Linkage::Export };
         let id = self
             .module
-            .declare_function(&sym, Linkage::Export, &sig)
+            .declare_function(&sym, linkage, &sig)
             .map_err(|e| format!("declare {} failed: {}", sym, e))?;
         self.func_ids.insert(sym, id);
         Ok(())
     }
 
-    /// Map an IR function name to a JIT symbol name.
-    fn func_symbol(name: &str) -> String {
-        format!("gbl_{}", name.replace("::", "_").replace('.', "_"))
+    /// Map an IR function name + arity to a Gobol-internal symbol name.
+    /// Arity is included in the symbol so overloaded methods (same name,
+    /// different parameter count) get distinct linker symbols.
+    fn func_symbol(name: &str, arity: usize) -> String {
+        format!(
+            "gbl_{}_{}",
+            name.replace("::", "_").replace('.', "_"),
+            arity
+        )
     }
 
     // ==================== function compilation ====================
 
     fn compile_function(&mut self, ir_func: &IRFunction) -> Result<(), String> {
+        // Intrinsic functions (bodyless declarations backed by the C runtime)
+        // are dispatched directly at call sites — never compile a body for them.
+        if ir_func.intrinsic.is_some() {
+            return Ok(());
+        }
         self.reset_function_state(ir_func.return_type.clone());
-        let sym = Self::func_symbol(&ir_func.name);
+        let sym = Self::func_symbol(&ir_func.name, ir_func.params.len());
         let func_id = *self.func_ids.get(&sym).ok_or_else(|| format!("missing func {}", sym))?;
 
         let mut ctx = self.module.make_context();
@@ -715,7 +958,10 @@ impl<M: Module> CraneliftBackend<M> {
 
         self.module
             .define_function(func_id, &mut ctx)
-            .map_err(|e| format!("define {} failed: {}", sym, e))?;
+            .map_err(|e| {
+                eprintln!("=== Verifier error in {} ===\n{:?}", sym, ctx.func);
+                format!("define {} failed: {}", sym, e)
+            })?;
         self.module.clear_context(&mut ctx);
         Ok(())
     }
@@ -724,7 +970,7 @@ impl<M: Module> CraneliftBackend<M> {
         self.reset_function_state(DataType::Int);
         // main has no parameters in IR; give it a C-friendly i64 return.
         let sym = "gbl_main".to_string();
-        self.func_symbols.insert("main".to_string(), sym.clone());
+        self.func_symbols.insert(("main".to_string(), 0), sym.clone());
         let mut sig = self.module.make_signature();
         sig.returns.push(AbiParam::new(types::I64));
         let func_id = self
@@ -762,7 +1008,10 @@ impl<M: Module> CraneliftBackend<M> {
 
         self.module
             .define_function(func_id, &mut ctx)
-            .map_err(|e| format!("define main failed: {}", e))?;
+            .map_err(|e| {
+                eprintln!("=== Verifier error in main ===\n{:?}", ctx.func);
+                format!("define main failed: {}", e)
+            })?;
         self.module.clear_context(&mut ctx);
         Ok(())
     }
@@ -908,7 +1157,8 @@ impl<M: Module> CraneliftBackend<M> {
         bcx.switch_to_block(then_b);
         self.diverged = false;
         self.translate_block(bcx, then_block)?;
-        if !self.diverged {
+        let then_diverged = self.diverged;
+        if !then_diverged {
             bcx.ins().jump(merge_b, &[]);
         }
         bcx.switch_to_block(else_b);
@@ -916,12 +1166,20 @@ impl<M: Module> CraneliftBackend<M> {
         if let Some(eb) = else_block {
             self.translate_block(bcx, eb)?;
         }
-        if !self.diverged {
+        let else_diverged = self.diverged;
+        if !else_diverged {
             bcx.ins().jump(merge_b, &[]);
         }
         bcx.seal_block(merge_b);
-        bcx.switch_to_block(merge_b);
-        self.diverged = false;
+        // If both branches diverged (e.g. both return), the merge block is
+        // unreachable — propagate divergence so the caller doesn't emit
+        // dead code after the if. Otherwise switch to merge_b.
+        if then_diverged && else_diverged {
+            self.diverged = true;
+        } else {
+            bcx.switch_to_block(merge_b);
+            self.diverged = false;
+        }
         Ok(())
     }
 
@@ -969,9 +1227,9 @@ impl<M: Module> CraneliftBackend<M> {
         iterable: &IRExpr,
         body: &IRBlock,
     ) -> Result<(), String> {
-        // Range: range(start, end[, step])  or  start..end
+        // Range: range::new(start, end[, step])  or  Range::new(...)  or  start..end
         if let IRExpr::Call { func, args, .. } = iterable {
-            if func == "range" {
+            if func == "range::new" || func == "Range::new" {
                 return self.translate_for_range(bcx, vars, args, body);
             }
         }
@@ -1006,6 +1264,17 @@ impl<M: Module> CraneliftBackend<M> {
             bcx.ins().iconst(types::I64, 1)
         };
 
+        // Determine comparison direction from compile-time step literal.
+        // If step is a negative literal, loop while cur > end; else cur < end.
+        let cmp_op = if args.len() >= 3 {
+            match &args[2] {
+                IRExpr::Literal(LitValue::Int(n)) if *n < 0 => IntCC::SignedGreaterThan,
+                _ => IntCC::SignedLessThan,
+            }
+        } else {
+            IntCC::SignedLessThan
+        };
+
         let loop_var_name = if vars.len() >= 2 { &vars[1] } else { &vars[0] };
         let idx_var_name = if vars.len() >= 2 { Some(vars[0].as_str()) } else { None };
 
@@ -1030,7 +1299,7 @@ impl<M: Module> CraneliftBackend<M> {
         bcx.switch_to_block(cond_b);
         self.diverged = false;
         let cur = bcx.use_var(iv);
-        let cmp = bcx.ins().icmp(IntCC::SignedLessThan, cur, end);
+        let cmp = bcx.ins().icmp(cmp_op, cur, end);
         bcx.ins().brif(cmp, body_b, &[], end_b, &[]);
         bcx.seal_block(body_b);
         bcx.seal_block(incr_b);
@@ -1215,11 +1484,41 @@ impl<M: Module> CraneliftBackend<M> {
             }
         }
         // Array index assignment: arr[i] = value
+        // Degraded to the Ref<T> path: arr.index_mut(i).write(value).
+        // For raw arrays: gobol_array_elem_addr(arr, i) → gobol_mem_store(addr, val).
+        // For structs with index_mut: call the method, then call write on the Ref.
         if let IRExpr::ArrayIndex { array, index } = target {
+            let arr_ty = self.type_resolver.infer_type(array);
+
+            // Struct type with an index_mut method (e.g. vec<T>): use method dispatch.
+            if let DataType::Struct(ref sname) = arr_ty {
+                let full = format!("{}::index_mut", sname);
+                // index_mut(self, index) → arity = 2
+                if self.func_symbols.contains_key(&(full.clone(), 2)) {
+                    // arr.index_mut(i) → returns a Ref<T>
+                    let arr_val = self.translate_expr(bcx, array)?;
+                    let idx_val = self.translate_expr(bcx, index)?;
+                    let val = self.translate_expr(bcx, value)?;
+                    let ref_val = self.translate_call_with_args(bcx, &full, &[arr_val, idx_val])?;
+                    // ref.write(value)
+                    let write_full = format!("{}::write", "Ref");
+                    // Ref::write(self, value) → arity = 2
+                    if self.func_symbols.contains_key(&(write_full.clone(), 2)) {
+                        self.translate_call_with_args(bcx, &write_full, &[ref_val, val])?;
+                    } else {
+                        // Fallback: direct memory store via runtime
+                        self.call_runtime(bcx, "gobol_mem_store", &[ref_val, val]);
+                    }
+                    return Ok(());
+                }
+            }
+
+            // Raw array (DataType::Unknown): use the Ref path via runtime functions.
             let arr = self.translate_expr(bcx, array)?;
             let idx = self.translate_expr(bcx, index)?;
             let val = self.translate_expr(bcx, value)?;
-            self.call_runtime(bcx, "gobol_array_set", &[arr, idx, val]);
+            let addr = self.call_runtime(bcx, "gobol_array_elem_addr", &[arr, idx]);
+            self.call_runtime(bcx, "gobol_mem_store", &[addr, val]);
             return Ok(());
         }
         // Simple variable assignment
@@ -1439,8 +1738,102 @@ impl<M: Module> CraneliftBackend<M> {
             return Ok(bcx.ins().iconst(types::I64, 0));
         }
 
+        // Struct static method via :: notation: StructName::method(args)
+        // The IR builder prepends `self` for methods (constructors, enum
+        // variants, etc.), so we must allocate and prepend self.
+        if let Some((struct_name, _method)) = func.split_once("::") {
+            if self.type_resolver.has_struct(struct_name) {
+                // Check that the method expects self (arity = args + 1)
+                let arity = args.len() + 1;
+                if self.func_symbols.contains_key(&(func.to_string(), arity)) {
+                    let size = self.type_resolver.struct_size(struct_name);
+                    let size_val = bcx.ins().iconst(types::I64, size);
+                    let alloc_fn = if self.type_resolver.is_no_gc(struct_name) {
+                        "gobol_alloc"
+                    } else {
+                        "gobol_gc_alloc"
+                    };
+                    let self_ptr = self.call_runtime(bcx, alloc_fn, &[size_val]);
+                    let mut all_args = vec![self_ptr];
+                    all_args.append(&mut self.translate_args(bcx, args)?);
+                    return self.translate_call_with_args(bcx, func, &all_args);
+                }
+            }
+        }
+
         let arg_vals = self.translate_args(bcx, args)?;
+
+        // Variadic extern "C" functions: route through a per-arity stub.
+        // We check after translate_args so that arg evaluation side effects
+        // still happen even if we bail, but the actual call uses the stub.
+        if self.is_variadic_func(func) {
+            return self.translate_variadic_call(bcx, func, args, &arg_vals);
+        }
+
         self.translate_call_with_args(bcx, func, &arg_vals)
+    }
+
+    /// Check whether `func` (or its short name) is a variadic extern "C" function.
+    fn is_variadic_func(&self, func: &str) -> bool {
+        if self.variadic_funcs.contains(func) {
+            return true;
+        }
+        let short = func.rsplit("::").next().unwrap_or(func);
+        self.variadic_funcs.contains(short)
+    }
+
+    /// Call a variadic extern "C" function through a per-arity C stub.
+    ///
+    /// Each distinct (function, arity) pair gets a non-variadic import symbol
+    /// `__gobol_va_<name>_<arity>` declared in the object file and a matching
+    /// C wrapper generated at link time.
+    fn translate_variadic_call(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        func: &str,
+        args: &[IRExpr],
+        arg_vals: &[ir::Value],
+    ) -> Result<ir::Value, String> {
+        // Resolve the canonical variadic function name (full or short).
+        let canon_name = if self.variadic_funcs.contains(func) {
+            func.to_string()
+        } else {
+            func.rsplit("::").next().unwrap_or(func).to_string()
+        };
+
+        let arity = arg_vals.len();
+        let param_types: Vec<DataType> = args.iter().map(|a| self.type_resolver.infer_type(a)).collect();
+        let return_type = self.type_resolver.func_return_type(&canon_name);
+
+        // Deduplicate: reuse an existing stub for the same (name, arity).
+        let stub = VariadicStub {
+            func_name: canon_name.clone(),
+            arity,
+            param_types: param_types.clone(),
+            return_type: return_type.clone(),
+        };
+        let stub_sym = stub.symbol_name();
+        let already = self.variadic_stubs.iter().any(|s| {
+            s.func_name == stub.func_name && s.arity == stub.arity
+        });
+        if !already {
+            self.variadic_stubs.push(stub);
+        }
+
+        // Declare the stub import (idempotent — declare_import checks func_ids).
+        let mut sig = self.module.make_signature();
+        for dt in &param_types {
+            sig.params.push(AbiParam::new(self.data_type_to_clif(dt)?));
+        }
+        if !matches!(return_type, DataType::None_) {
+            sig.returns.push(AbiParam::new(self.data_type_to_clif(&return_type)?));
+        }
+        self.declare_import(&stub_sym, sig);
+
+        let fid = self.func_ids[&stub_sym];
+        let fref = self.module.declare_func_in_func(fid, &mut bcx.func);
+        let call = bcx.ins().call(fref, arg_vals);
+        Ok(self.call_result(bcx, call, return_type))
     }
 
     /// Call a user function with pre-translated Cranelift value arguments.
@@ -1464,10 +1857,38 @@ impl<M: Module> CraneliftBackend<M> {
             return Ok(bcx.ins().iconst(types::I64, 0));
         }
 
-        // User function lookup.
-        if let Some(sym) = self.func_symbols.get(func) {
-            if let Some(fid) = self.func_ids.get(sym) {
+        // Struct intrinsic static methods (e.g., File::open, TcpStream::connect).
+        // These have no body — intercept before user function lookup.
+        if let Some((struct_name, method)) = func.split_once("::") {
+            if let Some(rt) = self.struct_intrinsic_runtime(struct_name, method) {
                 let fret = self.type_resolver.func_return_type(func);
+                if matches!(fret, DataType::None_) {
+                    self.call_runtime(bcx, rt, arg_vals);
+                    return Ok(bcx.ins().iconst(types::I64, 0));
+                }
+                return Ok(self.call_runtime(bcx, rt, arg_vals));
+            }
+        }
+
+        // User function lookup. Try (full name, arity) first, then
+        // (short name, arity) for cross-module calls where the function
+        // is registered under just its short name.
+        let arity = arg_vals.len();
+        let lookup_name = {
+            if self.func_symbols.contains_key(&(func.to_string(), arity)) {
+                func.to_string()
+            } else {
+                let short = func.rsplit("::").next().unwrap_or(func);
+                if self.func_symbols.contains_key(&(short.to_string(), arity)) {
+                    short.to_string()
+                } else {
+                    func.to_string()
+                }
+            }
+        };
+        if let Some(sym) = self.func_symbols.get(&(lookup_name.clone(), arity)) {
+            if let Some(fid) = self.func_ids.get(sym) {
+                let fret = self.type_resolver.func_return_type(&lookup_name);
                 let fref = self.module.declare_func_in_func(*fid, &mut bcx.func);
                 let call = bcx.ins().call(fref, arg_vals);
                 return Ok(self.call_result(bcx, call, fret));
@@ -1495,7 +1916,12 @@ impl<M: Module> CraneliftBackend<M> {
                 if method == "new" {
                     let size = self.type_resolver.struct_size(name);
                     let size_val = bcx.ins().iconst(types::I64, size);
-                    let self_ptr = self.call_runtime(bcx, "gobol_alloc", &[size_val]);
+                    let alloc_fn = if self.type_resolver.is_no_gc(name) {
+                        "gobol_alloc"
+                    } else {
+                        "gobol_gc_alloc"
+                    };
+                    let self_ptr = self.call_runtime(bcx, alloc_fn, &[size_val]);
                     let mut all_args = vec![self_ptr];
                     all_args.append(&mut self.translate_args(bcx, args)?);
                     return self.translate_call_with_args(bcx, &full, &all_args);
@@ -1508,7 +1934,8 @@ impl<M: Module> CraneliftBackend<M> {
         // e.g., m.add(5, 3) where m is an alias for an imported module
         if let IRExpr::Variable(module_var) = object {
             let full = format!("{}::{}", module_var, method);
-            if self.func_symbols.contains_key(&full) {
+            // Module function: arity = args.len() (no implicit self)
+            if self.func_symbols.contains_key(&(full.clone(), args.len())) {
                 return self.translate_call(bcx, &full, args);
             }
         }
@@ -1540,7 +1967,68 @@ impl<M: Module> CraneliftBackend<M> {
                     all.append(&mut vals);
                     return Ok(self.call_runtime(bcx, "gobol_array_get", &all));
                 }
+                "index" => {
+                    // Index trait: arr.index(i) → gobol_array_get
+                    let arr = self.translate_expr(bcx, object)?;
+                    let mut vals = self.translate_args(bcx, args)?;
+                    let mut all = vec![arr];
+                    all.append(&mut vals);
+                    return Ok(self.call_runtime(bcx, "gobol_array_get", &all));
+                }
+                "index_mut" => {
+                    // IndexMut trait: arr.index_mut(i) → returns address as a Ref-like value
+                    let arr = self.translate_expr(bcx, object)?;
+                    let mut vals = self.translate_args(bcx, args)?;
+                    let mut all = vec![arr];
+                    all.append(&mut vals);
+                    return Ok(self.call_runtime(bcx, "gobol_array_elem_addr", &all));
+                }
                 _ => {}
+            }
+        }
+
+        // String methods: s.len(), s.contains(sub), s.trim(), s.replace(from, to)
+        if matches!(obj_ty, DataType::Str) {
+            let s = self.translate_expr(bcx, object)?;
+            match method {
+                "len" => {
+                    return Ok(self.call_runtime(bcx, "gobol_str_len", &[s]));
+                }
+                "contains" => {
+                    let mut vals = self.translate_args(bcx, args)?;
+                    let mut all = vec![s];
+                    all.append(&mut vals);
+                    return Ok(self.call_runtime(bcx, "gobol_str_contains", &all));
+                }
+                "trim" => {
+                    return Ok(self.call_runtime(bcx, "gobol_str_trim", &[s]));
+                }
+                "replace" => {
+                    let mut vals = self.translate_args(bcx, args)?;
+                    let mut all = vec![s];
+                    all.append(&mut vals);
+                    return Ok(self.call_runtime(bcx, "gobol_str_replace", &all));
+                }
+                _ => {}
+            }
+        }
+
+        // Struct intrinsic methods: File.open/read_all/write/close,
+        // TcpStream.connect/send/recv/close, TcpListener.bind/accept.
+        // These are dispatched to C runtime before falling through to
+        // the regular user-function lookup (which would find the bodyless
+        // intrinsic declaration and return 0).
+        if let DataType::Struct(sname) = &obj_ty {
+            if let Some(rt) = self.struct_intrinsic_runtime(sname, method) {
+                let obj_val = self.translate_expr(bcx, object)?;
+                let mut vals = vec![obj_val];
+                vals.append(&mut self.translate_args(bcx, args)?);
+                let ret_ty = self.type_resolver.func_return_type(&format!("{}::{}", sname, method));
+                if matches!(ret_ty, DataType::None_) {
+                    self.call_runtime(bcx, rt, &vals);
+                    return Ok(bcx.ins().iconst(types::I64, 0));
+                }
+                return Ok(self.call_runtime(bcx, rt, &vals));
             }
         }
 
@@ -1550,7 +2038,8 @@ impl<M: Module> CraneliftBackend<M> {
             let obj_val = self.translate_expr(bcx, object)?;
             let mut vals = vec![obj_val];
             vals.append(&mut self.translate_args(bcx, args)?);
-            if let Some(sym) = self.func_symbols.get(&full) {
+            // Instance method: arity = vals.len() (includes implicit self)
+            if let Some(sym) = self.func_symbols.get(&(full.clone(), vals.len())) {
                 if let Some(fid) = self.func_ids.get(sym) {
                     let fref = self.module.declare_func_in_func(*fid, &mut bcx.func);
                     let call = bcx.ins().call(fref, &vals);
@@ -1570,6 +2059,24 @@ impl<M: Module> CraneliftBackend<M> {
             let _ = self.translate_expr(bcx, a)?;
         }
         Ok(bcx.ins().iconst(types::I64, 0))
+    }
+
+    /// Map a (struct_name, method_name) pair to its C runtime function.
+    /// Returns None for non-intrinsic methods (which use regular dispatch).
+    fn struct_intrinsic_runtime(&self, struct_name: &str, method: &str) -> Option<&'static str> {
+        match (struct_name, method) {
+            ("File", "open") => Some("gobol_fs_open"),
+            ("File", "read_all") => Some("gobol_fs_read_all"),
+            ("File", "write") => Some("gobol_fs_write"),
+            ("File", "close") => Some("gobol_fs_close"),
+            ("TcpStream", "connect") => Some("gobol_tcp_connect"),
+            ("TcpStream", "send") => Some("gobol_tcp_send"),
+            ("TcpStream", "recv") => Some("gobol_tcp_recv"),
+            ("TcpStream", "close") => Some("gobol_tcp_close"),
+            ("TcpListener", "bind") => Some("gobol_tcp_bind"),
+            ("TcpListener", "accept") => Some("gobol_tcp_accept"),
+            _ => None,
+        }
     }
 
     /// Try to handle an intrinsic arithmetic method call (add, sub, mul, etc.)
@@ -1662,7 +2169,12 @@ impl<M: Module> CraneliftBackend<M> {
             // Allocate self and prepend to constructor args
             let size = self.type_resolver.struct_size(name);
             let size_val = bcx.ins().iconst(types::I64, size);
-            let self_ptr = self.call_runtime(bcx, "gobol_alloc", &[size_val]);
+            let alloc_fn = if self.type_resolver.is_no_gc(name) {
+                "gobol_alloc"
+            } else {
+                "gobol_gc_alloc"
+            };
+            let self_ptr = self.call_runtime(bcx, alloc_fn, &[size_val]);
             let mut all_args = vec![self_ptr];
             all_args.append(&mut self.translate_args(bcx, &args)?);
             return self.translate_call_with_args(bcx, &full, &all_args);
@@ -1670,7 +2182,12 @@ impl<M: Module> CraneliftBackend<M> {
         // Otherwise allocate and store fields directly.
         let size = self.type_resolver.struct_size(name);
         let size_val = bcx.ins().iconst(types::I64, size);
-        let ptr = self.call_runtime(bcx, "gobol_alloc", &[size_val]);
+        let alloc_fn = if self.type_resolver.is_no_gc(name) {
+            "gobol_alloc"
+        } else {
+            "gobol_gc_alloc"
+        };
+        let ptr = self.call_runtime(bcx, alloc_fn, &[size_val]);
         if let Some(off) = self.type_resolver.struct_fields(name) {
             for (field_name, field_ty) in &off {
                 if let Some((_, e)) = fields.iter().find(|(n, _)| n == field_name) {
@@ -1697,7 +2214,8 @@ impl<M: Module> CraneliftBackend<M> {
         if matches!(target, DataType::Str) {
             if let DataType::Struct(name) = &src {
                 let full = format!("{}::convert_str", name);
-                if self.func_symbols.contains_key(&full) {
+                // convert_str(self) → arity = 1
+                if self.func_symbols.contains_key(&(full.clone(), 1)) {
                     return self.translate_call(bcx, &full, &[expr.clone()]);
                 }
             }
@@ -1780,7 +2298,13 @@ impl<M: Module> CraneliftBackend<M> {
     }
 
     fn func_returns_void(&self, name: &str) -> bool {
-        matches!(name, "gobol_print" | "gobol_println" | "gobol_array_add" | "gobol_array_set")
+        matches!(name,
+            "gobol_print" | "gobol_println" | "gobol_eprint" | "gobol_eprintln"
+            | "gobol_array_add" | "gobol_array_set"
+            | "gobol_mem_store"
+            | "gobol_fs_close" | "gobol_tcp_close"
+            | "gobol_chan_destroy"
+        )
     }
 
     fn call_result(&self, bcx: &mut FunctionBuilder, call: Inst, fret: DataType) -> ir::Value {
@@ -1957,84 +2481,9 @@ impl<M: Module> CraneliftBackend<M> {
     }
 }
 
-impl CraneliftBackend<JITModule> {
-    pub fn new() -> Self {
-        let mut builder =
-            JITBuilder::new(Box::new(cranelift_module::default_libcall_names()))
-                .expect("failed to create JIT builder");
-        // Register runtime symbols so generated code can call them.
-        builder.symbols([
-            ("gobol_print", gobol_print as *const u8),
-            ("gobol_println", gobol_println as *const u8),
-            ("gobol_read", gobol_read as *const u8),
-            ("gobol_str_int", gobol_str_int as *const u8),
-            ("gobol_str_float", gobol_str_float as *const u8),
-            ("gobol_str_bool", gobol_str_bool as *const u8),
-            ("gobol_str_cat", gobol_str_cat as *const u8),
-            ("gobol_str_eq", gobol_str_eq as *const u8),
-            ("gobol_str_len", gobol_str_len as *const u8),
-            ("gobol_str_get", gobol_str_get as *const u8),
-            ("gobol_alloc", gobol_alloc as *const u8),
-            ("gobol_array_new", gobol_array_new as *const u8),
-            ("gobol_array_add", gobol_array_add as *const u8),
-            ("gobol_array_len", gobol_array_len as *const u8),
-            ("gobol_array_get", gobol_array_get as *const u8),
-            ("gobol_array_set", gobol_array_set as *const u8),
-        ]);
-        let module = JITModule::new(builder);
-        CraneliftBackend {
-            module,
-            fn_ctx: FunctionBuilderContext::new(),
-            func_symbols: HashMap::new(),
-            func_ids: HashMap::new(),
-            string_data: HashMap::new(),
-            constructors: HashMap::new(),
-            type_resolver: TypeResolver::new(),
-            variables: HashMap::new(),
-            var_counter: 0,
-            loop_stack: Vec::new(),
-            return_type: DataType::None_,
-            diverged: false,
-        }
-    }
-
-    /// Compile the IR, finalize JIT definitions, then run `main`.
-    pub fn compile_and_run(&mut self, ir: &GobolIR) -> Result<i64, String> {
-        self.compile_ir(ir)?;
-        self.finalize()?;
-        self.run()
-    }
-
-    /// Finalize all pending JIT definitions so function pointers become valid.
-    /// Must be called after `compile_ir` and before `run` / `get_function_ptr`.
-    pub fn finalize(&mut self) -> Result<(), String> {
-        self.module
-            .finalize_definitions()
-            .map_err(|e| format!("Finalize error: {}", e))
-    }
-
-    /// Get a pointer to a compiled top-level function (e.g. "main").
-    pub fn get_function_ptr(&self, name: &str) -> Option<fn() -> i64> {
-        let sym = self.func_symbols.get(name)?;
-        let func_id = self.func_ids.get(sym)?;
-        unsafe {
-            let ptr = self.module.get_finalized_function(*func_id);
-            Some(std::mem::transmute(ptr))
-        }
-    }
-
-    /// Run the program's main function and return its exit code.
-    pub fn run(&self) -> Result<i64, String> {
-        match self.get_function_ptr("main") {
-            Some(f) => Ok(f()),
-            None => Err("no main function found".to_string()),
-        }
-    }
-}
-
-impl CraneliftBackend<ObjectModule> {
+impl CraneliftBackend {
     /// Create an AOT backend that produces object files for linking.
-    pub fn new_aot() -> Self {
+    pub fn new() -> Self {
         use cranelift_codegen::isa::lookup;
         use cranelift_codegen::settings::{self, Configurable};
 
@@ -2062,6 +2511,8 @@ impl CraneliftBackend<ObjectModule> {
             string_data: HashMap::new(),
             constructors: HashMap::new(),
             type_resolver: TypeResolver::new(),
+            variadic_funcs: std::collections::HashSet::new(),
+            variadic_stubs: Vec::new(),
             variables: HashMap::new(),
             var_counter: 0,
             loop_stack: Vec::new(),
@@ -2077,8 +2528,12 @@ impl CraneliftBackend<ObjectModule> {
         ir: &GobolIR,
         output_path: &str,
         runtime_c_path: &str,
+        link_libs: &[String],
     ) -> Result<(), String> {
         self.compile_ir(ir)?;
+
+        // Collect variadic stubs needed for `extern "C" ...` call sites.
+        let stubs = std::mem::take(&mut self.variadic_stubs);
 
         // Produce object file from the ObjectModule.
         let product = self.module.finish();
@@ -2091,14 +2546,46 @@ impl CraneliftBackend<ObjectModule> {
         std::fs::write(&obj_path, &obj_bytes)
             .map_err(|e| format!("Failed to write object file: {}", e))?;
 
+        // If there are variadic call sites, generate a C stub file and
+        // compile it alongside the main object file.
+        let stubs_path = format!("{}.va.c", output_path);
+        let has_stubs = !stubs.is_empty();
+        if has_stubs {
+            let mut src = String::new();
+            src.push_str("/* Auto-generated variadic stubs for gobol extern \"C\" calls. */\n");
+            // Forward-declare the variadic functions the stubs call into.
+            // Including the standard C headers is the safest way to get
+            // correct prototypes (e.g. `int printf(const char*, ...);`).
+            src.push_str("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n");
+            for stub in &stubs {
+                src.push_str(&stub.c_source());
+            }
+            std::fs::write(&stubs_path, &src)
+                .map_err(|e| format!("Failed to write variadic stubs: {}", e))?;
+        }
+
         // Link with the C runtime using the system C compiler.
-        let status = std::process::Command::new("cc")
-            .args([&obj_path, runtime_c_path, "-o", output_path])
+        // Always link libm (math functions like sin/cos/pow) and libpthread (network support).
+        let mut cmd = std::process::Command::new("cc");
+        cmd.arg(&obj_path);
+        cmd.arg(runtime_c_path);
+        if has_stubs {
+            cmd.arg(&stubs_path);
+        }
+        cmd.args(["-o", output_path]);
+        for lib in link_libs {
+            cmd.arg(format!("-l{}", lib));
+        }
+        cmd.args(["-lm", "-lpthread"]);
+        let status = cmd
             .status()
             .map_err(|e| format!("Failed to invoke cc: {}", e))?;
 
-        // Clean up the object file.
+        // Clean up temp files.
         let _ = std::fs::remove_file(&obj_path);
+        if has_stubs {
+            let _ = std::fs::remove_file(&stubs_path);
+        }
 
         if !status.success() {
             return Err(format!("Linking failed with exit code {:?}", status.code()));
@@ -2114,7 +2601,22 @@ fn builtin_runtime(name: &str) -> Option<&'static str> {
     match short {
         "print" | "_print" => Some("gobol_print"),
         "println" | "_println" => Some("gobol_println"),
+        "eprint" | "_eprint" => Some("gobol_eprint"),
+        "eprintln" | "_eprintln" => Some("gobol_eprintln"),
         "read" | "_read" => Some("gobol_read"),
+        // math intrinsics
+        "sin" => Some("gobol_math_sin"),
+        "cos" => Some("gobol_math_cos"),
+        "pow" => Some("gobol_math_pow"),
+        // fs intrinsics (standalone functions)
+        "exists" => Some("gobol_fs_exists"),
+        // thread / channel runtime
+        "gobol_thread_spawn" => Some("gobol_thread_spawn"),
+        "gobol_thread_join" => Some("gobol_thread_join"),
+        "gobol_chan_create" => Some("gobol_chan_create"),
+        "gobol_chan_send" => Some("gobol_chan_send"),
+        "gobol_chan_recv" => Some("gobol_chan_recv"),
+        "gobol_chan_destroy" => Some("gobol_chan_destroy"),
         _ => None,
     }
 }

@@ -1,4 +1,4 @@
-import io;
+import std;
 
 func main() {
     var arr: int[] = [];
@@ -6,7 +6,7 @@ func main() {
     arr.add(20);
     arr.add(30);
     for i in arr {
-        io.print(i);
+        io::print(i);
     }
-    io.print("\n");
+    io::print("\n");
 }

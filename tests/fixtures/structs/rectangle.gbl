@@ -1,4 +1,4 @@
-import io;
+import std;
 
 struct Rectangle {
     width: int,
@@ -23,6 +23,6 @@ impl Rectangle {
 
 func main() {
     var r = Rectangle(3, 4);
-    io.println(@"area: {r.area()}");
-    io.println(@"perimeter: {r.perimeter()}");
+    io::println(@"area: {r.area()}");
+    io::println(@"perimeter: {r.perimeter()}");
 }

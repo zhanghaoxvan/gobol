@@ -1,5 +1,0 @@
-// every gobol file will import this file: std/__setup__.gbl
-#[library_features(hidden = true)] // when use the libraries, functions and variables which are imported by this library, we can hidden the library prefix(e.g. __setup__.io.print() => io.print())
-import io
-import range
-export(io, range) // export the things outside

@@ -1,0 +1,32 @@
+import std;
+
+func main() {
+    // Test array index assignment through the Ref<T> path.
+    // arr[i] = v is degraded to: gobol_array_elem_addr + gobol_mem_store
+    var v: int[] = [10, 20, 30, 40, 50];
+    io::println(@"before: {v[0]} {v[1]} {v[2]} {v[3]} {v[4]}");
+
+    // Modify elements via index assignment (degraded to Ref path)
+    v[0] = 100;
+    v[2] = 300;
+    v[4] = 500;
+
+    io::println(@"after:  {v[0]} {v[1]} {v[2]} {v[3]} {v[4]}");
+
+    // Swap elements using index assignment
+    var temp = v[0];
+    v[0] = v[4];
+    v[4] = temp;
+
+    io::println(@"swapped: {v[0]} {v[1]} {v[2]} {v[3]} {v[4]}");
+
+    // Build an array with index assignment
+    var arr: int[] = [];
+    arr.add(1);
+    arr.add(2);
+    arr.add(3);
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    io::println(@"built: {arr[0]} {arr[1]} {arr[2]}");
+}

@@ -173,7 +173,7 @@ def install_version(tag, no_build=False, verbose=False):
     vlib.mkdir(parents=True)
 
     suffix = binary_suffix()
-    binaries = [f"gobol{suffix}", f"grape{suffix}"]
+    binaries = [f"gobol{suffix}", f"grape{suffix}", f"gobol-lsp{suffix}"]
     for name in binaries:
         src = Path("target/release") / name
         if not src.exists():

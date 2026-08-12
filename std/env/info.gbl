@@ -1,0 +1,72 @@
+// std/env/info.gbl — Environment single-instance accessor.
+//
+// `Env::current()` returns the shared, lazy-initialised `Env` singleton
+// that fronts process-wide OS state (environment variables, current
+// working directory, executable path, home directory, and username).
+// The struct is a pure OOP-style façade over the C runtime; each call
+// re-queries the OS so callers observe up-to-date values.
+
+#[library_features(hidden = true)]
+
+#[header("std/runtime.h")]
+extern "C" {
+    // C runtime: libc getenv / getcwd / getenv(HOME) wrappers. Declared as
+    // external imports so we can reuse libc without shipping extra C code
+    // for the env module; the linker resolves these via -lc.
+    func getenv(name: str): str;
+}
+
+struct Env {
+    _singleton_marker: int
+}
+
+impl Env {
+    /// Return the shared `Env` singleton.
+    /// This always returns the same struct instance; because `Env` carries
+    /// no mutable state (methods query the OS), a single instance suffices.
+    static func current(): Env {
+        Env { _singleton_marker: 0 }
+    }
+
+    /// Return the value of the environment variable `name`, or `null` if it
+    /// has not been set.
+    func get_var(self, name: str): str? {
+        getenv(name)
+    }
+
+    /// Return `true` if an environment variable named `name` exists.
+    func has_var(self, name: str): bool {
+        getenv(name) != null
+    }
+
+    // NOTE: the remaining helpers below are *stub* signatures for the OOP
+    // façade. Their bodies would typically call into platform-specific
+    // runtime helpers (`getcwd`, `/proc/self/exe`, `getpwuid`, etc.); they
+    // are left here as the API contract so higher-level code can program
+    // against the `Env` interface.
+
+    /// Current working directory of the process.
+    func cwd(self): str {
+        ""
+    }
+
+    /// Absolute path to the currently running executable.
+    func exe_path(self): str {
+        ""
+    }
+
+    /// Directory component of `exe_path()` (i.e. `dirname(exe_path())`).
+    func exe_dir(self): str {
+        ""
+    }
+
+    /// Home directory of the user that launched the process.
+    func home_dir(self): str {
+        ""
+    }
+
+    /// Username of the user that launched the process.
+    func username(self): str {
+        ""
+    }
+}

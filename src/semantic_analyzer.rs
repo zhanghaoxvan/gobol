@@ -9,6 +9,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BuildMode {
+    Debug,
+    Release,
+}
+
 pub struct SemanticAnalyzer {
     env: Environment,
     errors: Vec<String>,
@@ -28,6 +34,37 @@ pub struct SemanticAnalyzer {
     current_module_dir: Option<String>,
     module_aliases: HashMap<String, String>,
     current_generic_params: Vec<String>,
+    build_mode: BuildMode,
+    /// Trait definitions: trait_name -> { name, methods, generic_params }
+    trait_defs: HashMap<String, TraitDefInfo>,
+    /// Pending trait impl validations: (struct_name, trait_name, items)
+    pending_trait_impls: Vec<(String, String, Vec<String>)>,
+    /// Structured errors for LSP: (line, col, message)
+    pub structured_errors: Vec<(i32, i32, String)>,
+    /// External libraries to link (e.g. "C", "m") from extern "C" blocks.
+    pub extern_libs: Vec<String>,
+    /// Tracks (struct_name, method_name, param_count) triples already declared
+    /// via impl blocks. Prevents duplicate method definitions when a module is
+    /// loaded multiple times or when multiple modules impl the same struct,
+    /// while still allowing overloaded methods (same name, different arity,
+    /// e.g. `Range::new(start, end)` vs `Range::new(start, end, step)`).
+    impl_methods: HashSet<(String, String, usize)>,
+}
+
+/// Registered trait method signature for validation
+#[derive(Debug, Clone)]
+struct TraitMethodSig {
+    name: String,
+    param_count: usize,
+    dynamic_args: bool,
+}
+
+/// Registered trait definition for `impl Trait for Type` validation
+#[derive(Debug, Clone)]
+struct TraitDefInfo {
+    name: String,
+    methods: Vec<TraitMethodSig>,
+    generic_params: Vec<String>,
 }
 
 impl SemanticAnalyzer {
@@ -51,6 +88,12 @@ impl SemanticAnalyzer {
             current_module_dir: None,
             module_aliases: HashMap::new(),
             current_generic_params: Vec::new(),
+            build_mode: BuildMode::Debug,
+            trait_defs: HashMap::new(),
+            pending_trait_impls: Vec::new(),
+            structured_errors: Vec::new(),
+            extern_libs: Vec::new(),
+            impl_methods: HashSet::new(),
         }
     }
 
@@ -60,6 +103,91 @@ impl SemanticAnalyzer {
 
     pub fn set_lib_paths(&mut self, paths: Vec<String>) {
         self.lib_paths = paths;
+    }
+
+    pub fn set_build_mode(&mut self, mode: BuildMode) {
+        self.build_mode = mode;
+    }
+
+    pub fn get_extern_libs(&self) -> &Vec<String> {
+        &self.extern_libs
+    }
+
+    /// Maps an arithmetic/comparison operator to its trait method name.
+    fn operator_to_method(op: &str) -> Option<&str> {
+        match op {
+            "+" => Some("add"),
+            "-" => Some("sub"),
+            "*" => Some("mul"),
+            "/" => Some("div"),
+            "%" => Some("rem"),
+            "==" => Some("eq"),
+            "!=" => Some("ne"),
+            "<" => Some("lt"),
+            ">" => Some("gt"),
+            "<=" => Some("le"),
+            ">=" => Some("ge"),
+            _ => None,
+        }
+    }
+
+    /// Register the standard operator/comparison traits that are built into the language.
+    /// These are hardcoded so they're always available regardless of trait.gbl loading.
+    fn register_std_traits(&mut self) {
+        let std_traits: &[(&str, &[(&str, usize)])] = &[
+            ("std::ops::Add", &[("add", 2)]),       // add(self, other)
+            ("std::ops::Sub", &[("sub", 2)]),       // sub(self, other)
+            ("std::ops::Mul", &[("mul", 2)]),       // mul(self, other)
+            ("std::ops::Div", &[("div", 2)]),       // div(self, other)
+            ("std::ops::Rem", &[("rem", 2)]),       // rem(self, other)
+            ("std::cmp::Eq", &[("eq", 2)]),         // eq(self, other)
+            ("std::cmp::Cmp", &[
+                ("lt", 2), ("le", 2), ("gt", 2), ("ge", 2),
+            ]),
+        ];
+        for (name, methods) in std_traits {
+            if !self.trait_defs.contains_key(*name) {
+                self.trait_defs.insert(name.to_string(), TraitDefInfo {
+                    name: name.to_string(),
+                    methods: methods.iter().map(|(n, pc)| TraitMethodSig {
+                        name: n.to_string(),
+                        param_count: *pc,
+                        dynamic_args: false,
+                    }).collect(),
+                    generic_params: vec!["T".to_string()],
+                });
+            }
+        }
+    }
+
+    /// After all modules are loaded, validate that `impl Trait for Type` blocks
+    /// provide all required trait methods.
+    fn validate_trait_impls(&mut self) {
+        let pending: Vec<_> = std::mem::take(&mut self.pending_trait_impls);
+        for (struct_name, trait_name, impl_methods) in &pending {
+            let trait_info = match self.trait_defs.get(trait_name).cloned() {
+                Some(t) => t,
+                None => {
+                    self.error(&format!(
+                        "Trait '{}' is not defined (impl for '{}')",
+                        trait_name, struct_name
+                    ));
+                    continue;
+                }
+            };
+
+            let impl_set: HashSet<&String> = impl_methods.iter().collect();
+
+            // Check every trait method is implemented
+            for required in &trait_info.methods {
+                if !impl_set.contains(&&required.name) {
+                    self.error(&format!(
+                        "Trait '{}' requires method '{}', but it is missing in impl for '{}'",
+                        trait_name, required.name, struct_name
+                    ));
+                }
+            }
+        }
     }
 
     pub fn set_main_file(&mut self, file_path: &str) {
@@ -76,15 +204,24 @@ impl SemanticAnalyzer {
     }
 
     pub fn analyze(&mut self, program: &Program) -> bool {
-        // Register built-in modules and compiler-provided functions
-        self.env.declare_module("__builtins__");
-        self.env.declare_function("_print", &DataType::None_, "__builtins__");
-        self.env.declare_function("_read", &DataType::Str, "__builtins__");
-        self.env.declare_function("panic", &DataType::None_, "__builtins__");
-        self.env.declare_function("exit", &DataType::None_, "__builtins__");
+        // Register compiler-level builtins (panic / exit — handled by codegen).
+        self.env.declare_function("panic", &DataType::None_, &self.current_module);
+        self.env.declare_function("exit", &DataType::None_, &self.current_module);
 
-        // Auto-import __setup__ which loads io, range, etc. from lib/
-        self.load_module("__setup__");
+        // Load the builtins module (declares C runtime functions as extern "C").
+        self.load_module("builtins");
+
+        // Auto-load trait definitions (std::ops::Add, std::cmp::Eq, etc.)
+        // so that `impl Trait for Type` validation works even without
+        // explicit `import std;`.  This is a compiler-internal fallback;
+        // user code still needs `import std;` for io/range/etc.
+        self.load_module("trait");
+
+        // Register standard traits (hardcoded fallback in case trait.gbl doesn't load)
+        self.register_std_traits();
+
+        // Validate all `impl Trait for Type` blocks after all modules loaded
+        self.validate_trait_impls();
 
         program.accept(self);
 
@@ -121,8 +258,24 @@ impl SemanticAnalyzer {
 
     fn error(&mut self, msg: &str) {
         self.has_error = true;
+        #[cfg(debug_assertions)]
+        eprintln!("[SEM ERROR] {} | current_module={} current_impl={:?}", msg, self.current_module, self.current_impl_struct);
+        self.structured_errors.push((0, 0, msg.to_string()));
         if let Some(ref f) = self.error_formatter {
             let formatted = f.format_error(0, 0, 0, "error", msg, true);
+            self.errors.push(formatted);
+        } else {
+            self.errors.push(format!("Error: {}", msg));
+        }
+    }
+
+    /// Report a semantic error at a specific source position (for LSP).
+    pub fn error_at(&mut self, line: i32, col: i32, msg: &str) {
+        self.has_error = true;
+        self.structured_errors.push((line, col, msg.to_string()));
+        if let Some(ref f) = self.error_formatter {
+            let span = 1;
+            let formatted = f.format_error(line, col, span, "error", msg, true);
             self.errors.push(formatted);
         } else {
             self.errors.push(format!("Error: {}", msg));
@@ -202,6 +355,76 @@ impl SemanticAnalyzer {
         false
     }
 
+    /// Resolve a C header path specified by `#[header("path")]`.
+    ///
+    /// Tries the following locations in order:
+    /// 1. The path as-is (absolute or relative to CWD)
+    /// 2. Relative to the current module's directory
+    /// 3. Relative to each configured library path
+    fn read_header_file(&self, path: &str) -> Result<String, std::io::Error> {
+        // 1. Try as-is (absolute or CWD-relative)
+        if let Ok(content) = fs::read_to_string(path) {
+            return Ok(content);
+        }
+        // 2. Relative to the current module directory
+        if let Some(ref dir) = self.current_module_dir {
+            let p = Path::new(dir).join(path);
+            if let Ok(content) = fs::read_to_string(&p) {
+                return Ok(content);
+            }
+        }
+        // 3. Relative to each lib path
+        for lp in &self.lib_paths {
+            let p = Path::new(lp).join(path);
+            if let Ok(content) = fs::read_to_string(&p) {
+                return Ok(content);
+            }
+            // Also try parent of lib path (e.g. std/../src/runtime.h)
+            if let Some(parent) = Path::new(lp).parent() {
+                let p2 = parent.join(path);
+                if let Ok(content) = fs::read_to_string(&p2) {
+                    return Ok(content);
+                }
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("header file '{}' not found", path),
+        ))
+    }
+
+    /// Lightweight check whether a C header text contains a declaration of
+    /// the given function name. Searches for `name` followed by `(` with a
+    /// word boundary before it (so `printf` won't match `fprintf`).
+    fn header_declares_function(header: &str, name: &str) -> bool {
+        let bytes = header.as_bytes();
+        let needle = name.as_bytes();
+        if needle.is_empty() {
+            return false;
+        }
+        let mut i = 0;
+        while i + needle.len() <= bytes.len() {
+            if &bytes[i..i + needle.len()] == needle {
+                // Check word boundary before the match: preceding char must
+                // not be an identifier character (letter, digit, or _).
+                let prev_ok = i == 0
+                    || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
+                // Check that the char after the match is `(` (allowing
+                // optional whitespace between name and `(`).
+                let mut j = i + needle.len();
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
+                let next_ok = j < bytes.len() && bytes[j] == b'(';
+                if prev_ok && next_ok {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
     fn resolve_module_path(&self, path_parts: &[String], base_dir: Option<&str>) -> Option<String> {
         let relative = path_parts.join("/") + ".gbl";
 
@@ -210,6 +433,10 @@ impl SemanticAnalyzer {
             let rel_full = format!("{}/{}", dir, relative);
             if Path::new(&rel_full).exists() {
                 return Some(rel_full);
+            }
+            let rel_mod = format!("{}/{}/mod.gbl", dir, path_parts.join("/"));
+            if Path::new(&rel_mod).exists() {
+                return Some(rel_mod);
             }
             let rel_setup = format!("{}/{}/__setup__.gbl", dir, path_parts.join("/"));
             if Path::new(&rel_setup).exists() {
@@ -229,7 +456,13 @@ impl SemanticAnalyzer {
             if Path::new(&full).exists() {
                 return Some(full);
             }
-            // <lib_path>/<module>/__setup__.gbl
+            // <lib_path>/<module>/mod.gbl  (modern module entry point)
+            let mod_relative = format!("{}/mod.gbl", path_parts.join("/"));
+            let mod_full = format!("{}/{}", lib_path, mod_relative);
+            if Path::new(&mod_full).exists() {
+                return Some(mod_full);
+            }
+            // <lib_path>/<module>/__setup__.gbl (legacy)
             let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
             let setup_full = format!("{}/{}", lib_path, setup_relative);
             if Path::new(&setup_full).exists() {
@@ -250,6 +483,10 @@ impl SemanticAnalyzer {
         let direct = format!("{}.gbl", path_parts.join("/"));
         if Path::new(&direct).exists() {
             return Some(direct);
+        }
+        let mod_direct = format!("{}/mod.gbl", path_parts.join("/"));
+        if Path::new(&mod_direct).exists() {
+            return Some(mod_direct);
         }
         let setup_direct = format!("{}/__setup__.gbl", path_parts.join("/"));
         if Path::new(&setup_direct).exists() {
@@ -274,10 +511,6 @@ impl SemanticAnalyzer {
         let file_path = match self.resolve_module_path(&path_parts, base_dir.as_deref()) {
             Some(p) => p,
             None => {
-                if module_name == "__builtins__" {
-                    self.loaded_modules.insert(module_name.to_string());
-                    return;
-                }
                 return;
             }
         };
@@ -310,23 +543,70 @@ impl SemanticAnalyzer {
         self.current_module = module_name.to_string();
         self.env.declare_module(&self.current_module);
 
-        // Only register declarations (imports, function signatures, structs)
+        // ---- Phase 1: Scan for ExportStatement presence and collect items ----
+        // We need to know upfront whether this module contains any export(...)
+        // statement to decide between "explicit export list" mode and
+        // "default export all" mode (minus #[no_export] items).
+        let has_explicit_export = prog.get_statements().iter().any(|stmt| {
+            stmt.as_any().downcast_ref::<ExportStatement>().is_some()
+        });
+
+        // Collect names of top-level defs that carry #[no_export].
+        // These are excluded from the default-export path even when no explicit
+        // export(...) is present.
+        let mut no_export_names: HashSet<String> = HashSet::new();
+        for stmt in prog.get_statements() {
+            if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
+                if Attribute::has_attr(func.get_attributes(), "no_export") {
+                    no_export_names.insert(func.get_name().to_string());
+                }
+            } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
+                if Attribute::has_attr(struct_def.get_attributes(), "no_export") {
+                    no_export_names.insert(struct_def.get_name().to_string());
+                }
+            } else if let Some(trait_def) = stmt.as_any().downcast_ref::<TraitDefinition>() {
+                if Attribute::has_attr(trait_def.get_attributes(), "no_export") {
+                    no_export_names.insert(trait_def.get_name().to_string());
+                }
+            } else if let Some(enum_def) = stmt.as_any().downcast_ref::<EnumDefinition>() {
+                if Attribute::has_attr(enum_def.get_attributes(), "no_export") {
+                    no_export_names.insert(enum_def.get_name().to_string());
+                }
+            }
+        }
+
+        // Track top-level names that were declared, for default-export phase.
+        // (name, data_type_for_functions)
+        let mut declared_funcs: Vec<(String, DataType)> = Vec::new();
+        let mut declared_structs: Vec<String> = Vec::new();
+        let mut declared_traits: Vec<String> = Vec::new();
+        // Imported module names so `export(mod)` can re-export modules.
+        let mut imported_mods: Vec<String> = Vec::new();
+
+        // ---- Phase 2: Process declarations ----
         for stmt in prog.get_statements() {
             if let Some(import_stmt) = stmt.as_any().downcast_ref::<ImportStatement>() {
                 let name = import_stmt.get_module_name();
+                imported_mods.push(name.clone());
                 self.load_module(&name);
                 if let Some(alias) = import_stmt.get_alias() {
                     self.module_aliases.insert(alias.to_string(), name);
                 }
             } else if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
+                if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                    continue;
+                }
                 let func_name = func.get_name().to_string();
                 let prev_generic = self.current_generic_params.clone();
                 self.current_generic_params = func.get_generic_params().clone();
                 let return_type = self.get_data_type_from_ast(func.get_return_type());
                 self.env.declare_function(&func_name, &return_type, &self.current_module);
+                declared_funcs.push((func_name, return_type));
                 self.current_generic_params = prev_generic;
             } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
                 let struct_name = struct_def.get_name().to_string();
+                let prev_generic = self.current_generic_params.clone();
+                self.current_generic_params = struct_def.get_generic_params().clone();
                 let mut fields = HashMap::new();
                 for field in struct_def.get_fields() {
                     let field_type = self.get_data_type_from_ast(field.field_type.as_deref());
@@ -334,26 +614,108 @@ impl SemanticAnalyzer {
                 }
                 self.struct_fields.insert(struct_name.clone(), fields);
                 self.env.declare_module(&struct_name);
+                declared_structs.push(struct_name);
+                self.current_generic_params = prev_generic;
             } else if let Some(impl_block) = stmt.as_any().downcast_ref::<ImplBlock>() {
                 let prev_impl = self.current_impl_struct.clone();
                 self.current_impl_struct = Some(impl_block.get_struct_name().to_string());
+                let prev_impl_generic = self.current_generic_params.clone();
+                self.current_generic_params = impl_block.get_generic_params().clone();
+
+                // If this is `impl Trait for Type`, defer validation until after all modules loaded
+                if let Some(trait_name) = impl_block.get_trait_name() {
+                    let method_names: Vec<String> = impl_block.get_items().iter().filter_map(|item| {
+                        match item {
+                            ImplItem::Method(func) | ImplItem::Constructor(func) | ImplItem::Convert(func) => {
+                                if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                                    None
+                                } else {
+                                    Some(func.get_name().to_string())
+                                }
+                            }
+                        }
+                    }).collect();
+                    self.pending_trait_impls.push((
+                        impl_block.get_struct_name().to_string(),
+                        trait_name.to_string(),
+                        method_names,
+                    ));
+                }
+
                 for item in impl_block.get_items() {
                     match item {
                         ImplItem::Constructor(func) | ImplItem::Method(func) | ImplItem::Convert(func) => {
+                            if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                                continue;
+                            }
                             let func_name = func.get_name().to_string();
+                            // Dedup: skip if this (struct, method, arity) triple was
+                            // already declared. This prevents duplicate impls when a
+                            // module is loaded via multiple import paths or when std
+                            // re-exports a module, while still allowing overloaded
+                            // methods (same name, different arity).
+                            let struct_name = impl_block.get_struct_name().to_string();
+                            let arity = func
+                                .get_parameters()
+                                .map(|p| p.len())
+                                .unwrap_or(0);
+                            if !self.impl_methods.insert((struct_name.clone(), func_name.clone(), arity)) {
+                                continue;
+                            }
                             let prev_generic = self.current_generic_params.clone();
-                            self.current_generic_params = func.get_generic_params().clone();
+                            // Combine impl-block generics with function-level generics
+                            // so methods like `func push(self, value: T)` can resolve T
+                            // inherited from `impl<T> vec<T>`.
+                            let mut combined = self.current_generic_params.clone();
+                            for g in func.get_generic_params() {
+                                if !combined.contains(g) {
+                                    combined.push(g.clone());
+                                }
+                            }
+                            self.current_generic_params = combined;
                             let return_type = self.get_data_type_from_ast(func.get_return_type());
                             self.env.declare_function(&func_name, &return_type, &self.current_module);
-                            // Also register with struct name prefix for Type.method() calls
+                            // Also register with struct name prefix for Type::method() calls
                             if let Some(ref struct_name) = self.current_impl_struct {
                                 self.env.declare_function(&func_name, &return_type, struct_name);
                             }
+                            declared_funcs.push((func_name, return_type));
                             self.current_generic_params = prev_generic;
                         }
                     }
                 }
                 self.current_impl_struct = prev_impl;
+                self.current_generic_params = prev_impl_generic;
+            } else if let Some(extern_block) = stmt.as_any().downcast_ref::<ExternBlock>() {
+                if let Some(lib) = extern_block.get_library() {
+                    if lib != "C" && !self.extern_libs.iter().any(|l| l == lib) {
+                        self.extern_libs.push(lib.to_string());
+                    }
+                }
+                for func in extern_block.get_functions() {
+                    let func_name = func.get_name().to_string();
+                    let return_type = self.get_data_type_from_ast(func.get_return_type());
+                    self.env.declare_function(&func_name, &return_type, &self.current_module);
+                    declared_funcs.push((func_name, return_type));
+                }
+            } else if let Some(enum_def) = stmt.as_any().downcast_ref::<EnumDefinition>() {
+                self.visit_enum_definition(enum_def);
+                declared_structs.push(enum_def.get_name().to_string());
+            } else if let Some(trait_def) = stmt.as_any().downcast_ref::<TraitDefinition>() {
+                // Register trait definition for `impl Trait for Type` validation
+                let methods: Vec<TraitMethodSig> = trait_def.get_methods().iter().map(|m| {
+                    TraitMethodSig {
+                        name: m.name.clone(),
+                        param_count: m.parameters.len(),
+                        dynamic_args: Attribute::has_attr(&m.attributes, "dynamic_args"),
+                    }
+                }).collect();
+                self.trait_defs.insert(trait_def.get_name().to_string(), TraitDefInfo {
+                    name: trait_def.get_name().to_string(),
+                    methods,
+                    generic_params: trait_def.get_generic_params().clone(),
+                });
+                declared_traits.push(trait_def.get_name().to_string());
             } else if let Some(export_stmt) = stmt.as_any().downcast_ref::<ExportStatement>() {
                 for name in export_stmt.get_names() {
                     let parts: Vec<&str> = name.split('.').collect();
@@ -370,6 +732,50 @@ impl SemanticAnalyzer {
                         self.env.declare_function(short, &return_type, &self.current_module);
                     }
                 }
+            }
+        }
+
+        // ---- Phase 3: Default export (if no explicit export list) ----
+        //
+        // When a module has NO export(...) statement, every top-level def
+        // (func / struct / trait) is automatically exported — except those
+        // annotated with #[no_export].
+        //
+        // An exported function `foo` in module `m` is re-declared also under
+        // just `m::foo`'s short key for direct lookups (mirrors behaviour of
+        // the explicit `export(foo)` path above).
+        if !has_explicit_export {
+            for (name, return_type) in &declared_funcs {
+                if no_export_names.contains(name.as_str()) {
+                    continue;
+                }
+                // Make accessible as bare `name` key too (this mirrors what
+                // the explicit export loop in Phase 2 does).
+                self.env.declare_function(name, return_type, &self.current_module);
+            }
+            for name in &declared_structs {
+                if no_export_names.contains(name.as_str()) {
+                    continue;
+                }
+                // structs are registered as Module symbols in the env;
+                // re-declare in current module for export.
+                self.env.declare_module(name);
+            }
+            for name in &declared_traits {
+                if no_export_names.contains(name.as_str()) {
+                    continue;
+                }
+                // Traits don't have a specific registration mechanism
+                // (they live in trait_defs map), but declaring a Module
+                // symbol lets name-based resolution find them.
+                self.env.declare_module(name);
+            }
+            // Also re-export every imported module into this module's
+            // namespace so `from m import ...` style patterns keep working
+            // after we drop explicit `export(...)` lists.
+            for mod_name in &imported_mods {
+                let short = mod_name.rsplit("::").next().unwrap_or(mod_name);
+                self.env.declare_module(short);
             }
         }
 
@@ -409,9 +815,86 @@ impl AstVisitor for SemanticAnalyzer {
         self.env.declare_module(&struct_name);
     }
 
+    fn visit_enum_definition(&mut self, node: &EnumDefinition) {
+        let enum_name = node.get_name().to_string();
+        let generic_params = node.get_generic_params().clone();
+        #[cfg(debug_assertions)]
+        println!("  Enum definition: {} ({} variants)", enum_name, node.get_variants().len());
+
+        // Push generic scope so that type params like T, E are resolved
+        let prev_generic = self.current_generic_params.clone();
+        self.current_generic_params = generic_params.clone();
+
+        // Lower enum to a tagged struct:
+        //   struct EnumName { _tag: int, _0: Payload0, _1: Payload1, ... }
+        let mut fields = HashMap::new();
+        fields.insert("_tag".to_string(), DataType::Int);
+
+        let mut variant_idx = 0i32;
+        for variant in node.get_variants() {
+            if let Some(ref payload) = variant.payload_type {
+                let field_ty = self.get_data_type_from_ast(Some(payload.as_ref()));
+                fields.insert(format!("_{}", variant_idx), field_ty);
+            }
+            variant_idx += 1;
+        }
+        self.struct_fields.insert(enum_name.clone(), fields);
+
+        // Declare enum name as a module so `EnumName::Variant` resolution works.
+        self.env.declare_module(&enum_name);
+
+        // Register each variant as a constructor function in the enum's module.
+        for variant in node.get_variants() {
+            let ctor_name = variant.name.clone();
+            let return_type = DataType::Struct(enum_name.clone());
+
+            // Declare in the enum's namespace: EnumName::VariantName
+            // Also register as `enum_name::VariantName` for general lookup
+            self.env.declare_function(&ctor_name, &return_type, &enum_name);
+            self.env.declare_function(&format!("{}::{}", enum_name, ctor_name), &return_type, &self.current_module);
+        }
+
+        self.current_generic_params = prev_generic;
+    }
+
     fn visit_impl_block(&mut self, node: &ImplBlock) {
         #[cfg(debug_assertions)]
         println!("  Impl block for: {}", node.get_struct_name());
+
+        // If this is `impl Trait for Type`, validate that all required methods are present
+        if let Some(trait_name) = node.get_trait_name() {
+            if let Some(trait_info) = self.trait_defs.get(trait_name).cloned() {
+                let impl_methods: HashSet<String> = node.get_items().iter().filter_map(|item| {
+                    match item {
+                        ImplItem::Method(func) | ImplItem::Constructor(func) | ImplItem::Convert(func) => {
+                            if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                                None
+                            } else {
+                                Some(func.get_name().to_string())
+                            }
+                        }
+                    }
+                }).collect();
+
+                for required in &trait_info.methods {
+                    // #[dynamic_args] methods can have any signature — skip name check
+                    if required.dynamic_args {
+                        continue;
+                    }
+                    if !impl_methods.contains(&required.name) {
+                        self.error(&format!(
+                            "Trait '{}' requires method '{}', but it is missing in impl for '{}'",
+                            trait_name, required.name, node.get_struct_name()
+                        ));
+                    }
+                }
+            } else {
+                self.error(&format!(
+                    "Trait '{}' is not defined (impl for '{}')",
+                    trait_name, node.get_struct_name()
+                ));
+            }
+        }
 
         let prev_impl = self.current_impl_struct.clone();
         self.current_impl_struct = Some(node.get_struct_name().to_string());
@@ -419,6 +902,23 @@ impl AstVisitor for SemanticAnalyzer {
         for item in node.get_items() {
             match item {
                 ImplItem::Constructor(func) | ImplItem::Method(func) | ImplItem::Convert(func) => {
+                    if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                        continue;
+                    }
+                    // Dedup: skip if this (struct, method, arity) triple was already
+                    // declared (e.g. by a loaded std module that defines the same
+                    // method). Using arity as part of the key allows overloaded
+                    // methods like `Range::new(start, end)` and
+                    // `Range::new(start, end, step)` to coexist.
+                    let struct_name = node.get_struct_name().to_string();
+                    let method_name = func.get_name().to_string();
+                    let arity = func
+                        .get_parameters()
+                        .map(|p| p.len())
+                        .unwrap_or(0);
+                    if !self.impl_methods.insert((struct_name, method_name, arity)) {
+                        continue;
+                    }
                     func.accept(self);
                 }
             }
@@ -427,9 +927,89 @@ impl AstVisitor for SemanticAnalyzer {
         self.current_impl_struct = prev_impl;
     }
 
+    fn visit_trait_definition(&mut self, node: &TraitDefinition) {
+        #[cfg(debug_assertions)]
+        println!("  Trait definition: {}", node.get_name());
+
+        let methods: Vec<TraitMethodSig> = node.get_methods().iter().map(|m| {
+            TraitMethodSig {
+                name: m.name.clone(),
+                param_count: m.parameters.len(),
+                dynamic_args: Attribute::has_attr(&m.attributes, "dynamic_args"),
+            }
+        }).collect();
+        self.trait_defs.insert(node.get_name().to_string(), TraitDefInfo {
+            name: node.get_name().to_string(),
+            methods,
+            generic_params: node.get_generic_params().clone(),
+        });
+    }
+
     fn visit_export_statement(&mut self, _node: &ExportStatement) {
         // Export is a compile-time concept; no runtime effect
         // TODO: validate exported names are declared in current module
+    }
+
+    fn visit_extern_block(&mut self, node: &ExternBlock) {
+        #[cfg(debug_assertions)]
+        println!("  Extern block: lib={:?}", node.get_library());
+
+        // Every extern "C" block MUST specify a #[header("path")] attribute
+        // pointing to the C header that declares these functions. The header
+        // is used for signature validation only — symbols are NOT auto-imported;
+        // the user must explicitly list each function in the block.
+        let header_path = match Attribute::get_attr_value(node.get_attributes(), "header") {
+            Some(path) => path.to_string(),
+            None => {
+                self.error(
+                    "extern \"C\" block requires a #[header(\"path/to/header.h\")] attribute \
+                     specifying the C header that provides these functions",
+                );
+                return;
+            }
+        };
+
+        // Validate that the header file exists and contains declarations
+        // for every function in the block.
+        let header_content = match self.read_header_file(&header_path) {
+            Ok(content) => content,
+            Err(e) => {
+                self.error(&format!(
+                    "Cannot read C header '{}' specified by #[header]: {}",
+                    header_path, e
+                ));
+                return;
+            }
+        };
+
+        if let Some(lib) = node.get_library() {
+            // "C" is an ABI specifier, not a library name — don't pass -lC.
+            // Only collect actual library names (e.g. "m" → -lm).
+            if lib != "C" && !self.extern_libs.iter().any(|l| l == lib) {
+                self.extern_libs.push(lib.to_string());
+            }
+        }
+
+        for func in node.get_functions() {
+            let func_name = func.get_name().to_string();
+
+            // Validate that the function is declared in the specified header.
+            // We do a lightweight text search for the function name appearing
+            // as a function declaration (preceded by a non-identifier char to
+            // avoid matching substrings of other names).
+            if !Self::header_declares_function(&header_content, &func_name) {
+                self.error(&format!(
+                    "Function '{}' is not declared in header '{}'",
+                    func_name, header_path
+                ));
+            }
+
+            let return_type = self.get_data_type_from_ast(func.get_return_type());
+            // Register extern "C" functions in the current module so that
+            // call sites (e.g. `printf(...)`) resolve to `<module>::printf`.
+            self.env.declare_function(&func_name, &return_type, &self.current_module);
+            func.accept(self);
+        }
     }
 
     fn visit_import_statement(&mut self, node: &ImportStatement) {
@@ -444,6 +1024,9 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_function(&mut self, node: &Function) {
+        if self.build_mode == BuildMode::Release && Attribute::has_attr(node.get_attributes(), "debug") {
+            return;
+        }
         let func_name = node.get_name().to_string();
         #[cfg(debug_assertions)]
         println!("  Function: {}", func_name);
@@ -695,8 +1278,9 @@ impl AstVisitor for SemanticAnalyzer {
             let iter_type = self.get_current_type();
 
             let is_valid = matches!(iter_type, DataType::Int)
-                || matches!(&iter_type, DataType::Struct(s) if s == "range")
-                || matches!(iter_type, DataType::Str);
+                || matches!(&iter_type, DataType::Struct(s) if s == "Range")
+                || matches!(iter_type, DataType::Str)
+                || matches!(iter_type, DataType::Unknown);
             if !is_valid {
                 // Also accept any array-like type (Struct, or if it's an array variable)
                 self.error("For loop iterable must be range, string, or array");
@@ -705,7 +1289,7 @@ impl AstVisitor for SemanticAnalyzer {
             // Declare value variable (second) with appropriate type
             if loop_vars.len() >= 2 {
                 let val_type = match &iter_type {
-                    DataType::Struct(s) if s == "range" => DataType::Int,
+                    DataType::Struct(s) if s == "Range" => DataType::Int,
                     DataType::Str => DataType::Str,
                     _ => DataType::Int, // default for arrays
                 };
@@ -798,13 +1382,9 @@ impl AstVisitor for SemanticAnalyzer {
             }
         }
 
-        // Look up in current module
+        // Look up in current module, with bare-name fallback for builtins
         let full_name = format!("{}::{}", self.current_module, name);
         let sym = self.env.lookup_symbol(&full_name)
-            .or_else(|| {
-                let builtin = format!("__builtins__::{}", name);
-                self.env.lookup_symbol(&builtin)
-            })
             .or_else(|| self.env.lookup_symbol(name));
 
         match sym {
@@ -817,11 +1397,11 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_number_literal(&mut self, node: &NumberLiteral) {
-        let value = node.get_value();
-        if value == (value as i64) as f64 {
-            self.type_stack.push(DataType::Int);
-        } else {
+        // Source-level form decides int vs float (e.g. `3.0` is float, `3` is int).
+        if node.is_float_literal() {
             self.type_stack.push(DataType::Float);
+        } else {
+            self.type_stack.push(DataType::Int);
         }
     }
 
@@ -974,17 +1554,36 @@ impl AstVisitor for SemanticAnalyzer {
                 return;
             }
 
-            if !Environment::is_numeric_type(&left_type) || !Environment::is_numeric_type(&right_type) {
-                self.error(&format!("Operator '{}' requires numeric operands", op));
-                self.type_stack.push(DataType::Unknown);
+            // Numeric operands: hardcoded path
+            if Environment::is_numeric_type(&left_type) && Environment::is_numeric_type(&right_type) {
+                if left_type == DataType::Float || right_type == DataType::Float {
+                    self.type_stack.push(DataType::Float);
+                } else {
+                    self.type_stack.push(DataType::Int);
+                }
                 return;
             }
 
-            if left_type == DataType::Float || right_type == DataType::Float {
-                self.type_stack.push(DataType::Float);
-            } else {
-                self.type_stack.push(DataType::Int);
+            // User struct types: desugar operator to trait method call
+            if let DataType::Struct(ref struct_name) = left_type {
+                if let Some(method_name) = Self::operator_to_method(op) {
+                    let full_method = format!("{}::{}", struct_name, method_name);
+                    if let Some(sym) = self.env.lookup_symbol(&full_method) {
+                        // Process arguments (right operand has already been type-checked)
+                        self.type_stack.push(sym.data_type.clone());
+                        return;
+                    }
+                    self.error(&format!(
+                        "Type '{}' does not implement operator '{}' (method '{}::{}' not found)",
+                        struct_name, op, struct_name, method_name
+                    ));
+                    self.type_stack.push(DataType::Unknown);
+                    return;
+                }
             }
+
+            self.error(&format!("Operator '{}' requires numeric operands", op));
+            self.type_stack.push(DataType::Unknown);
             return;
         }
 
@@ -1047,15 +1646,61 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
-            if !Environment::is_type_compatible(&left_type, &right_type)
-                && !Environment::is_type_compatible(&right_type, &left_type)
-            {
+            // Nullable and None_ comparisons: e.g., opt == null, opt != null
+            let is_nullable = matches!(left_type, DataType::Nullable(_)) || matches!(right_type, DataType::Nullable(_));
+            let has_none = left_type == DataType::None_ || right_type == DataType::None_;
+            if is_nullable || has_none {
+                if op == "==" || op == "!=" {
+                    self.type_stack.push(DataType::Bool);
+                    return;
+                }
                 self.error(&format!(
-                    "Cannot compare {} and {}",
+                    "Cannot compare {} and {} with '{}'",
                     data_type_to_string(left_type),
-                    data_type_to_string(right_type)
+                    data_type_to_string(right_type),
+                    op
                 ));
+                self.type_stack.push(DataType::Unknown);
+                return;
             }
+
+            // Numeric/bool comparison: hardcoded path
+            if Environment::is_numeric_type(&left_type) || left_type == DataType::Bool {
+                if !Environment::is_type_compatible(&left_type, &right_type)
+                    && !Environment::is_type_compatible(&right_type, &left_type)
+                {
+                    self.error(&format!(
+                        "Cannot compare {} and {}",
+                        data_type_to_string(left_type),
+                        data_type_to_string(right_type)
+                    ));
+                }
+                self.type_stack.push(DataType::Bool);
+                return;
+            }
+
+            // User struct types: desugar comparison to trait method call
+            if let DataType::Struct(ref struct_name) = left_type {
+                if let Some(method_name) = Self::operator_to_method(op) {
+                    let full_method = format!("{}::{}", struct_name, method_name);
+                    if let Some(sym) = self.env.lookup_symbol(&full_method) {
+                        self.type_stack.push(sym.data_type.clone());
+                        return;
+                    }
+                    self.error(&format!(
+                        "Type '{}' does not implement operator '{}' (method '{}::{}' not found)",
+                        struct_name, op, struct_name, method_name
+                    ));
+                    self.type_stack.push(DataType::Unknown);
+                    return;
+                }
+            }
+
+            self.error(&format!(
+                "Cannot compare {} and {}",
+                data_type_to_string(left_type),
+                data_type_to_string(right_type)
+            ));
             self.type_stack.push(DataType::Bool);
             return;
         }
@@ -1065,6 +1710,16 @@ impl AstVisitor for SemanticAnalyzer {
                 self.error("Logical operators require boolean operands");
             }
             self.type_stack.push(DataType::Bool);
+            return;
+        }
+
+        if op == ".." {
+            // Range literal: a..b → Range struct. Ensure Range is declared.
+            if !self.struct_fields.contains_key("Range") {
+                self.struct_fields.insert("Range".to_string(), HashMap::new());
+                self.env.declare_module("Range");
+            }
+            self.type_stack.push(DataType::Struct("Range".to_string()));
             return;
         }
 
@@ -1118,8 +1773,37 @@ impl AstVisitor for SemanticAnalyzer {
             } else if let Some(member) = callee.as_any().downcast_ref::<MemberAccess>() {
                 if let Some(obj) = member.get_object() {
                     if let Some(obj_id) = obj.as_any().downcast_ref::<Identifier>() {
-                        module_name = obj_id.get_name().to_string();
-                        func_name = member.get_member().to_string();
+                        let obj_name = obj_id.get_name().to_string();
+                        let member_name = member.get_member().to_string();
+
+                        // Reject dot notation for module access (e.g., io.println → io::println)
+                        let is_module = self.env.lookup_symbol(&obj_name)
+                            .map_or(false, |s| s.symbol_type == SymbolType::Module);
+                        if is_module && obj_name != "self" {
+                            self.error(&format!(
+                                "Use '::' for module access: '{0}::{1}' instead of '{0}.{1}'",
+                                obj_name, member_name
+                            ));
+                            func_name = member_name;
+                        } else {
+                            module_name = obj_name;
+                            func_name = member_name;
+                        }
+                    } else {
+                        // Chained method call: obj is not a simple Identifier
+                        // (e.g. `arr.index_mut(i).write(v)` — the outer call's
+                        // obj is a FunctionCall). Visit the obj expression to
+                        // discover its DataType, then dispatch via its struct
+                        // name so that trait/struct methods like `Ref::write`
+                        // are resolved correctly.
+                        obj.accept(self);
+                        let obj_dt = self.get_current_type();
+                        self.type_stack.pop();
+                        let member_name = member.get_member().to_string();
+                        if let DataType::Struct(struct_name) = obj_dt {
+                            module_name = struct_name;
+                        }
+                        func_name = member_name;
                     }
                 }
             }
@@ -1134,6 +1818,60 @@ impl AstVisitor for SemanticAnalyzer {
                 }
             }
             self.type_stack.push(DataType::Struct(func_name.clone()));
+            return;
+        }
+
+        // Static-method constructor form: `TypeName::new(args...)` — returns
+        // `TypeName` as the expression type. This enables automatic type
+        // inference for declarations such as `var x = Range::new(0, 10);`
+        // without requiring a type annotation.
+        if func_name == "new" && self.struct_fields.contains_key(&module_name) {
+            if let Some(args) = node.get_arguments() {
+                for arg in args {
+                    arg.accept(self);
+                    self.type_stack.pop();
+                }
+            }
+            self.type_stack.push(DataType::Struct(module_name.clone()));
+            return;
+        }
+
+        // Range constructor: `range::new(a, b)` / `Range::new(a, b)` produces a Range struct.
+        // The `..` operator is desugared to `range::new(start, end)` by the parser, and
+        // `new Range(a, b)` desugars to `Range::new(a, b)`. Both must be recognised even
+        // when std/range.gbl is not loaded.
+        if func_name == "new" && (module_name == "range" || module_name == "Range") {
+            if let Some(args) = node.get_arguments() {
+                for arg in args {
+                    arg.accept(self);
+                    self.type_stack.pop();
+                }
+            }
+            if !self.struct_fields.contains_key("Range") {
+                self.struct_fields.insert("Range".to_string(), HashMap::new());
+                self.env.declare_module("range");
+            }
+            self.type_stack.push(DataType::Struct("Range".to_string()));
+            return;
+        }
+
+        // Compile-time macros `file()` and `line()` are valid inside #[expand]
+        // functions. They are folded to literals by the IR builder; here we
+        // only need to give them a type so semantic analysis passes.
+        if (func_name == "file" || func_name == "line")
+            && module_name == self.current_module
+        {
+            if let Some(args) = node.get_arguments() {
+                for arg in args {
+                    arg.accept(self);
+                    self.type_stack.pop();
+                }
+            }
+            self.type_stack.push(if func_name == "file" {
+                DataType::Str
+            } else {
+                DataType::Int
+            });
             return;
         }
 
@@ -1190,6 +1928,69 @@ impl AstVisitor for SemanticAnalyzer {
                         self.type_stack.push(DataType::None_);
                         return;
                     }
+                }
+                // String methods: s.len() -> Int, s.contains(sub) -> Bool,
+                // s.trim() -> Str, s.replace(from, to) -> Str
+                if matches!(var_sym.data_type, DataType::Str) {
+                    let ret = match func_name.as_str() {
+                        "len" => Some(DataType::Int),
+                        "contains" => Some(DataType::Bool),
+                        "trim" => Some(DataType::Str),
+                        "replace" => Some(DataType::Str),
+                        _ => None,
+                    };
+                    if let Some(rt) = ret {
+                        if let Some(args) = node.get_arguments() {
+                            for arg in args {
+                                arg.accept(self);
+                                self.type_stack.pop();
+                            }
+                        }
+                        self.type_stack.push(rt);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Struct method dispatch: if the callee is obj.method() and obj is
+        // a variable of type DataType::Struct(S), look up S::method in the
+        // symbol table. This enables method calls on imported struct types
+        // (e.g. Result::take, Channel::send) without requiring the method
+        // to be in the current module namespace.
+        if sym_data_type.is_none() && module_name != self.current_module {
+            let struct_name_from_var = self.env.lookup_symbol(&module_name)
+                .and_then(|s| if let DataType::Struct(ref sn) = s.data_type {
+                    Some(sn.clone())
+                } else {
+                    None
+                });
+            if let Some(struct_name) = struct_name_from_var {
+                let struct_method = format!("{}::{}", struct_name, func_name);
+                let method_type = self.env.lookup_symbol(&struct_method)
+                    .map(|s| s.data_type.clone());
+                if let Some(dt) = method_type {
+                    if let Some(args) = node.get_arguments() {
+                        for arg in args {
+                            arg.accept(self);
+                            self.type_stack.pop();
+                        }
+                    }
+                    self.type_stack.push(dt);
+                    return;
+                }
+                // Also try without arity suffix for generic impls
+                let bare_method_type = self.env.lookup_symbol(&func_name)
+                    .map(|s| s.data_type.clone());
+                if let Some(dt) = bare_method_type {
+                    if let Some(args) = node.get_arguments() {
+                        for arg in args {
+                            arg.accept(self);
+                            self.type_stack.pop();
+                        }
+                    }
+                    self.type_stack.push(dt);
+                    return;
                 }
             }
         }
@@ -1257,6 +2058,34 @@ impl AstVisitor for SemanticAnalyzer {
             } else {
                 self.type_stack.push(DataType::None_);
             }
+        }
+    }
+
+    fn visit_try_operator(&mut self, node: &TryOperator) {
+        // Visit the inner expression to get its type
+        if let Some(inner) = node.get_inner() {
+            inner.accept(self);
+            let inner_type = self.get_current_type();
+            self.type_stack.pop();
+
+            // The ? operator works on Result<T, E>.
+            // For now, since Result is a struct, we check if the type is
+            // DataType::Struct("Result"). The result type of expr? is T
+            // (the inner value type). Since all values are i64 at the
+            // Cranelift level, we can safely return Int as the type.
+            if let DataType::Struct(ref sname) = inner_type {
+                if sname == "Result" {
+                    // Result<T, E> ? → T (represented as Int at runtime)
+                    self.type_stack.push(DataType::Int);
+                    return;
+                }
+            }
+
+            // For non-Result types, just pass through the type.
+            // This allows the ? operator to be used loosely in tests.
+            self.type_stack.push(inner_type);
+        } else {
+            self.type_stack.push(DataType::Unknown);
         }
     }
 
@@ -1414,10 +2243,16 @@ impl AstVisitor for SemanticAnalyzer {
                     return;
                 }
 
-                // Check module-level lookup (existing behavior)
+                // Check module-level lookup via dot (deprecated — use ::)
                 let full_name = format!("{}::{}", obj_name, member);
-                if let Some(sym) = self.env.lookup_symbol(&full_name) {
-                    self.type_stack.push(sym.data_type.clone());
+                let module_sym_type = self.env.lookup_symbol(&full_name)
+                    .map(|s| s.data_type.clone());
+                if let Some(dt) = module_sym_type {
+                    self.error(&format!(
+                        "Use '::' for module access: '{0}::{1}' instead of '{0}.{1}'",
+                        obj_name, member
+                    ));
+                    self.type_stack.push(dt);
                     return;
                 }
 
@@ -1466,7 +2301,12 @@ impl AstVisitor for SemanticAnalyzer {
                 self.error("Range arguments must be numeric");
             }
         }
-        self.type_stack.push(DataType::Int);
+        // Range literal a..b produces a `Range` struct value, not an Int.
+        if !self.struct_fields.contains_key("Range") {
+            self.struct_fields.insert("Range".to_string(), HashMap::new());
+            self.env.declare_module("Range");
+        }
+        self.type_stack.push(DataType::Struct("Range".to_string()));
     }
 
     fn visit_grouped_expression(&mut self, node: &GroupedExpression) {

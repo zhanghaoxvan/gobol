@@ -1,0 +1,46 @@
+// Ref<T> — a lightweight reference to a memory slot.
+//
+// Ref holds a raw address and provides read/write access through the
+// gobol_mem_load / gobol_mem_store runtime functions.  It is the return
+// type of IndexMut::index_mut, enabling `arr[i] = v` to be desugared
+// to `arr.index_mut(i).write(v)`.
+
+#[library_features(hidden = true)]
+
+#[header("std/runtime.h")]
+extern "C" {
+    func gobol_mem_load(addr: int): int;
+    func gobol_mem_store(addr: int, val: int);
+    func gobol_array_elem_addr(arr: int, i: int): int;
+}
+
+struct Ref<T> {
+    _addr: int
+}
+
+impl<T> Ref<T> {
+    func new(addr: int): Ref<T> {
+        _addr = addr;
+        self
+    }
+
+    func read(self): T {
+        gobol_mem_load(_addr)
+    }
+
+    func write(self, value: T) {
+        gobol_mem_store(_addr, value);
+    }
+
+    func drop(self) {
+        _addr = 0;
+    }
+
+    func is_null(self): bool {
+        _addr == 0
+    }
+
+    func addr(self): int {
+        _addr
+    }
+}

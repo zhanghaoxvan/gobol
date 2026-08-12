@@ -13,6 +13,8 @@ pub struct AstBuilder {
     error_occurred: bool,
     error_message: Vec<String>,
     error_formatter: Option<ErrorFormatter>,
+    /// Structured errors for LSP: (line, col, message)
+    pub structured_errors: Vec<(i32, i32, String)>,
 }
 
 impl AstBuilder {
@@ -31,6 +33,7 @@ impl AstBuilder {
             error_occurred: false,
             error_message: Vec::new(),
             error_formatter: None,
+            structured_errors: Vec::new(),
         }
     }
 
@@ -62,6 +65,11 @@ impl AstBuilder {
 
     pub fn get_error_message(&self) -> &Vec<String> {
         &self.error_message
+    }
+
+    /// Return the token stream (for LSP symbol index).
+    pub fn get_tokens(&self) -> &[Token] {
+        &self.tokens
     }
 
     // ==================== Attribute parsing ====================
@@ -127,6 +135,9 @@ impl AstBuilder {
                 self.advance(); // consume ']'
             }
             attrs.push(attr);
+            // Allow newlines between an attribute and the statement it
+            // decorates (e.g. `#[expand]\nfunc ...`).
+            self.consume_end_of_line();
         }
         attrs
     }
@@ -244,10 +255,14 @@ impl AstBuilder {
 
     fn log_error(&mut self, message: &str) {
         self.error_occurred = true;
-        let token = self.current_token();
+        let (line, col, val_len) = {
+            let token = self.current_token();
+            (token.line, token.col, token.value.len())
+        };
+        self.structured_errors.push((line, col, message.to_string()));
         if let Some(ref f) = self.error_formatter {
-            let span = if token.value.is_empty() { 1 } else { token.value.len() };
-            let formatted = f.format_error(token.line, token.col, span, "error", message, true);
+            let span = if val_len == 0 { 1 } else { val_len };
+            let formatted = f.format_error(line, col, span, "error", message, true);
             self.error_message.push(formatted);
         } else {
             self.error_message.push(format!("Builder Error: {}", message));
@@ -302,27 +317,11 @@ impl AstBuilder {
                     return Some(Box::new(ExportStatement::new(vec![])));
                 }
                 "struct" => return self.parse_struct_definition(attrs),
+                "enum" => return self.parse_enum_definition(attrs),
                 "impl" => return self.parse_impl_block(attrs),
                 "trait" => return self.parse_trait_definition(attrs),
+                "extern" => return self.parse_extern_block(attrs),
                 "export" => return self.parse_export_statement(),
-                "operator" => {
-                    // Skip operator definition at top level
-                    self.advance();
-                    while !self.match_value("{") && !self.is_end_of_line() && !self.match_type(&TokenType::EndOfFile) {
-                        self.advance();
-                    }
-                    if self.match_value("{") {
-                        self.advance();
-                        let mut depth = 1;
-                        while depth > 0 && !self.error_occurred {
-                            if self.match_value("{") { depth += 1; }
-                            else if self.match_value("}") { depth -= 1; }
-                            self.advance();
-                        }
-                    }
-                    self.consume_end_of_line();
-                    return Some(Box::new(ExportStatement::new(vec![])));
-                }
                 "if" => return self.parse_if_statement(),
                 "match" => {
                     let match_expr = self.parse_match_expression()?;
@@ -370,7 +369,9 @@ impl AstBuilder {
     fn parse_import(&mut self) -> Option<Box<dyn Statement>> {
         self.advance(); // consume 'import'
 
-        if !self.match_type(&TokenType::Identifier) {
+        // Import path components can be identifiers OR primitive type keywords
+        // (e.g. "import int" loads std/int.gbl).
+        if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
             self.log_error("Expected identifier after 'import'");
             return None;
         }
@@ -381,7 +382,7 @@ impl AstBuilder {
         // Handle "import a.b.c" or "import a::b::c"
         while self.match_value(".") || self.match_value("::") {
             self.advance(); // consume '.' or '::'
-            if !self.match_type(&TokenType::Identifier) {
+            if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
                 self.log_error("Expected identifier after separator in import path");
                 return None;
             }
@@ -392,7 +393,7 @@ impl AstBuilder {
         // Handle "import a as b"
         let alias = if self.match_type(&TokenType::Keyword) && self.current_token().value == "as" {
             self.advance(); // consume 'as'
-            if !self.match_type(&TokenType::Identifier) {
+            if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
                 self.log_error("Expected identifier after 'as'");
                 return None;
             }
@@ -416,7 +417,12 @@ impl AstBuilder {
         let mut names: Vec<String> = Vec::new();
 
         while !self.match_value(")") && !self.error_occurred {
-            if !self.match_type(&TokenType::Identifier) {
+            // Accept both Identifier and Keyword tokens here: export lists
+            // commonly include type names (int, float, str, bool, vec, trait)
+            // that the lexer classifies as keywords.
+            let is_name = self.match_type(&TokenType::Identifier)
+                || self.match_type(&TokenType::Keyword);
+            if !is_name {
                 self.log_error("Expected identifier in export list");
                 return None;
             }
@@ -426,7 +432,9 @@ impl AstBuilder {
             // Handle dotted names: add.add, io.print, etc.
             while self.match_value(".") {
                 self.advance();
-                if !self.match_type(&TokenType::Identifier) {
+                let is_part = self.match_type(&TokenType::Identifier)
+                    || self.match_type(&TokenType::Keyword);
+                if !is_part {
                     self.log_error("Expected identifier after '.' in export name");
                     return None;
                 }
@@ -525,12 +533,27 @@ impl AstBuilder {
             else { self.advance(); }
         }
 
-        let struct_name = match self.parse_qualified_name() {
+        let first_name = match self.parse_qualified_name() {
             Some(n) => n,
             None => {
                 self.log_error("Expected struct/trait name after 'impl'");
                 return None;
             }
+        };
+
+        // Check for `impl Trait for Type` syntax
+        let (struct_name, trait_name) = if self.match_type(&TokenType::Keyword) && self.current_token().value == "for" {
+            self.advance(); // consume 'for'
+            let type_name = match self.parse_qualified_name() {
+                Some(n) => n,
+                None => {
+                    self.log_error("Expected type name after 'for'");
+                    return None;
+                }
+            };
+            (type_name, Some(first_name))
+        } else {
+            (first_name, None)
         };
 
         // Optionally <T> after struct name
@@ -569,24 +592,6 @@ impl AstBuilder {
                             items.push(ImplItem::Convert(Box::new(func)));
                         }
                     }
-                    "operator" => {
-                        // Skip operator definition (including body)
-                        self.advance(); // skip 'operator'
-                        // Skip until '{' or end of line
-                        while !self.match_value("{") && !self.is_end_of_line() && !self.match_type(&TokenType::EndOfFile) {
-                            self.advance();
-                        }
-                        if self.match_value("{") {
-                            self.advance(); // skip '{'
-                            let mut depth = 1;
-                            while depth > 0 && !self.error_occurred {
-                                if self.match_value("{") { depth += 1; }
-                                else if self.match_value("}") { depth -= 1; }
-                                self.advance();
-                            }
-                        }
-                        self.consume_end_of_line();
-                    }
                     _ => { self.advance(); }
                 }
             } else if self.match_type(&TokenType::Identifier) {
@@ -603,7 +608,11 @@ impl AstBuilder {
         self.consume_value("}", "Expected '}' after impl block");
         self.consume_end_of_line();
 
-        Some(Box::new(ImplBlock::new(struct_name, generic_params, items).with_attributes(attrs)))
+        let mut block = ImplBlock::new(struct_name, generic_params, items).with_attributes(attrs);
+        if let Some(tn) = trait_name {
+            block = block.with_trait(tn);
+        }
+        Some(Box::new(block))
     }
 
     fn parse_trait_definition(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
@@ -639,6 +648,9 @@ impl AstBuilder {
             self.consume_end_of_line();
             if self.match_value("}") { break; }
 
+            // Parse attributes on trait methods (e.g., #[dynamic_args])
+            let method_attrs = self.parse_attributes();
+
             // Parse method signature: func name(params): ret_type
             // func keyword is optional in trait defs
             if self.match_type(&TokenType::Keyword) && self.current_token().value == "func" {
@@ -668,15 +680,166 @@ impl AstBuilder {
                 name: method_name,
                 parameters: params.unwrap_or_default(),
                 return_type,
+                attributes: method_attrs,
             });
 
             self.consume_end_of_line();
         }
 
         self.consume_value("}", "Expected '}' after trait body");
-        self.consume_end_of_line();
 
         Some(Box::new(TraitDefinition::new(name, methods, generic_params).with_attributes(attrs)))
+    }
+
+    fn parse_enum_definition(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
+        self.advance(); // consume 'enum'
+
+        let name = match self.parse_qualified_name() {
+            Some(n) => n,
+            None => {
+                self.log_error("Expected enum name");
+                return None;
+            }
+        };
+
+        let mut generic_params = Vec::new();
+        if self.match_value("<") {
+            self.advance();
+            loop {
+                if !self.match_type(&TokenType::Identifier) { break; }
+                generic_params.push(self.current_token().value.clone());
+                self.advance();
+                if self.match_value(",") { self.advance(); } else { break; }
+            }
+            if !self.match_value(">") { self.log_error("Expected '>' after generic params"); }
+            else { self.advance(); }
+        }
+
+        self.consume_end_of_line();
+        self.consume_value("{", "Expected '{' at start of enum body");
+        self.consume_end_of_line();
+
+        let mut variants = Vec::new();
+        while !self.match_value("}") && !self.error_occurred {
+            self.consume_end_of_line();
+            if self.match_value("}") { break; }
+
+            if !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected variant name in enum definition");
+                break;
+            }
+            let variant_name = self.current_token().value.clone();
+            self.advance();
+
+            // Optional payload: VariantName(Type)
+            let payload_type = if self.match_value("(") {
+                self.advance();
+                let ty = self.parse_type();
+                self.consume_value(")", "Expected ')' after variant payload type");
+                ty
+            } else {
+                None
+            };
+
+            variants.push(EnumVariant::new(variant_name, payload_type));
+
+            if self.match_value(",") { self.advance(); }
+            self.consume_end_of_line();
+        }
+
+        self.consume_value("}", "Expected '}' after enum body");
+
+        Some(Box::new(EnumDefinition::new(name, variants, generic_params).with_attributes(attrs)))
+    }
+
+    fn parse_extern_block(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
+        self.advance();
+
+        let library_name = if self.match_type(&TokenType::String) {
+            let name = self.current_token().value.clone();
+            self.advance();
+            Some(name)
+        } else {
+            self.log_error("Expected library name string after 'extern'");
+            None
+        };
+
+        self.consume_value("{", "Expected '{' after extern library name");
+        self.consume_end_of_line();
+
+        let mut functions = Vec::new();
+
+        while !self.match_value("}") && !self.match_type(&TokenType::EndOfFile) {
+            self.consume_end_of_line();
+            if self.match_value("}") {
+                break;
+            }
+
+            if !(self.match_type(&TokenType::Keyword) && self.current_token().value == "func") {
+                self.log_error("Expected 'func' keyword in extern block");
+                break;
+            }
+            self.advance();
+
+            if !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected function name after 'func'");
+                break;
+            }
+            let func_name = self.current_token().value.clone();
+            self.advance();
+
+            self.consume_value("(", "Expected '(' for extern function parameters");
+
+            let mut params: Vec<Box<Parameter>> = Vec::new();
+            let mut is_variadic = false;
+
+            if !self.match_value(")") {
+                loop {
+                    if self.match_value("...") {
+                        is_variadic = true;
+                        self.advance();
+                        break;
+                    }
+
+                    let param = self.parse_parameter();
+                    if let Some(p) = param {
+                        params.push(Box::new(p));
+                    }
+
+                    if self.match_value(",") {
+                        self.advance();
+                        if self.match_value("...") {
+                            is_variadic = true;
+                            self.advance();
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            self.consume_value(")", "Expected ')' after extern function parameters");
+
+            let mut return_type = None;
+            if self.match_value(":") {
+                self.advance();
+                return_type = self.parse_type();
+            }
+
+            if self.match_value(";") {
+                self.advance();
+            }
+            self.consume_end_of_line();
+
+            functions.push(ExternFunc::new(func_name, params, return_type, is_variadic));
+        }
+
+        self.consume_value("}", "Expected '}' after extern block");
+        self.consume_end_of_line();
+
+        let block = ExternBlock::new(library_name, functions).with_attributes(attrs);
+        Some(Box::new(block))
     }
 
     fn parse_method(&mut self, keyword: &str) -> Option<Function> {
@@ -990,8 +1153,194 @@ impl AstBuilder {
         Some(Box::new(Declaration::new(keyword, var_name, var_type, initializer)))
     }
 
+    /// Desugar `a[i] = v` → `a.index_mut(i).write(v)`.
+    ///
+    /// Runs in the AST builder (front-end) immediately after parsing, so
+    /// both the semantic analyser and the Cranelift backend see the
+    /// desugared form. This is logically equivalent to what SemanticAnalyzer
+    /// would do in an AST-transform pass, but keeps the rewriting close to
+    /// the parser where the rest of the syntactic sugar (e.g. `a..b` →
+    /// `Range::new(a, b)`) already lives.
+    fn desugar_index_assign(&mut self, expr: Box<dyn Expression>) -> Box<dyn Expression> {
+        if let Some(bin) = expr.as_any().downcast_ref::<BinaryExpression>() {
+            if bin.get_operator() == "=" {
+                if let Some(left) = bin.get_left() {
+                    if let Some(arr_idx) = left.as_any().downcast_ref::<ArrayIndex>() {
+                        if let (Some(arr), Some(idx), Some(val)) =
+                            (arr_idx.get_array(), arr_idx.get_index(), bin.get_right())
+                        {
+                            // Rebuild owned clones of the three expressions.
+                            // They are trait objects; clone them by walking back
+                            // through the parser is impossible, so instead we
+                            // rebuild a simple chain using the raw AST nodes we
+                            // can inspect. For that we need a "deep-ish clone"
+                            // helper that re-boxes common shapes.
+                            fn clone_type(t: &dyn Type) -> Box<dyn Type> {
+                                use crate::ast::*;
+                                let any = t.as_type_any();
+                                if let Some(bt) = any.downcast_ref::<BasicType>() {
+                                    return Box::new(BasicType::new(bt.get_name()));
+                                }
+                                if let Some(at) = any.downcast_ref::<ArrayType>() {
+                                    let elem = clone_type(at.get_element_type());
+                                    if let Some(size_expr) = at.get_size() {
+                                        return Box::new(ArrayType::new_nested(
+                                            elem,
+                                            clone_expr(size_expr),
+                                        ));
+                                    }
+                                    return Box::new(ArrayType::new_basic(
+                                        &elem.get_name().to_string(),
+                                        Box::new(NumberLiteral::new(0.0)),
+                                    ));
+                                }
+                                if let Some(nt) = any.downcast_ref::<NullableType>() {
+                                    return Box::new(NullableType::new(clone_type(nt.get_inner_type())));
+                                }
+                                if let Some(gt) = any.downcast_ref::<GenericType>() {
+                                    let args: Vec<Box<dyn Type>> = gt
+                                        .get_type_args()
+                                        .iter()
+                                        .map(|a| clone_type(a.as_ref()))
+                                        .collect();
+                                    return Box::new(GenericType::new(gt.get_base_name(), args));
+                                }
+                                Box::new(BasicType::new(t.get_name()))
+                            }
+                            fn clone_expr(e: &dyn Expression) -> Box<dyn Expression> {
+                                use crate::ast::*;
+                                let any = e.as_any();
+                                if let Some(id) = any.downcast_ref::<Identifier>() {
+                                    return Box::new(Identifier::new(id.get_name()));
+                                }
+                                if let Some(n) = any.downcast_ref::<NumberLiteral>() {
+                                    return Box::new(NumberLiteral::new(n.get_value()));
+                                }
+                                if let Some(s) = any.downcast_ref::<StringLiteral>() {
+                                    return Box::new(StringLiteral::new(s.get_value()));
+                                }
+                                if let Some(b) = any.downcast_ref::<BooleanLiteral>() {
+                                    return Box::new(BooleanLiteral::new(b.get_value()));
+                                }
+                                if let Some(_nl) = any.downcast_ref::<NullLiteral>() {
+                                    return Box::new(NullLiteral::new());
+                                }
+                                if let Some(fs) = any.downcast_ref::<FormatString>() {
+                                    // FormatString::new re-parses the value to
+                                    // rebuild variable positions, preserving
+                                    // brace-escapes such as {{ -> { and }} -> }.
+                                    return Box::new(FormatString::new(fs.get_value()));
+                                }
+                                if let Some(be) = any.downcast_ref::<BinaryExpression>() {
+                                    let l = be.get_left().map(clone_expr);
+                                    let r = be.get_right().map(clone_expr);
+                                    return Box::new(BinaryExpression::new(l, be.get_operator(), r));
+                                }
+                                if let Some(ue) = any.downcast_ref::<UnaryExpression>() {
+                                    let op = ue.get_operator();
+                                    let operand = ue.get_operand().map(clone_expr);
+                                    return Box::new(UnaryExpression::new(op, operand));
+                                }
+                                if let Some(ce) = any.downcast_ref::<CastExpression>() {
+                                    let inner = ce.get_expression().map(clone_expr);
+                                    let tgt = clone_type(ce.get_target_type());
+                                    return Box::new(CastExpression::new(inner, tgt));
+                                }
+                                if let Some(re) = any.downcast_ref::<RangeExpression>() {
+                                    let args: Vec<Box<dyn Expression>> = re
+                                        .get_arguments()
+                                        .iter()
+                                        .map(|a| clone_expr(a.as_ref()))
+                                        .collect();
+                                    return Box::new(RangeExpression::new(args));
+                                }
+                                if let Some(al) = any.downcast_ref::<ArrayLiteral>() {
+                                    let elems: Vec<Box<dyn Expression>> = al
+                                        .get_elements()
+                                        .iter()
+                                        .map(|a| clone_expr(a.as_ref()))
+                                        .collect();
+                                    return Box::new(ArrayLiteral::new(elems));
+                                }
+                                if let Some(sl) = any.downcast_ref::<StructLiteral>() {
+                                    let fields: Vec<StructFieldInit> = sl
+                                        .get_fields()
+                                        .iter()
+                                        .map(|f| match f {
+                                            StructFieldInit::Named { name, value } => {
+                                                StructFieldInit::Named {
+                                                    name: name.clone(),
+                                                    value: clone_expr(value.as_ref()),
+                                                }
+                                            }
+                                            StructFieldInit::Positional(v) => {
+                                                StructFieldInit::Positional(clone_expr(v.as_ref()))
+                                            }
+                                        })
+                                        .collect();
+                                    return Box::new(StructLiteral::new(sl.get_type_name(), fields));
+                                }
+                                if let Some(ma) = any.downcast_ref::<MemberAccess>() {
+                                    let obj = ma.get_object().map(clone_expr);
+                                    return Box::new(MemberAccess::new(obj, ma.get_member()));
+                                }
+                                if let Some(ai) = any.downcast_ref::<ArrayIndex>() {
+                                    let arr = ai.get_array().map(clone_expr);
+                                    let idx = ai.get_index().map(clone_expr);
+                                    return Box::new(ArrayIndex::new(arr, idx));
+                                }
+                                if let Some(fc) = any.downcast_ref::<FunctionCall>() {
+                                    let callee = fc.get_callee().map(clone_expr);
+                                    let args: Option<Vec<Box<dyn Expression>>> =
+                                        fc.get_arguments().map(|v| v.iter().map(|a| clone_expr(a.as_ref())).collect());
+                                    return Box::new(FunctionCall::new(callee, args));
+                                }
+                                if let Some(pa) = any.downcast_ref::<PathAccess>() {
+                                    return Box::new(PathAccess::new(
+                                        pa.get_path().to_vec(),
+                                        pa.get_member().to_string(),
+                                    ));
+                                }
+                                Box::new(Identifier::new("_desugar_fallback"))
+                            }
+                            let arr_boxed = clone_expr(arr);
+                            let idx_boxed = clone_expr(idx);
+                            let val_boxed = clone_expr(val);
+                            // `arr.index_mut(i)`
+                            let index_mut_callee = Box::new(MemberAccess::new(
+                                Some(arr_boxed),
+                                "index_mut",
+                            ));
+                            let index_mut_call = Box::new(FunctionCall::new(
+                                Some(index_mut_callee),
+                                Some(vec![idx_boxed]),
+                            ));
+                            // `.write(v)`
+                            let write_callee = Box::new(MemberAccess::new(
+                                Some(index_mut_call),
+                                "write",
+                            ));
+                            return Box::new(FunctionCall::new(
+                                Some(write_callee),
+                                Some(vec![val_boxed]),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        expr
+    }
+
     fn parse_expression_statement(&mut self) -> Option<Box<dyn Statement>> {
         let expr = self.parse_expression()?;
+        // Note: `arr[i] = v` array-index assignment is NOT desugared in the
+        // AST builder. The IR builder preserves ArrayIndex-as-assignment-target
+        // shape (`IRExpr::Assignment { target: IRExpr::ArrayIndex { .. } }`),
+        // which lets Cranelift dispatch correctly:
+        //   * For raw arrays (int[], str[]): gobol_array_elem_addr + gobol_mem_store
+        //   * For structs with index_mut (e.g. vec<T>): method call chain
+        //     index_mut(i).write(v) with proper struct-type dispatch.
         // Check for explicit semicolon terminator
         let has_semi = self.is_semicolon();
         if has_semi {
@@ -1064,29 +1413,36 @@ impl AstBuilder {
         let start = self.parse_expression()?;
 
         if self.match_value("..") {
-            self.advance(); // consume '..'
+            self.advance(); // consume first '..'
             let end = self.parse_expression()?;
-            
-            // 尝试优化：如果两端都是数字，编译时确定步长
-            let step = if let (Some(start_val), Some(end_val)) = (as_number(&start), as_number(&end)) {
-                let step_val = if start_val > end_val { -1.0 } else { 1.0 };
-                Some(Box::new(NumberLiteral::new(step_val)) as Box<dyn Expression>)
+
+            // Check for explicit step: 0..10..2
+            let step = if self.match_value("..") {
+                self.advance(); // consume second '..'
+                Some(self.parse_expression()?)
             } else {
-                // 运行时由 range 函数根据 start 和 end 的大小决定步长
-                None
+                // Auto-detect step: if start > end, step = -1; else step = 1
+                if let (Some(start_val), Some(end_val)) = (as_number(&start), as_number(&end)) {
+                    let step_val = if start_val > end_val { -1.0 } else { 1.0 };
+                    Some(Box::new(NumberLiteral::new(step_val)) as Box<dyn Expression>)
+                } else {
+                    // Runtime step detection by range::new
+                    None
+                }
             };
-            
-            let range_func = Box::new(Identifier::new("range"));
+
+            // Desugar 0..10 → range::new(0, 10[, step])
+            let range_new = Box::new(PathAccess::new(vec!["range".to_string()], "new"));
             let mut args = vec![start, end];
             if let Some(s) = step {
                 args.push(s);
             }
-            
-            return Some(Box::new(FunctionCall::new(Some(range_func), Some(args))));
+
+            return Some(Box::new(FunctionCall::new(Some(range_new), Some(args))));
         }
 
         Some(start)
-        }
+    }
 
     fn parse_format_string(&self, format_str: &str) -> Option<Box<dyn Expression>> {
         Some(Box::new(FormatString::new(format_str)))
@@ -1245,6 +1601,10 @@ impl AstBuilder {
                 expr = Box::new(ArrayIndex::new(Some(expr), Some(index)));
             } else if self.match_value("(") {
                 expr = self.parse_function_call(expr)?;
+            } else if self.match_value("?") {
+                // Try operator: expr? desugars to early-return on Err.
+                self.advance();
+                expr = Box::new(TryOperator::new(Some(expr)));
             } else {
                 break;
             }
@@ -1276,9 +1636,17 @@ impl AstBuilder {
 
         // 数字字面量
         if self.match_type(&TokenType::Number) {
-            let value: f64 = self.current_token().value.parse().unwrap_or(0.0);
+            let raw = self.current_token().value.clone();
+            let value: f64 = raw.parse().unwrap_or(0.0);
             self.advance();
-            return Some(Box::new(NumberLiteral::new(value)));
+            // A literal is a float if the source text contains '.' or 'e'/'E'
+            // (scientific notation). Otherwise treat as int.
+            let is_float = raw.contains('.') || raw.contains('e') || raw.contains('E');
+            if is_float {
+                return Some(Box::new(NumberLiteral::new_float(value)));
+            } else {
+                return Some(Box::new(NumberLiteral::new(value)));
+            }
         }
 
         // 字符串字面量
@@ -1597,10 +1965,15 @@ impl AstBuilder {
     fn parse_new_expression(&mut self) -> Option<Box<dyn Expression>> {
         self.advance(); // consume 'new'
 
-        // Parse the type to allocate
-        let _allocated_type = self.parse_type()?;
+        // Parse the type name (must be an identifier; generic args parsed by call site)
+        if !self.match_type(&TokenType::Identifier) {
+            self.log_error("Expected type name after 'new'");
+            return None;
+        }
+        let type_name = self.current_token().value.clone();
+        self.advance();
 
-        // Check for [size] (array allocation)
+        // Array allocation: new T[size] or new T[size]?
         if self.match_value("[") {
             self.advance();
             let _size = self.parse_expression()?;
@@ -1609,17 +1982,37 @@ impl AstBuilder {
                 return None;
             }
             self.advance();
-            // Skip ? if present
+            // Skip ? if present (nullable array)
             if self.match_value("?") {
                 self.advance();
             }
-            // Return as a function-call-like expression (will expand later)
+            // Array allocation marker (handled by cranelift backend)
             return Some(Box::new(Identifier::new("__new_array")));
         }
 
-        // Struct instantiation with no args: new Type
-        // Return as identifier (will expand later)
-        Some(Box::new(Identifier::new("__new_struct")))
+        // Struct construction: new Type(args) desugars to Type::new(args).
+        // The `New<T>` trait (std/new.gbl) documents the contract; the
+        // constructor is resolved as a static method call on the type.
+        let args = if self.match_value("(") {
+            self.advance();
+            let mut args = Vec::new();
+            while !self.match_value(")") {
+                args.push(self.parse_expression()?);
+                if self.match_value(",") {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume_value(")", "Expected ')' to close new expression arguments");
+            Some(args)
+        } else {
+            None
+        };
+
+        // new Type(args) → Type::new(args)
+        let callee = Box::new(PathAccess::new(vec![type_name], "new"));
+        Some(Box::new(FunctionCall::new(Some(callee), args)))
     }
 
     fn parse_if_statement(&mut self) -> Option<Box<dyn Statement>> {

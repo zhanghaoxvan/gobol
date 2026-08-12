@@ -24,6 +24,8 @@ pub struct IRFunction {
     pub is_method: bool,
     pub struct_name: Option<String>,
     pub intrinsic: Option<String>,
+    /// extern "C" variadic functions (declared with `...`) set this to true.
+    pub is_variadic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,8 @@ pub struct IRStruct {
     pub name: String,
     pub generic_params: Vec<String>,
     pub fields: Vec<IRField>,
+    /// Simple string attributes (e.g. "no_gc", "internal").
+    pub attributes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +128,13 @@ pub struct IRBuilder {
     
     // 错误收集
     errors: Vec<String>,
+
+    // #[expand] functions: name → (param names, body IR)
+    expand_functions: HashMap<String, (Vec<String>, IRBlock)>,
+    // Current file path for file() macro in #[expand] context
+    current_file: String,
+    // Counter for generating unique temp variable names (e.g. __try_tmp_N)
+    tmp_counter: usize,
 }
 
 impl IRBuilder {
@@ -148,7 +159,15 @@ impl IRBuilder {
             structs: HashMap::new(),
             methods: HashMap::new(),
             errors: Vec::new(),
+            expand_functions: HashMap::new(),
+            current_file: String::new(),
+            tmp_counter: 0,
         }
+    }
+
+    /// Set the current source file path for `file()` macro in #[expand] context.
+    pub fn set_current_file(&mut self, file: impl Into<String>) {
+        self.current_file = file.into();
     }
 
     pub fn build(mut self, program: &Program) -> Result<GobolIR, Vec<String>> {
@@ -170,6 +189,39 @@ impl IRBuilder {
         for stmt in program.get_statements() {
             if stmt.as_any().downcast_ref::<Function>().is_some() {
                 stmt.accept(&mut self);
+            }
+        }
+
+        // 第四遍：收集 extern 块
+        for stmt in program.get_statements() {
+            if let Some(extern_block) = stmt.as_any().downcast_ref::<ExternBlock>() {
+                for func in extern_block.get_functions() {
+                    let name = func.get_name().to_string();
+
+                    let params: Vec<IRParam> = func.get_params()
+                        .iter()
+                        .map(|p| {
+                            let pname = p.get_name().to_string();
+                            let ty = self.ast_type_to_data_type(p.get_type());
+                            IRParam { name: pname, ty }
+                        })
+                        .collect();
+
+                    let return_type = self.ast_type_to_data_type(func.get_return_type());
+
+                    self.ir.functions.push(IRFunction {
+                        name: name.clone(),
+                        generic_params: Vec::new(),
+                        params,
+                        return_type,
+                        body: None,
+                        is_main: false,
+                        is_method: false,
+                        struct_name: None,
+                        intrinsic: Some(format!("extern:{}", name)),
+                        is_variadic: func.is_variadic(),
+                    });
+                }
             }
         }
 
@@ -324,9 +376,17 @@ impl IRBuilder {
 
     fn finish_function(&mut self) {
         if let Some(mut func) = self.current_ir_function.take() {
-            func.body = Some(IRBlock {
-                statements: std::mem::take(&mut self.current_block),
-            });
+            // Bodyless declarations (e.g. `#[intrinsic(...)] func foo(...);`)
+            // keep body = None so the backend knows to dispatch them to the
+            // C runtime instead of compiling a (non-existent) body.
+            if func.intrinsic.is_some() && self.current_block.is_empty() {
+                func.body = None;
+                std::mem::take(&mut self.current_block);
+            } else {
+                func.body = Some(IRBlock {
+                    statements: std::mem::take(&mut self.current_block),
+                });
+            }
             if func.is_main {
                 self.ir.main_function = Some(func.name.clone());
             }
@@ -417,6 +477,189 @@ impl IRBuilder {
     fn error(&mut self, msg: &str) {
         self.errors.push(msg.to_string());
     }
+
+    /// Try to evaluate an `#[expand]` function call at compile time.
+    /// Returns `Some(LitValue)` if all arguments are literals and the
+    /// function body can be evaluated; returns `None` to fall back to
+    /// a runtime call.
+    fn try_expand_call(&self, func_name: &str, args: &[IRExpr]) -> Option<LitValue> {
+        let (param_names, body) = self.expand_functions.get(func_name)?;
+
+        // All arguments must be literals for compile-time evaluation.
+        let mut bindings: HashMap<String, LitValue> = HashMap::new();
+        for (i, param_name) in param_names.iter().enumerate() {
+            if i >= args.len() {
+                return None;
+            }
+            match &args[i] {
+                IRExpr::Literal(lit) => {
+                    bindings.insert(param_name.clone(), lit.clone());
+                }
+                _ => return None, // Non-literal argument: fall back to runtime
+            }
+        }
+
+        self.eval_ir_block(body, &mut bindings)
+    }
+
+    /// Evaluate an IR block at compile time. Returns the value of the
+    /// first `Return` statement, or the tail expression (last Expression
+    /// statement) if there is no explicit return.
+    fn eval_ir_block(
+        &self,
+        block: &IRBlock,
+        bindings: &mut HashMap<String, LitValue>,
+    ) -> Option<LitValue> {
+        let mut last_expr_val: Option<LitValue> = None;
+        for stmt in &block.statements {
+            match stmt {
+                IRStmt::Return(Some(expr)) => {
+                    return self.eval_ir_expr(expr, bindings);
+                }
+                IRStmt::Return(None) => {
+                    return Some(LitValue::None);
+                }
+                IRStmt::Expression(expr) => {
+                    // Track the value; the last Expression in a block is
+                    // the implicit return (tail expression).
+                    last_expr_val = self.eval_ir_expr(expr, bindings);
+                }
+                IRStmt::Declaration { name, init, .. } => {
+                    if let Some(init_expr) = init {
+                        if let Some(val) = self.eval_ir_expr(init_expr, bindings) {
+                            bindings.insert(name.clone(), val);
+                        }
+                    }
+                }
+                IRStmt::If { cond, then_block, else_block } => {
+                    let cond_val = self.eval_ir_expr(cond, bindings)?;
+                    let is_true = match cond_val {
+                        LitValue::Bool(b) => b,
+                        LitValue::Int(n) => n != 0,
+                        _ => return None,
+                    };
+                    if is_true {
+                        return self.eval_ir_block(then_block, bindings);
+                    } else if let Some(else_b) = else_block {
+                        return self.eval_ir_block(else_b, bindings);
+                    }
+                }
+                _ => {}
+            }
+        }
+        last_expr_val
+    }
+
+    /// Evaluate an IR expression at compile time.
+    fn eval_ir_expr(
+        &self,
+        expr: &IRExpr,
+        bindings: &HashMap<String, LitValue>,
+    ) -> Option<LitValue> {
+        match expr {
+            IRExpr::Literal(lit) => Some(lit.clone()),
+            IRExpr::Variable(name) => bindings.get(name).cloned(),
+            IRExpr::Binary { op, left, right } => {
+                let l = self.eval_ir_expr(left, bindings)?;
+                let r = self.eval_ir_expr(right, bindings)?;
+                self.eval_binary_op(op, l, r)
+            }
+            IRExpr::Unary { op, operand } => {
+                let v = self.eval_ir_expr(operand, bindings)?;
+                self.eval_unary_op(op, v)
+            }
+            // Operator-trait method calls (e.g. `a.add(b)`) are produced by
+            // the IR builder for every arithmetic/comparison operator. Fold
+            // them back to the matching binary operation at compile time.
+            IRExpr::MethodCall { object, method, args, .. } => {
+                let op = match method.as_str() {
+                    "add" => "+", "sub" => "-", "mul" => "*", "div" => "/",
+                    "rem" => "%", "eq" => "==", "ne" => "!=",
+                    "lt" => "<", "gt" => ">", "le" => "<=", "ge" => ">=",
+                    _ => return None,
+                };
+                let l = self.eval_ir_expr(object, bindings)?;
+                let r = self.eval_ir_expr(args.first()?, bindings)?;
+                self.eval_binary_op(op, l, r)
+            }
+            // file() macro: returns current source file path
+            IRExpr::Call { func, .. } if func == "file" => {
+                Some(LitValue::Str(self.current_file.clone()))
+            }
+            // line() macro: returns current line number (best-effort: 0)
+            IRExpr::Call { func, .. } if func == "line" => {
+                Some(LitValue::Int(0))
+            }
+            _ => None,
+        }
+    }
+
+    fn eval_binary_op(&self, op: &str, l: LitValue, r: LitValue) -> Option<LitValue> {
+        match (l, r) {
+            (LitValue::Int(a), LitValue::Int(b)) => match op {
+                "+" => Some(LitValue::Int(a + b)),
+                "-" => Some(LitValue::Int(a - b)),
+                "*" => Some(LitValue::Int(a * b)),
+                "/" => if b != 0 { Some(LitValue::Int(a / b)) } else { None },
+                "%" => if b != 0 { Some(LitValue::Int(a % b)) } else { None },
+                "==" => Some(LitValue::Bool(a == b)),
+                "!=" => Some(LitValue::Bool(a != b)),
+                "<" => Some(LitValue::Bool(a < b)),
+                ">" => Some(LitValue::Bool(a > b)),
+                "<=" => Some(LitValue::Bool(a <= b)),
+                ">=" => Some(LitValue::Bool(a >= b)),
+                "&&" => Some(LitValue::Bool(a != 0 && b != 0)),
+                "||" => Some(LitValue::Bool(a != 0 || b != 0)),
+                _ => None,
+            },
+            (LitValue::Float(a), LitValue::Float(b)) => match op {
+                "+" => Some(LitValue::Float(a + b)),
+                "-" => Some(LitValue::Float(a - b)),
+                "*" => Some(LitValue::Float(a * b)),
+                "/" => if b != 0.0 { Some(LitValue::Float(a / b)) } else { None },
+                "==" => Some(LitValue::Bool(a == b)),
+                "!=" => Some(LitValue::Bool(a != b)),
+                "<" => Some(LitValue::Bool(a < b)),
+                ">" => Some(LitValue::Bool(a > b)),
+                "<=" => Some(LitValue::Bool(a <= b)),
+                ">=" => Some(LitValue::Bool(a >= b)),
+                _ => None,
+            },
+            (LitValue::Str(a), LitValue::Str(b)) => match op {
+                "+" => Some(LitValue::Str(a + &b)),
+                "==" => Some(LitValue::Bool(a == b)),
+                "!=" => Some(LitValue::Bool(a != b)),
+                _ => None,
+            },
+            (LitValue::Bool(a), LitValue::Bool(b)) => match op {
+                "==" => Some(LitValue::Bool(a == b)),
+                "!=" => Some(LitValue::Bool(a != b)),
+                "&&" => Some(LitValue::Bool(a && b)),
+                "||" => Some(LitValue::Bool(a || b)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn eval_unary_op(&self, op: &str, v: LitValue) -> Option<LitValue> {
+        match v {
+            LitValue::Int(n) => match op {
+                "-" => Some(LitValue::Int(-n)),
+                "!" => Some(LitValue::Bool(n == 0)),
+                _ => None,
+            },
+            LitValue::Float(f) => match op {
+                "-" => Some(LitValue::Float(-f)),
+                _ => None,
+            },
+            LitValue::Bool(b) => match op {
+                "!" => Some(LitValue::Bool(!b)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 // ==================== AstVisitor 实现 ====================
@@ -444,14 +687,133 @@ impl AstVisitor for IRBuilder {
 
         self.pop_generic_scope();
 
+        let mut struct_attrs = Vec::new();
+        if Attribute::has_attr(node.get_attributes(), "no_gc") {
+            struct_attrs.push("no_gc".to_string());
+        }
+
         let ir_struct = IRStruct {
             name: name.clone(),
             generic_params: generic_params.clone(),
             fields,
+            attributes: struct_attrs,
         };
 
         self.structs.insert(name.clone(), ir_struct.clone());
         self.ir.structs.push(ir_struct);
+    }
+
+    fn visit_enum_definition(&mut self, node: &EnumDefinition) {
+        let name = node.get_name().to_string();
+        let generic_params = node.get_generic_params().clone();
+
+        self.push_generic_scope(&generic_params);
+
+        // Lower enum to a tagged struct: _tag (int) + _N payloads
+        let mut fields = vec![IRField {
+            name: "_tag".to_string(),
+            ty: DataType::Int,
+        }];
+
+        let mut variant_idx = 0i32;
+        for variant in node.get_variants() {
+            if let Some(ref payload) = variant.payload_type {
+                fields.push(IRField {
+                    name: format!("_{}", variant_idx),
+                    ty: self.ast_type_to_data_type(Some(payload.as_ref())),
+                });
+            }
+            variant_idx += 1;
+        }
+
+        let mut enum_attrs = Vec::new();
+        if Attribute::has_attr(node.get_attributes(), "no_gc") {
+            enum_attrs.push("no_gc".to_string());
+        }
+
+        let ir_struct = IRStruct {
+            name: name.clone(),
+            generic_params: generic_params.clone(),
+            fields,
+            attributes: enum_attrs,
+        };
+        self.structs.insert(name.clone(), ir_struct.clone());
+        self.ir.structs.push(ir_struct);
+
+        self.pop_generic_scope();
+
+        // Generate constructor methods for each variant as an impl block.
+        let mut methods = Vec::new();
+        variant_idx = 0;
+        for variant in node.get_variants() {
+            let ctor_name = variant.name.clone();
+            let has_payload = variant.payload_type.is_some();
+
+            let mut body_stmts = Vec::new();
+
+            // self._tag = variant_idx
+            body_stmts.push(IRStmt::Assignment {
+                target: IRExpr::MemberAccess {
+                    object: Box::new(IRExpr::Variable("self".to_string())),
+                    member: "_tag".to_string(),
+                },
+                value: IRExpr::Literal(LitValue::Int(variant_idx as i64)),
+            });
+
+            // If payload: self._N = value
+            if has_payload {
+                body_stmts.push(IRStmt::Assignment {
+                    target: IRExpr::MemberAccess {
+                        object: Box::new(IRExpr::Variable("self".to_string())),
+                        member: format!("_{}", variant_idx),
+                    },
+                    value: IRExpr::Variable("_val".to_string()),
+                });
+            }
+
+            // return self
+            body_stmts.push(IRStmt::Return(Some(IRExpr::Variable("self".to_string()))));
+
+            let mut params = vec![IRParam {
+                name: "self".to_string(),
+                ty: DataType::Struct(name.clone()),
+            }];
+
+            if has_payload {
+                params.push(IRParam {
+                    name: "_val".to_string(),
+                    ty: DataType::Int, // generic payload → i64
+                });
+            }
+
+            let ir_func = IRFunction {
+                name: ctor_name.clone(),
+                generic_params: generic_params.clone(),
+                params,
+                return_type: DataType::Struct(name.clone()),
+                body: Some(IRBlock { statements: body_stmts }),
+                is_main: false,
+                is_method: true,
+                struct_name: Some(name.clone()),
+                intrinsic: None,
+                is_variadic: false,
+            };
+
+            self.methods
+                .entry(name.clone())
+                .or_insert_with(Vec::new)
+                .push(ir_func.clone());
+            methods.push(ir_func);
+
+            variant_idx += 1;
+        }
+
+        let ir_impl = IRImpl {
+            struct_name: name.clone(),
+            generic_params,
+            methods,
+        };
+        self.ir.impls.push(ir_impl);
     }
 
     fn visit_impl_block(&mut self, node: &ImplBlock) {
@@ -593,6 +955,7 @@ impl AstVisitor for IRBuilder {
             is_method,
             struct_name: self.current_struct.clone(),
             intrinsic: Attribute::get_attr_value(node.get_attributes(), "intrinsic").map(|s| s.to_string()),
+            is_variadic: false,
         });
 
         // 处理函数体
@@ -602,6 +965,19 @@ impl AstVisitor for IRBuilder {
                 // self 作为隐式参数
             }
             body.accept(self);
+        }
+
+        // Capture #[expand] function body for compile-time evaluation.
+        // The body IR is cloned before finish_function moves current_block.
+        if Attribute::has_attr(node.get_attributes(), "expand") {
+            let param_names: Vec<String> = params.iter()
+                .filter(|p| p.name != "self")
+                .map(|p| p.name.clone())
+                .collect();
+            let body_block = IRBlock {
+                statements: self.current_block.clone(),
+            };
+            self.expand_functions.insert(name.clone(), (param_names, body_block));
         }
 
         self.pop_generic_scope();
@@ -693,23 +1069,25 @@ impl AstVisitor for IRBuilder {
             IRExpr::Literal(LitValue::Bool(false))
         };
 
-        // then 分支
+        // then 分支 — visit with self (preserving current_struct & structs
+        // context) by swapping out current_block.
         let then_block = if let Some(then_branch) = node.get_then_branch() {
-            let mut builder = IRBuilder::new();
-            then_branch.accept(&mut builder);
-            IRBlock {
-                statements: builder.current_block,
-            }
+            let saved = std::mem::take(&mut self.current_block);
+            then_branch.accept(self);
+            let block = IRBlock {
+                statements: std::mem::replace(&mut self.current_block, saved),
+            };
+            block
         } else {
             IRBlock { statements: vec![] }
         };
 
         // else 分支
         let else_block = if let Some(else_branch) = node.get_else_branch() {
-            let mut builder = IRBuilder::new();
-            else_branch.accept(&mut builder);
+            let saved = std::mem::take(&mut self.current_block);
+            else_branch.accept(self);
             Some(IRBlock {
-                statements: builder.current_block,
+                statements: std::mem::replace(&mut self.current_block, saved),
             })
         } else {
             None
@@ -727,10 +1105,10 @@ impl AstVisitor for IRBuilder {
         };
 
         let body = if let Some(b) = node.get_body() {
-            let mut builder = IRBuilder::new();
-            b.accept(&mut builder);
+            let saved = std::mem::take(&mut self.current_block);
+            b.accept(self);
             IRBlock {
-                statements: builder.current_block,
+                statements: std::mem::replace(&mut self.current_block, saved),
             }
         } else {
             IRBlock { statements: vec![] }
@@ -751,7 +1129,7 @@ impl AstVisitor for IRBuilder {
 
     fn visit_identifier(&mut self, node: &Identifier) {
         let name = node.get_name().to_string();
-        
+
         // 检查是否是泛型参数
         if let Some(_ty) = self.lookup_generic(&name) {
             // 泛型参数作为类型使用，不是变量
@@ -759,11 +1137,27 @@ impl AstVisitor for IRBuilder {
             self.push_expr(IRExpr::Variable(name));
             return;
         }
-        
+
         // 检查是否是 self
         if name == "self" {
             self.push_expr(IRExpr::Variable("self".to_string()));
             return;
+        }
+
+        // Inside a method body, bare field names (e.g. `_start`) are implicit
+        // `self._start` accesses. Resolve them to MemberAccess so the backend
+        // loads from the struct pointer instead of treating them as undefined
+        // local variables (which would silently return 0).
+        if let Some(ref sname) = self.current_struct {
+            if let Some(ir_struct) = self.structs.get(sname) {
+                if ir_struct.fields.iter().any(|f| f.name == name) {
+                    self.push_expr(IRExpr::MemberAccess {
+                        object: Box::new(IRExpr::Variable("self".to_string())),
+                        member: name,
+                    });
+                    return;
+                }
+            }
         }
 
         self.push_expr(IRExpr::Variable(name));
@@ -771,10 +1165,13 @@ impl AstVisitor for IRBuilder {
 
     fn visit_number_literal(&mut self, node: &NumberLiteral) {
         let v = node.get_value();
-        if v == (v as i64) as f64 {
-            self.push_expr(IRExpr::Literal(LitValue::Int(v as i64)));
-        } else {
+        // Use the source-level form to decide int vs float: a literal like
+        // `3.0` stays float even though its value is integral, so it matches
+        // float-typed parameters/returns. Plain `3` (no decimal point) is int.
+        if node.is_float_literal() {
             self.push_expr(IRExpr::Literal(LitValue::Float(v)));
+        } else {
+            self.push_expr(IRExpr::Literal(LitValue::Int(v as i64)));
         }
     }
 
@@ -924,7 +1321,7 @@ impl AstVisitor for IRBuilder {
                 obj.accept(self);
                 let object = self.pop_expr();
                 let method = member.get_member().to_string();
-                
+
                 self.push_expr(IRExpr::MethodCall {
                     object: Box::new(object),
                     method,
@@ -937,6 +1334,18 @@ impl AstVisitor for IRBuilder {
             // 命名空间路径调用 (::): std::io::println(args)
             if let Some(path_access) = callee_expr.as_any().downcast_ref::<PathAccess>() {
                 let func_name = path_access.get_full_name();
+
+                // Try #[expand] compile-time evaluation for qualified calls.
+                // Check both the full name (e.g. "mymodule::my_func") and
+                // the short member name (e.g. "my_func").
+                let member_name = path_access.get_member();
+                if let Some(val) = self.try_expand_call(&func_name, &args)
+                    .or_else(|| self.try_expand_call(member_name, &args))
+                {
+                    self.push_expr(IRExpr::Literal(val));
+                    return;
+                }
+
                 self.push_expr(IRExpr::Call {
                     func: func_name,
                     args,
@@ -948,7 +1357,13 @@ impl AstVisitor for IRBuilder {
             // 普通函数调用
             if let Some(id) = callee_expr.as_any().downcast_ref::<Identifier>() {
                 let func_name = id.get_name().to_string();
-                
+
+                // Try #[expand] compile-time evaluation.
+                if let Some(val) = self.try_expand_call(&func_name, &args) {
+                    self.push_expr(IRExpr::Literal(val));
+                    return;
+                }
+
                 // 检查是否是结构体构造函数
                 if self.structs.contains_key(&func_name) {
                     // 结构体字面量
@@ -966,7 +1381,7 @@ impl AstVisitor for IRBuilder {
                     });
                     return;
                 }
-                
+
                 self.push_expr(IRExpr::Call {
                     func: func_name,
                     args,
@@ -1115,15 +1530,76 @@ impl AstVisitor for IRBuilder {
         self.push_expr(match_result);
     }
 
+    fn visit_try_operator(&mut self, node: &TryOperator) {
+        // Desugar `expr?` into:
+        //   let __tmpN = expr;
+        //   if __tmpN.is_err() { return __tmpN; }
+        //   __tmpN.take()
+        //
+        // The IR builder generates statements in current_block and pushes
+        // the result expression onto the stack, matching the pattern used
+        // by visit_match_expression.
+
+        if let Some(inner) = node.get_inner() {
+            inner.accept(self);
+            let inner_expr = self.pop_expr();
+
+            // Generate a unique temp variable name
+            let tmp_name = format!("__try_tmp_{}", self.tmp_counter);
+            self.tmp_counter += 1;
+
+            // Declare the temp variable
+            self.current_block.push(IRStmt::Declaration {
+                name: tmp_name.clone(),
+                ty: DataType::Unknown,
+                init: Some(inner_expr),
+            });
+
+            // Build condition: __tmp.is_err()
+            // Access the _tag field (offset 0) and compare with 1.
+            let cond = IRExpr::Binary {
+                op: "==".to_string(),
+                left: Box::new(IRExpr::MemberAccess {
+                    object: Box::new(IRExpr::Variable(tmp_name.clone())),
+                    member: "_tag".to_string(),
+                }),
+                right: Box::new(IRExpr::Literal(LitValue::Int(1))),
+            };
+
+            // then-block: return __tmp (the whole Result, as Err)
+            let mut then_block = IRBlock { statements: Vec::new() };
+            then_block.statements.push(IRStmt::Return(Some(
+                IRExpr::Variable(tmp_name.clone()),
+            )));
+
+            // Push the if statement
+            self.current_block.push(IRStmt::If {
+                cond,
+                then_block,
+                else_block: None,
+            });
+
+            // Result: __tmp.take() → method call on temp variable
+            self.push_expr(IRExpr::MethodCall {
+                object: Box::new(IRExpr::Variable(tmp_name)),
+                method: "take".to_string(),
+                args: Vec::new(),
+                generic_args: Vec::new(),
+            });
+        } else {
+            self.push_expr(IRExpr::None);
+        }
+    }
+
     fn visit_range_expression(&mut self, node: &RangeExpression) {
         let mut args = Vec::new();
         for arg in node.get_arguments() {
             arg.accept(self);
             args.push(self.pop_expr());
         }
-        // range 被转换为函数调用
+        // Range 被转换为 range::new 调用
         self.push_expr(IRExpr::Call {
-            func: "range".to_string(),
+            func: "range::new".to_string(),
             args,
             generic_args: Vec::new(),
         });
@@ -1221,17 +1697,21 @@ impl AstVisitor for IRBuilder {
         let vars = node.get_loop_variables().clone();
         if !vars.is_empty() {
             if let Some(iterable) = node.get_iterable() {
-                let mut temp = IRBuilder::new();
-                iterable.accept(&mut temp);
-                let iter_expr = temp.pop_expr();
-                let mut body_builder = IRBuilder::new();
-                if let Some(b) = node.get_body() {
-                    b.accept(&mut body_builder);
-                }
+                iterable.accept(self);
+                let iter_expr = self.pop_expr();
+                let body = if let Some(b) = node.get_body() {
+                    let saved = std::mem::take(&mut self.current_block);
+                    b.accept(self);
+                    IRBlock {
+                        statements: std::mem::replace(&mut self.current_block, saved),
+                    }
+                } else {
+                    IRBlock { statements: vec![] }
+                };
                 self.current_block.push(IRStmt::For {
                     vars,
                     iterable: iter_expr,
-                    body: IRBlock { statements: body_builder.current_block },
+                    body,
                 });
             }
         }

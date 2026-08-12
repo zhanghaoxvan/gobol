@@ -1,4 +1,4 @@
-import io;
+import std;
 
 func add(a: int, b: int): int {
     a + b
@@ -6,5 +6,5 @@ func add(a: int, b: int): int {
 
 func main() {
     var result = add(5, 7);
-    io.println(@"5 + 7 = {result}");
+    io::println(@"5 + 7 = {result}");
 }

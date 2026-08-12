@@ -2,56 +2,53 @@
 #[builtin("int32")]
 struct int {}
 
-// Add trait implementation for int using intrinsic runtime functions
-impl int {
+// Trait implementations for int using intrinsic runtime functions.
+// Each binary operator (+,-,*,/,%,==,<,<=,>,>=) is desugared by the
+// compiler to a trait method call (add/sub/mul/.../eq/lt/...), so the
+// impls below provide the actual semantics via #[intrinsic] hooks.
+// Intrinsic methods have no body — the implementation is supplied by
+// the backend (#[intrinsic] → native Cranelift instruction).
+
+impl std::ops::Add for int {
     #[intrinsic("i32_add")]
-    func add(self, other: int): int {
-        // intrinsic: body replaced by direct C runtime call
-        self
-    }
+    func add(self, other: int): int;
+}
 
+impl std::ops::Sub for int {
     #[intrinsic("i32_sub")]
-    func sub(self, other: int): int {
-        self
-    }
+    func sub(self, other: int): int;
+}
 
+impl std::ops::Mul for int {
     #[intrinsic("i32_mul")]
-    func mul(self, other: int): int {
-        self
-    }
+    func mul(self, other: int): int;
+}
 
+impl std::ops::Div for int {
     #[intrinsic("i32_div")]
-    func div(self, other: int): int {
-        self
-    }
+    func div(self, other: int): int;
+}
 
+impl std::ops::Rem for int {
     #[intrinsic("i32_rem")]
-    func rem(self, other: int): int {
-        self
-    }
+    func rem(self, other: int): int;
+}
 
+impl std::cmp::Eq for int {
     #[intrinsic("i32_eq")]
-    func eq(self, other: int): bool {
-        false
-    }
+    func eq(self, other: int): bool;
+}
 
+impl std::cmp::Cmp for int {
     #[intrinsic("i32_lt")]
-    func lt(self, other: int): bool {
-        false
-    }
+    func lt(self, other: int): bool;
 
     #[intrinsic("i32_le")]
-    func le(self, other: int): bool {
-        false
-    }
+    func le(self, other: int): bool;
 
     #[intrinsic("i32_gt")]
-    func gt(self, other: int): bool {
-        false
-    }
+    func gt(self, other: int): bool;
 
     #[intrinsic("i32_ge")]
-    func ge(self, other: int): bool {
-        false
-    }
+    func ge(self, other: int): bool;
 }

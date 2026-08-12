@@ -1,0 +1,37 @@
+// Core Trait definitions for Gobol standard library
+// These traits define the operator protocol — binary operators (+,-,*,/,%)
+// are desugared to method calls on the corresponding trait.
+// Traits are namespaced with :: paths.
+
+trait Add<T> {
+    func add(self, other: T): T
+}
+
+trait Sub<T> {
+    func sub(self, other: T): T
+}
+
+trait Mul<T> {
+    func mul(self, other: T): T
+}
+
+trait Div<T> {
+    func div(self, other: T): T
+}
+
+trait Rem<T> {
+    func rem(self, other: T): T
+}
+
+// Index/IndexMut — array subscript traits.
+// `arr[i]` desugars to `arr.index(i)`.
+// `arr[i] = v` desugars to `arr.index_mut(i).write(v)`.
+// IndexMut returns a Ref<T> that provides read/write access to the slot.
+
+trait Index<T, R> {
+    func index(self, index: T): R
+}
+
+trait IndexMut<T, R> {
+    func index_mut(self, index: T): Ref<R>
+}

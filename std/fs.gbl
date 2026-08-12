@@ -1,0 +1,42 @@
+// std/fs.gbl — File system module.
+//
+// Provides file I/O via a `File` struct and convenience functions.
+// Low-level operations are `#[intrinsic]` and dispatched to the
+// C runtime (runtime.c) by the Cranelift backend.
+
+struct File {
+    _handle: int
+};
+
+impl File {
+    #[intrinsic("fs_open")]
+    func open(path: str, mode: str): File;
+
+    #[intrinsic("fs_read_all")]
+    func read_all(self): str;
+
+    #[intrinsic("fs_write")]
+    func write(self, data: str): int;
+
+    #[intrinsic("fs_close")]
+    func close(self);
+};
+
+// Convenience: read an entire file into a string.
+func read_to_string(path: str): str {
+    var f = File::open(path, "r");
+    var content = f.read_all();
+    f.close();
+    content
+}
+
+// Convenience: write a string to a file (truncating if exists).
+func write_file(path: str, content: str) {
+    var f = File::open(path, "w");
+    f.write(content);
+    f.close();
+}
+
+// Check if a path exists on the filesystem.
+#[intrinsic("fs_exists")]
+func exists(path: str): bool;

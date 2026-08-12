@@ -1,26 +1,26 @@
 #[library_features(hidden = true)]
 
-struct range {
+struct Range {
     _start: int,
     _end: int,
     _step: int
 }
 
-struct range_iterator {
+struct RangeIterator {
     _current: int,
     _end: int,
     _step: int
 }
 
-impl range {
-    func new(start: int, end: int): range {
+impl Range {
+    func new(start: int, end: int): Range {
         _start = start;
         _end = end;
         _step = 1;
         self
     }
 
-    func new(start: int, end: int, step: int): range {
+    func new(start: int, end: int, step: int): Range {
         _start = start;
         _end = end;
         _step = step;
@@ -44,8 +44,8 @@ impl range {
         result
     }
 
-    iter(self): range_iterator {
-        range_iterator(_start, _end, _step)
+    iter(self): RangeIterator {
+        RangeIterator(_start, _end, _step)
     }
 
     func start(self): int { _start }
@@ -66,8 +66,8 @@ impl range {
     }
 }
 
-impl range_iterator {
-    func new(current: int, end: int, step: int): range_iterator {
+impl RangeIterator {
+    func new(current: int, end: int, step: int): RangeIterator {
         _current = current;
         _end = end;
         _step = step;
@@ -85,5 +85,3 @@ impl range_iterator {
         (value, true)
     }
 }
-
-export(range, range_iterator)

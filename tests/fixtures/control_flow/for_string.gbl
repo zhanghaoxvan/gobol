@@ -1,8 +1,8 @@
-import io;
+import std;
 
 func main() {
     for ch in "Gobol" {
-        io.print(ch);
+        io::print(ch);
     }
-    io.print("\n");
+    io::print("\n");
 }

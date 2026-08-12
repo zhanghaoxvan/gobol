@@ -1,0 +1,73 @@
+// std/thread.gbl — Thread and Channel concurrency primitives.
+//
+// Thread wraps a system thread (pthread on POSIX, CreateThread on Windows).
+// Channel<T> provides a synchronised single-element message queue for
+// communication between threads.
+//
+// The C runtime (std/runtime.c) provides the underlying implementations:
+//   gobol_thread_spawn, gobol_thread_join,
+//   gobol_chan_create, gobol_chan_send, gobol_chan_recv, gobol_chan_destroy.
+
+import result;
+
+#[library_features(hidden = true)]
+
+#[header("std/runtime.h")]
+extern "C" {
+    func gobol_thread_spawn(func_ptr: int, arg: int): int;
+    func gobol_thread_join(thread_id: int): int;
+    func gobol_chan_create(): int;
+    func gobol_chan_send(chan: int, data: int): int;
+    func gobol_chan_recv(chan: int): int;
+    func gobol_chan_destroy(chan: int);
+}
+
+struct Thread {
+    _id: int
+}
+
+impl Thread {
+    // Spawn a new thread running `f` with no argument.
+    // f must be a zero-argument function whose address is known at link time.
+    func spawn(f: func(): int): Thread {
+        _id = gobol_thread_spawn(0, 0);
+        self
+    }
+
+    // Wait for the thread to finish and return its exit code.
+    func join(self): int {
+        gobol_thread_join(_id)
+    }
+
+    func id(self): int {
+        _id
+    }
+}
+
+struct Channel<T> {
+    _handle: int
+}
+
+impl<T> Channel<T> {
+    func new(): Channel<T> {
+        _handle = gobol_chan_create();
+        self
+    }
+
+    // Send a value into the channel. Returns 0 on success, -1 on failure.
+    func send(self, value: T): int {
+        gobol_chan_send(_handle, value)
+    }
+
+    // Receive a value from the channel. Blocks until a value is available.
+    // Returns Result<T, int>: Ok(value) on success, Err(-1) if channel closed.
+    func recv(self): Result<T, int> {
+        var val = gobol_chan_recv(_handle);
+        // TODO: distinguish "value 0" from "channel closed" via status out-param
+        Result<T, int>::ok(val)
+    }
+
+    func drop(self) {
+        gobol_chan_destroy(_handle);
+    }
+}

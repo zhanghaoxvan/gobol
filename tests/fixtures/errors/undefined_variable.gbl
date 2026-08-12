@@ -1,5 +1,5 @@
-import io;
+import std;
 
 func main() {
-    io.println(x);  // error: undefined variable
+    io::println(x);  // error: undefined variable
 }

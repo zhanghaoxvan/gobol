@@ -1,11 +1,13 @@
-func print<T>(value: T) {
-    __builtins__._print(value as str)
-}
+// Standard I/O module.
+//
+// io::print / io::println write to stdout (program output).
+// io::eprint / io::eprintln write to stderr (diagnostic output, always emitted).
+//
+// The underlying C runtime functions are declared in std/builtins.gbl.
+import builtins;
 
-func println<T>(value: T) {
-    print(@"{value}\n")
-}
-
-func read(): str {
-    __builtins__._read()
-}
+func print<T>(value: T)  { builtins::gobol_print(value as str); }
+func println<T>(value: T) { builtins::gobol_println(value as str); }
+func eprint<T>(value: T)  { builtins::gobol_eprint(value as str); }
+func eprintln<T>(value: T) { builtins::gobol_eprintln(value as str); }
+func read(): str { builtins::gobol_read() }

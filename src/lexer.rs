@@ -16,7 +16,7 @@ impl Lexer {
             "if", "else", "for", "return", "int", "float", "str", "func", "var", "val",
             "import", "in", "as", "true", "false", "while", "break", "continue",
             "null", "self", "export", "struct", "impl", "constructor", "new", "match",
-            "convert", "operator",
+            "convert", "operator", "extern", "trait", "enum",
         ];
         for k in &kw {
             keywords.insert(k.to_string());
@@ -92,6 +92,7 @@ impl Lexer {
         false
     }
 
+    #[allow(dead_code)]
     fn skip_attribute(&mut self) {
         self.consume(); // skip '#'
         self.consume(); // skip '['
@@ -190,8 +191,9 @@ impl Lexer {
                 continue;
             }
             if c == '#' && self.peek_next() == '[' {
-                self.skip_attribute();
-                continue;
+                // Don't skip — emit `#[` as a token so the parser can see
+                // attributes (`#[intrinsic(...)]`, `#[builtin(...)]`, etc.).
+                break;
             }
             break;
         }
@@ -319,6 +321,10 @@ impl Lexer {
                 self.consume();
                 if self.peek() == '.' {
                     self.consume();
+                    if self.peek() == '.' {
+                        self.consume();
+                        return Token::with_pos(TokenType::Operator, "...", tok_line, tok_col);
+                    }
                     return Token::with_pos(TokenType::Operator, "..", tok_line, tok_col);
                 }
                 Token::with_pos(TokenType::Operator, ".", tok_line, tok_col)
@@ -381,6 +387,14 @@ impl Lexer {
                 tok.line = tok_line;
                 tok.col = tok_col;
                 Token::with_pos(TokenType::FormatString, tok.value, tok_line, tok_col)
+            }
+            '#' => {
+                self.consume();
+                if self.peek() == '[' {
+                    self.consume();
+                    return Token::with_pos(TokenType::Operator, "#[", tok_line, tok_col);
+                }
+                Token::with_pos(TokenType::Unknown, "#", tok_line, tok_col)
             }
             _ => {
                 let unknown = self.consume().to_string();

@@ -76,6 +76,9 @@ pub trait AstVisitor {
     fn visit_struct_definition(&mut self, _node: &StructDefinition) {}
     fn visit_impl_block(&mut self, _node: &ImplBlock) {}
     fn visit_trait_definition(&mut self, _node: &TraitDefinition) {}
+    fn visit_enum_definition(&mut self, _node: &EnumDefinition) {}
+    fn visit_extern_func(&mut self, _node: &ExternFunc) {}
+    fn visit_extern_block(&mut self, _node: &ExternBlock) {}
     fn visit_binary_expression(&mut self, _node: &BinaryExpression) {}
     fn visit_unary_expression(&mut self, _node: &UnaryExpression) {}
     fn visit_cast_expression(&mut self, _node: &CastExpression) {}
@@ -94,6 +97,7 @@ pub trait AstVisitor {
     fn visit_array_literal(&mut self, _node: &ArrayLiteral) {}
     fn visit_struct_literal(&mut self, _node: &StructLiteral) {}
     fn visit_match_expression(&mut self, _node: &MatchExpression) {}
+    fn visit_try_operator(&mut self, _node: &TryOperator) {}
 }
 
 // ==================== Node ====================
@@ -508,6 +512,123 @@ impl Statement for Function {
     }
 }
 
+// ==================== ExternFunc ====================
+
+pub struct ExternFunc {
+    name: String,
+    params: Vec<Box<Parameter>>,
+    return_type: Option<Box<dyn Type>>,
+    is_variadic: bool,
+    pub attributes: Vec<Attribute>,
+}
+
+impl ExternFunc {
+    pub fn new(
+        name: impl Into<String>,
+        params: Vec<Box<Parameter>>,
+        return_type: Option<Box<dyn Type>>,
+        is_variadic: bool,
+    ) -> Self {
+        ExternFunc {
+            name: name.into(),
+            params,
+            return_type,
+            is_variadic,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn with_attributes(mut self, attrs: Vec<Attribute>) -> Self {
+        self.attributes = attrs;
+        self
+    }
+
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn get_params(&self) -> &Vec<Box<Parameter>> {
+        &self.params
+    }
+
+    pub fn get_return_type(&self) -> Option<&dyn Type> {
+        self.return_type.as_deref()
+    }
+
+    pub fn is_variadic(&self) -> bool {
+        self.is_variadic
+    }
+
+    pub fn get_attributes(&self) -> &Vec<Attribute> {
+        &self.attributes
+    }
+}
+
+impl AstNode for ExternFunc {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_extern_func(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Statement for ExternFunc {
+    fn as_statement(&self) -> &dyn Statement {
+        self
+    }
+}
+
+// ==================== ExternBlock ====================
+
+pub struct ExternBlock {
+    library: Option<String>,
+    functions: Vec<ExternFunc>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl ExternBlock {
+    pub fn new(library: Option<String>, functions: Vec<ExternFunc>) -> Self {
+        ExternBlock {
+            library,
+            functions,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn with_attributes(mut self, attrs: Vec<Attribute>) -> Self {
+        self.attributes = attrs;
+        self
+    }
+
+    pub fn get_library(&self) -> Option<&str> {
+        self.library.as_deref()
+    }
+
+    pub fn get_functions(&self) -> &Vec<ExternFunc> {
+        &self.functions
+    }
+
+    pub fn get_attributes(&self) -> &Vec<Attribute> {
+        &self.attributes
+    }
+}
+
+impl AstNode for ExternBlock {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_extern_block(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Statement for ExternBlock {
+    fn as_statement(&self) -> &dyn Statement {
+        self
+    }
+}
+
 // ==================== ImportStatement ====================
 
 pub struct ImportStatement {
@@ -635,6 +756,7 @@ pub enum ImplItem {
 
 pub struct ImplBlock {
     struct_name: String,
+    trait_name: Option<String>,
     generic_params: Vec<String>,
     items: Vec<ImplItem>,
     pub attributes: Vec<Attribute>,
@@ -644,16 +766,24 @@ impl ImplBlock {
     pub fn new(struct_name: impl Into<String>, generic_params: Vec<String>, items: Vec<ImplItem>) -> Self {
         ImplBlock {
             struct_name: struct_name.into(),
+            trait_name: None,
             generic_params,
             items,
             attributes: Vec::new(),
         }
     }
+
+    pub fn with_trait(mut self, trait_name: impl Into<String>) -> Self {
+        self.trait_name = Some(trait_name.into());
+        self
+    }
+
     pub fn with_attributes(mut self, attrs: Vec<Attribute>) -> Self {
         self.attributes = attrs;
         self
     }
     pub fn get_struct_name(&self) -> &str { &self.struct_name }
+    pub fn get_trait_name(&self) -> Option<&str> { self.trait_name.as_deref() }
     pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
     pub fn get_items(&self) -> &Vec<ImplItem> { &self.items }
     pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
@@ -676,6 +806,7 @@ pub struct TraitMethod {
     pub name: String,
     pub parameters: Vec<Box<Parameter>>,
     pub return_type: Option<Box<dyn Type>>,
+    pub attributes: Vec<Attribute>,
 }
 
 pub struct TraitDefinition {
@@ -714,6 +845,66 @@ impl AstNode for TraitDefinition {
 }
 
 impl Statement for TraitDefinition {
+    fn as_statement(&self) -> &dyn Statement { self }
+}
+
+// ==================== EnumDefinition ====================
+
+/// A single variant of an enum, e.g. `Some(T)` or `None`.
+pub struct EnumVariant {
+    pub name: String,
+    /// Optional payload type. `None` means a unit variant like `None`.
+    pub payload_type: Option<Box<dyn Type>>,
+}
+
+impl EnumVariant {
+    pub fn new(name: impl Into<String>, payload_type: Option<Box<dyn Type>>) -> Self {
+        EnumVariant { name: name.into(), payload_type }
+    }
+}
+
+/// An enum definition, lowered to a tagged struct by the semantic analyzer.
+///
+/// ```gobol
+/// enum Option<T> { Some(T), None }
+/// enum Result<T, E> { Ok(T), Err(E) }
+/// ```
+pub struct EnumDefinition {
+    name: String,
+    generic_params: Vec<String>,
+    variants: Vec<EnumVariant>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl EnumDefinition {
+    pub fn new(name: impl Into<String>, variants: Vec<EnumVariant>, generic_params: Vec<String>) -> Self {
+        EnumDefinition {
+            name: name.into(),
+            variants,
+            generic_params,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn with_attributes(mut self, attrs: Vec<Attribute>) -> Self {
+        self.attributes = attrs;
+        self
+    }
+
+    pub fn get_name(&self) -> &str { &self.name }
+    pub fn get_variants(&self) -> &Vec<EnumVariant> { &self.variants }
+    pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
+    pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
+}
+
+impl AstNode for EnumDefinition {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_enum_definition(self);
+    }
+    fn as_any(&self) -> &dyn Any { self }
+}
+
+impl Statement for EnumDefinition {
     fn as_statement(&self) -> &dyn Statement { self }
 }
 
@@ -1392,15 +1583,24 @@ impl Expression for Identifier {
 
 pub struct NumberLiteral {
     value: f64,
+    is_float: bool,
 }
 
 impl NumberLiteral {
     pub fn new(value: f64) -> Self {
-        NumberLiteral { value }
+        NumberLiteral { value, is_float: false }
+    }
+
+    pub fn new_float(value: f64) -> Self {
+        NumberLiteral { value, is_float: true }
     }
 
     pub fn get_value(&self) -> f64 {
         self.value
+    }
+
+    pub fn is_float_literal(&self) -> bool {
+        self.is_float
     }
 }
 
@@ -1564,8 +1764,21 @@ impl FormatString {
         let mut var_name = String::new();
         let mut in_brace = false;
         let mut start_pos: i32 = 0;
-
-        for (i, c) in value.chars().enumerate() {
+        let chars: Vec<char> = value.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            // `{{` / `}}` — literal brace escape in format strings:
+            // `"Hello {{}}"` ⇒ `"Hello {}"`. These are consumed as a pair
+            // and never open or close a variable interpolation slot.
+            if c == '{' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                i += 2;
+                continue;
+            }
+            if c == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                i += 2;
+                continue;
+            }
             if c == '{' && !in_brace {
                 in_brace = true;
                 var_name.clear();
@@ -1584,12 +1797,26 @@ impl FormatString {
             } else if in_brace {
                 var_name.push(c);
             }
+            i += 1;
         }
 
         let mut res = String::new();
         let chars: Vec<char> = value.chars().collect();
         let mut i = 0;
         while i < chars.len() {
+            // `{{` → `{`, `}}` → `}` (format-string literal brace escape).
+            // Checked *before* the backslash branch so @"{{}}" produces the
+            // final string "Hello {}" even though the braces are doubled.
+            if i + 1 < chars.len() && chars[i] == '{' && chars[i + 1] == '{' {
+                res.push('{');
+                i += 2;
+                continue;
+            }
+            if i + 1 < chars.len() && chars[i] == '}' && chars[i + 1] == '}' {
+                res.push('}');
+                i += 2;
+                continue;
+            }
             if chars[i] == '\\' && i + 1 < chars.len() {
                 match chars[i + 1] {
                     'n' => {
@@ -2035,6 +2262,42 @@ impl Statement for MatchExpression {
 }
 
 impl Expression for MatchExpression {
+    fn as_expression(&self) -> &dyn Expression {
+        self
+    }
+}
+
+// ==================== TryOperator ====================
+
+/// The `?` postfix operator: `expr?`.
+///
+/// If `expr` is `Result<T, E>` and is `Err`, the current function returns
+/// immediately with that `Err`.  Otherwise the expression evaluates to the
+/// inner `T` value.
+pub struct TryOperator {
+    inner: Option<Box<dyn Expression>>,
+}
+
+impl TryOperator {
+    pub fn new(inner: Option<Box<dyn Expression>>) -> Self {
+        TryOperator { inner }
+    }
+
+    pub fn get_inner(&self) -> Option<&dyn Expression> {
+        self.inner.as_deref().map(|e| e.as_expression())
+    }
+}
+
+impl AstNode for TryOperator {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_try_operator(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Expression for TryOperator {
     fn as_expression(&self) -> &dyn Expression {
         self
     }

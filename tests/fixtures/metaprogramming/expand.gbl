@@ -1,0 +1,42 @@
+import std;
+
+// #[expand] functions are evaluated at compile time when all arguments
+// are literals. The call site is replaced with the resulting constant.
+#[expand]
+func square(n: int): int {
+    n * n
+}
+
+#[expand]
+func const_add(a: int, b: int): int {
+    a + b
+}
+
+#[expand]
+func greet(name: str): str {
+    "hello, " + name
+}
+
+// file() and line() macros in #[expand] context return compile-time values.
+#[expand]
+func source_file(): str {
+    file()
+}
+
+func main() {
+    // square(7) is folded to 49 at compile time.
+    var s = square(7);
+    io::println(@"square(7) = {s}");
+
+    // const_add(3, 4) is folded to 7 at compile time.
+    var sum = const_add(3, 4);
+    io::println(@"3 + 4 = {sum}");
+
+    // String concatenation also works at compile time.
+    var msg = greet("world");
+    io::println(msg);
+
+    // file() expands to the current source path.
+    var f = source_file();
+    io::println(f);
+}

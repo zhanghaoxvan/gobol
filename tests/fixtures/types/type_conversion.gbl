@@ -1,4 +1,4 @@
-import io;
+import std;
 
 struct Point {
     x: int,
@@ -19,5 +19,5 @@ impl Point {
 
 func main() {
     var p = Point(3, 4);
-    io.println(@"p as str = {p as str}");
+    io::println(@"p as str = {p as str}");
 }

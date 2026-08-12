@@ -1,0 +1,61 @@
+// std/result.gbl — Error handling via Result<T, E>.
+//
+// Result is declared as a native enum. The compiler lowers it to a tagged
+// struct with _tag (0 = Ok, 1 = Err) and payload fields _0, _1.
+// Variant constructors Ok(value) and Err(error) are auto-generated.
+//
+// The ? operator desugars at the IR level to:
+//   let __tmp = expr;
+//   if __tmp._tag == 1 { return __tmp; }
+//   __tmp.take()
+
+#[library_features(hidden = true)]
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+impl<T, E> Result<T, E> {
+    func is_ok(self): bool {
+        _tag == 0
+    }
+
+    func is_err(self): bool {
+        _tag == 1
+    }
+
+    // Unwrap the value, panicking if Err.
+    func take(self): T {
+        if _tag == 1 {
+            panic("Result.take called on Err");
+        }
+        _0
+    }
+
+    // Return the value, or `default` if Err.
+    func value(self, default: T): T {
+        if _tag == 0 { _0 } else { default }
+    }
+
+    // Return the value, or compute a fallback from the error.
+    func or_else(self, fallback: func(E): T): T {
+        if _tag == 0 {
+            _0
+        } else {
+            fallback(_1)
+        }
+    }
+
+    func unwrap_or(self, default: T): T {
+        if _tag == 0 { _0 } else { default }
+    }
+
+    func map<U>(self, f: func(T): U): Result<U, E> {
+        if _tag == 0 {
+            Result<U, E>::Ok(f(_0))
+        } else {
+            Result<U, E>::Err(_1)
+        }
+    }
+}

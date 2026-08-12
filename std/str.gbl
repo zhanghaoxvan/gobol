@@ -1,0 +1,20 @@
+// std/str.gbl — String extension methods.
+//
+// Provides utility methods on the built-in `str` primitive type.
+// All methods are `#[intrinsic]` — the actual implementation is
+// supplied by the C runtime (runtime.c) and dispatched directly
+// by the Cranelift backend.
+
+impl str {
+    #[intrinsic("str_len")]
+    func len(self): int;
+
+    #[intrinsic("str_contains")]
+    func contains(self, substr: str): bool;
+
+    #[intrinsic("str_trim")]
+    func trim(self): str;
+
+    #[intrinsic("str_replace")]
+    func replace(self, from: str, to: str): str;
+};

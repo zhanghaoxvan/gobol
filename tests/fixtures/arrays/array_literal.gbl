@@ -1,9 +1,9 @@
-import io;
+import std;
 
 func main() {
     var arr: int[] = [1, 2, 3, 4, 5];
     for i, v in arr {
-        io.print(v);
+        io::print(v);
     }
-    io.print("\n");
+    io::print("\n");
 }

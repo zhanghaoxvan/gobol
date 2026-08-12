@@ -1,4 +1,4 @@
-import io;
+import std;
 
 func main() {
     var grade = match 85 {
@@ -6,5 +6,5 @@ func main() {
         90 => "A",
         _ => "B"
     };
-    io.println(@"grade: {grade}");
+    io::println(@"grade: {grade}");
 }

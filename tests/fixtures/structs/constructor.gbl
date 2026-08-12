@@ -1,4 +1,4 @@
-import io;
+import std;
 
 struct Rect {
     width: int,
@@ -18,6 +18,6 @@ impl Rect {
 }
 
 func main() {
-    var r = Rect.new(10, 20);
-    io.println(@"area: {r.area()}");
+    var r = Rect::new(10, 20);
+    io::println(@"area: {r.area()}");
 }

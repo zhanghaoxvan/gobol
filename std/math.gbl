@@ -7,7 +7,7 @@ val TAU: float = 6.28318530717958647692;
 
 // 绝对值
 func abs(x: float): float {
-    if x < 0 {
+    if x < 0.0 {
         return -x;
     }
     x
@@ -15,7 +15,7 @@ func abs(x: float): float {
 
 // 最大值
 func max(a: float, b: float): float {
-    if a > b { 
+    if a > b {
         a
     } else {
         b
@@ -24,7 +24,7 @@ func max(a: float, b: float): float {
 
 // 最小值
 func min(a: float, b: float): float {
-    if a < b { 
+    if a < b {
         a
     } else {
         b
@@ -33,7 +33,7 @@ func min(a: float, b: float): float {
 
 // 取整（向零）
 func trunc(x: float): float {
-    if x >= 0 {
+    if x >= 0.0 {
         return floor(x);
     }
     return ceil(x);
@@ -41,11 +41,11 @@ func trunc(x: float): float {
 
 // 向下取整
 func floor(x: float): float {
-    if x == 0 { 
-        return 0.0; 
+    if x == 0.0 {
+        return 0.0;
     }
     var i: int = x as int;
-    if x < 0 && x != i as float {
+    if x < 0.0 && x != i as float {
         return (i - 1) as float;
     }
     i as float
@@ -67,14 +67,24 @@ func sqrt(x: float): float {
 
 // 向上取整
 func ceil(x: float): float {
-    if x == 0 { 
-        return 0.0; 
+    if x == 0.0 {
+        return 0.0;
     }
     var i: int = x as int;
-    if x > 0 && x != i as float {
+    if x > 0.0 && x != i as float {
         return (i + 1) as float;
     }
     i as float
 }
 
-export(abs, max, min, trunc, floor, ceil, sqrt, PI, E, TAU)
+// ==================== 三角函数与幂运算（intrinsic）====================
+// These require libm and are dispatched directly to the C runtime.
+
+#[intrinsic("math_sin")]
+func sin(x: float): float;
+
+#[intrinsic("math_cos")]
+func cos(x: float): float;
+
+#[intrinsic("math_pow")]
+func pow(base: float, exp: float): float;

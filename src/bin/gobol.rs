@@ -3,7 +3,7 @@ use gobol::ast_printer::AstPrinter;
 use gobol::cranelift::CraneliftBackend;
 use gobol::error::ErrorFormatter;
 use gobol::lexer::Lexer;
-use gobol::semantic_analyzer::SemanticAnalyzer;
+use gobol::semantic_analyzer::{SemanticAnalyzer, BuildMode};
 use gobol::token;
 use std::env;
 use std::fs;
@@ -11,38 +11,33 @@ use std::path::{Path, PathBuf};
 use std::process;
 use colored::*;
 
-/// Compilation / execution mode selected from the command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    /// JIT: compile in-memory and run immediately (default).
-    Jit,
-    /// AOT: emit a standalone binary via Cranelift ObjectModule, then run it.
-    AotRun,
-    /// AOT: emit a standalone binary, do not run (--release / -c).
-    AotNoRun,
-}
-
 fn resolve_module_file(path_parts: &[String], lib_paths: &[String], main_file: &str) -> Option<String> {
     let relative = format!("{}.gbl", path_parts.join("/"));
+    let mod_relative = format!("{}/mod.gbl", path_parts.join("/"));
+    let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
+
     if let Some(parent) = Path::new(main_file).parent() {
         let p = parent.join(&relative);
+        if p.exists() { return p.to_str().map(|s| s.to_string()); }
+        let p = parent.join(&mod_relative);
+        if p.exists() { return p.to_str().map(|s| s.to_string()); }
+        let p = parent.join(&setup_relative);
         if p.exists() { return p.to_str().map(|s| s.to_string()); }
     }
     for lp in lib_paths {
         let p = Path::new(lp).join(&relative);
         if p.exists() { return p.to_str().map(|s| s.to_string()); }
+        let p = Path::new(lp).join(&mod_relative);
+        if p.exists() { return p.to_str().map(|s| s.to_string()); }
+        let p = Path::new(lp).join(&setup_relative);
+        if p.exists() { return p.to_str().map(|s| s.to_string()); }
     }
     if Path::new(&relative).exists() { return Some(relative); }
+    if Path::new(&mod_relative).exists() { return Some(mod_relative); }
+    if Path::new(&setup_relative).exists() { return Some(setup_relative); }
     None
 }
 
-/// Locate the C runtime (`runtime.c`) used for AOT linking.
-///
-/// Search order:
-/// 1. `$GOBOL_RUNTIME` env var (explicit override).
-/// 2. `<exe_dir>/../lib/runtime.c` (installed layout: ~/.gobol/bin + ~/.gobol/lib).
-/// 3. `<exe_dir>/../src/runtime.c` (cargo target/release -> src).
-/// 4. `<exe_dir>/runtime.c` (alongside the binary).
 fn find_runtime_c() -> Option<PathBuf> {
     if let Ok(p) = env::var("GOBOL_RUNTIME") {
         let p = PathBuf::from(p);
@@ -53,8 +48,13 @@ fn find_runtime_c() -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidates = [
+                // Preferred: std/ next to workspace root (dev layout)
+                dir.join("..").join("..").join("std").join("runtime.c"),
+                dir.join("..").join("std").join("runtime.c"),
+                dir.join("std").join("runtime.c"),
+                // Installed layout: lib/runtime.c
                 dir.join("..").join("lib").join("runtime.c"),
-                dir.join("..").join("..").join("src").join("runtime.c"),
+                dir.join("..").join("..").join("lib").join("runtime.c"),
                 dir.join("..").join("src").join("runtime.c"),
                 dir.join("runtime.c"),
             ];
@@ -64,6 +64,12 @@ fn find_runtime_c() -> Option<PathBuf> {
                 }
             }
         }
+    }
+    // Explicit fallback relative to CWD (works for `gobol build` invocations
+    // run directly from the repository root).
+    let rel = PathBuf::from("std/runtime.c");
+    if rel.exists() {
+        return Some(rel);
     }
     None
 }
@@ -82,26 +88,22 @@ fn print_help() {
     println!("Gobol - A statically compiled programming language");
     println!();
     println!("Usage:");
-    println!("  gobol <filename> [options]              Compile and run via JIT (Cranelift, default)");
-    println!("  gobol <filename> --release [-o name]    AOT: emit a standalone binary (no run)");
-    println!("  gobol <filename> --aot-run [-o name]    AOT: emit binary then run it");
-    println!("  gobol <filename> -c [-o name]           AOT compile only (alias for --release)");
-    println!("  gobol --version                          Show version information");
-    println!("  gobol --help                             Show this help message");
+    println!("  gobol build <file.gbl> [--debug|--release] [-o name] [--lib-path path]  Compile to binary");
+    println!("  gobol <file.gbl>                                                           Alias for 'gobol build <file> --debug'");
+    println!("  gobol --version                                                            Show version information");
+    println!("  gobol --help                                                               Show this help message");
     println!();
     println!("Options:");
-    println!("  --release                AOT mode: produce an optimized binary on disk");
-    println!("  --aot-run                AOT mode: produce binary and run it");
-    println!("  --jit, --debug           Explicit JIT mode (default)");
-    println!("  -c                        Compile only (AOT, do not run)");
-    println!("  -o <name>                Output binary name (AOT mode only)");
+    println!("  --debug                  Debug build (default)");
+    println!("  --release                Release build (optimized)");
+    println!("  -o <name>                Output binary name");
     println!("  --verbose, -v            Enable verbose output");
     println!("  --lib-path <path>        Add a library search path (can be used multiple times)");
     println!();
     println!("Examples:");
-    println!("  gobol main.gbl                         Run via JIT");
-    println!("  gobol main.gbl --verbose               Run with verbose output");
-    println!("  gobol main.gbl --release -o myapp      Produce ./myapp via AOT");
+    println!("  gobol main.gbl                         Debug build (alias for 'gobol build main.gbl --debug')");
+    println!("  gobol build main.gbl                   Debug build");
+    println!("  gobol build main.gbl --release -o myapp  Release build, output ./myapp");
 }
 
 fn main() {
@@ -121,28 +123,13 @@ fn main() {
 
     let is_verbose = args.iter().any(|s| s == "--verbose" || s == "-v");
 
-    // Mode selection: --release / -c => AOT (no run); --aot-run => AOT + run;
-    // --jit / --debug => JIT (default).
-    let is_aot_run = args.iter().any(|s| s == "--aot-run");
-    let is_aot_norun = !is_aot_run && args.iter().any(|s| s == "--release" || s == "-c");
-    let is_jit_explicit = args.iter().any(|s| s == "--jit" || s == "--debug");
-    let mode = if is_aot_run {
-        Mode::AotRun
-    } else if is_aot_norun {
-        Mode::AotNoRun
-    } else {
-        // --jit/--debug or default => JIT (run immediately).
-        let _ = is_jit_explicit;
-        Mode::Jit
-    };
-
-    // Parse -o <name> (AOT output name).
+    let mut build_mode = BuildMode::Debug;
     let mut out_name: Option<String> = None;
-
-    // Parse --lib-path arguments (support multiple)
     let mut lib_paths_from_cli: Vec<String> = Vec::new();
+
     let mut i = 1;
-    let mut filename = None;
+    let mut filename: Option<String> = None;
+    let mut has_build_subcommand = false;
 
     while i < args.len() {
         if args[i] == "--lib-path" && i + 1 < args.len() {
@@ -156,18 +143,33 @@ fn main() {
         } else if args[i] == "-o" && i + 1 < args.len() {
             out_name = Some(args[i + 1].clone());
             i += 2;
-        } else if matches!(args[i].as_str(),
-            "--verbose" | "-v" | "--jit" | "--debug" | "--release" | "-c" | "--aot-run"
-        ) {
+        } else if args[i] == "--release" {
+            build_mode = BuildMode::Release;
+            i += 1;
+        } else if args[i] == "--debug" {
+            build_mode = BuildMode::Debug;
+            i += 1;
+        } else if matches!(args[i].as_str(), "--verbose" | "-v") {
             i += 1;
         } else if args[i].starts_with("-") {
             i += 1;
         } else {
             if filename.is_none() {
-                filename = Some(args[i].clone());
+                if args[i] == "build" && !has_build_subcommand {
+                    has_build_subcommand = true;
+                    i += 1;
+                } else {
+                    filename = Some(args[i].clone());
+                    i += 1;
+                }
+            } else {
+                i += 1;
             }
-            i += 1;
         }
+    }
+
+    if !has_build_subcommand && filename.is_some() {
+        build_mode = BuildMode::Debug;
     }
 
     let filename = match filename {
@@ -231,7 +233,6 @@ fn main() {
         println!("======= Step 3: Semantic Analysis =======");
     }
 
-    // Build lib search paths
     let mut lib_paths = Vec::new();
 
     if let Some(parent) = Path::new(&filename).parent() {
@@ -253,8 +254,22 @@ fn main() {
 
     if let Ok(exe_path) = env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
+            // target/release/  →  target/std  (installed layout)
             if let Some(p) = exe_dir.parent().map(|d| d.join("std")).and_then(|d| d.to_str().map(|s| s.to_string())) {
                 lib_paths.push(p);
+                // Also add the parent so `import std;` can find std/mod.gbl
+                if let Some(pp) = exe_dir.parent().and_then(|d| d.to_str().map(|s| s.to_string())) {
+                    lib_paths.push(pp);
+                }
+            }
+            // target/release/  →  <workspace>/std  (dev builds)
+            if let Some(workspace) = exe_dir.parent().and_then(|d| d.parent()) {
+                if let Some(p) = workspace.join("std").to_str().map(|s| s.to_string()) {
+                    lib_paths.push(p);
+                }
+                if let Some(p) = workspace.to_str().map(|s| s.to_string()) {
+                    lib_paths.push(p);
+                }
             }
             if let Some(p) = exe_dir.join("std").to_str().map(|s| s.to_string()) {
                 lib_paths.push(p);
@@ -281,13 +296,14 @@ fn main() {
     semantic_analyzer.set_main_file(&filename);
     semantic_analyzer.set_lib_paths(lib_paths.clone());
     semantic_analyzer.set_error_formatter(error_fmt.clone());
+    semantic_analyzer.set_build_mode(build_mode);
     let semantic_passed = semantic_analyzer.analyze(&prog);
     if !semantic_passed {
         process::exit(1);
     }
 
-    // Build IR from AST
-    let ir_builder = gobol::ir::IRBuilder::new();
+    let mut ir_builder = gobol::ir::IRBuilder::new();
+    ir_builder.set_current_file(filename.clone());
     let mut ir = match ir_builder.build(&prog) {
         Ok(ir) => ir,
         Err(errors) => {
@@ -299,103 +315,184 @@ fn main() {
         }
     };
 
-    // Process imports
-    for stmt in prog.get_statements() {
-        if let Some(import_stmt) = stmt.as_any().downcast_ref::<gobol::ast::ImportStatement>() {
-            let module_name = import_stmt.get_module_name();
-            let path_parts: Vec<String> = module_name
-                .split("::")
-                .flat_map(|s| s.split('.'))
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty())
+    fn resolve_module_file_relative(path_parts: &[String], parent_file: &str) -> Option<String> {
+        let relative = format!("{}.gbl", path_parts.join("/"));
+        let mod_relative = format!("{}/mod.gbl", path_parts.join("/"));
+        let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
+        if let Some(parent) = Path::new(parent_file).parent() {
+            for rel in [&relative, &mod_relative, &setup_relative] {
+                let p = parent.join(rel);
+                if p.exists() {
+                    return p.to_str().map(|s| s.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn load_module_into_ir(
+        module_name: &str,
+        module_file: &str,
+        lib_paths: &[String],
+        error_fmt: &ErrorFormatter,
+        ir: &mut gobol::ir::GobolIR,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        if !visited.insert(module_file.to_string()) {
+            return;
+        }
+        let source = match fs::read_to_string(module_file) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mod_lexer = gobol::lexer::Lexer::new(source);
+        let mut mod_builder = gobol::ast_builder::AstBuilder::new(mod_lexer);
+        mod_builder.set_error_formatter(error_fmt.clone());
+        let mod_prog = match mod_builder.build() {
+            Some(p) => p,
+            None => return,
+        };
+        if mod_builder.has_error() {
+            return;
+        }
+        let mut mod_ir_builder = gobol::ir::IRBuilder::new();
+        mod_ir_builder.set_current_file(module_file);
+        let mod_ir = match mod_ir_builder.build(&mod_prog) {
+            Ok(ir) => ir,
+            Err(_) => return,
+        };
+
+        let short_name = module_name.rsplit("::").next().unwrap_or(module_name);
+        let is_builtin = short_name == "io";
+
+        let mut existing_names: std::collections::HashSet<String> =
+            ir.functions.iter().map(|f| f.name.clone()).collect();
+
+        for f in &mod_ir.functions {
+            if f.is_main || f.is_method {
+                continue;
+            }
+            let mut f_named = f.clone();
+            if is_builtin {
+                f_named.body = None;
+            }
+            f_named.name = format!("{}::{}", module_name, f.name);
+            if existing_names.insert(f_named.name.clone()) {
+                ir.functions.push(f_named.clone());
+            }
+            if short_name != module_name {
+                let mut f_short = f_named.clone();
+                f_short.name = format!("{}::{}", short_name, f.name);
+                if existing_names.insert(f_short.name.clone()) {
+                    ir.functions.push(f_short);
+                }
+            }
+            let mut f_bare = f_named.clone();
+            f_bare.name = f.name.clone();
+            if existing_names.insert(f_bare.name.clone()) {
+                ir.functions.push(f_bare);
+            }
+        }
+        for imp in &mod_ir.impls {
+            // Dedup by (struct_name, method_name, param_count) — skip methods
+            // that are already present in the IR. This allows overloaded
+            // methods (same name, different arity) to coexist.
+            let struct_name = imp.struct_name.clone();
+            let existing_sigs: std::collections::HashSet<(String, usize)> = ir
+                .impls
+                .iter()
+                .filter(|e| e.struct_name == struct_name)
+                .flat_map(|e| e.methods.iter().map(|m| (m.name.clone(), m.params.len())))
                 .collect();
-            if let Some(module_path) = resolve_module_file(&path_parts, &lib_paths, &filename) {
-                if let Ok(source) = fs::read_to_string(&module_path) {
-                    let mod_lexer = gobol::lexer::Lexer::new(source);
-                    let mut mod_builder = gobol::ast_builder::AstBuilder::new(mod_lexer);
-                    mod_builder.set_error_formatter(error_fmt.clone());
-                    if let Some(mod_prog) = mod_builder.build() {
-                        if !mod_builder.has_error() {
-                            let mod_ir_builder = gobol::ir::IRBuilder::new();
-                            if let Ok(mod_ir) = mod_ir_builder.build(&mod_prog) {
-                                let alias = import_stmt.get_alias().map(|a| a.to_string());
-                                let is_builtin = module_name == "io" || module_name.ends_with("::io");
-                                for f in &mod_ir.functions {
-                                    if !f.is_main && !f.is_method {
-                                        let mut f = f.clone();
-                                        if is_builtin { f.body = None; }
-                                        if let Some(ref a) = alias {
-                                            let mut fa = f.clone();
-                                            fa.name = format!("{}::{}", a, f.name);
-                                            ir.functions.push(fa);
-                                        }
-                                        f.name = format!("{}::{}", module_name, f.name);
-                                        ir.functions.push(f);
-                                    }
-                                }
-                                for imp in &mod_ir.impls {
-                                    ir.impls.push(imp.clone());
-                                }
-                            }
-                        }
-                    }
+            let new_methods: Vec<&gobol::ir::IRFunction> = imp
+                .methods
+                .iter()
+                .filter(|m| !existing_sigs.contains(&(m.name.clone(), m.params.len())))
+                .collect();
+            if new_methods.is_empty() {
+                continue;
+            }
+            // If the struct already has an impl block, merge into it;
+            // otherwise create a new one.
+            if let Some(existing) = ir.impls.iter_mut().find(|e| e.struct_name == struct_name) {
+                for m in new_methods {
+                    existing.methods.push(m.clone());
+                }
+            } else {
+                ir.impls.push(imp.clone());
+            }
+        }
+
+        // Merge struct definitions from the module into the main IR.
+        // Without this, the Cranelift backend's TypeResolver has no field
+        // layout information for library structs (e.g. Range), causing
+        // field accesses via MemberAccess to silently fall back to
+        // returning the struct pointer instead of loading the field.
+        let existing_struct_names: std::collections::HashSet<String> =
+            ir.structs.iter().map(|s| s.name.clone()).collect();
+        for s in &mod_ir.structs {
+            if !existing_struct_names.contains(&s.name) {
+                ir.structs.push(s.clone());
+            }
+        }
+
+        for stmt in mod_prog.get_statements() {
+            if let Some(import_stmt) = stmt.as_any().downcast_ref::<gobol::ast::ImportStatement>() {
+                let sub_name = import_stmt.get_module_name();
+                let sub_parts: Vec<String> = sub_name
+                    .split("::")
+                    .flat_map(|s| s.split('.'))
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if let Some(sub_file) = resolve_module_file_relative(&sub_parts, module_file) {
+                    load_module_into_ir(&sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
+                } else if let Some(sub_file) = resolve_module_file(&sub_parts, lib_paths, module_file) {
+                    load_module_into_ir(&sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
                 }
             }
         }
     }
 
-    // Monomorphize (expand generics)
+    {
+        let mut visited = std::collections::HashSet::new();
+        for stmt in prog.get_statements() {
+            if let Some(import_stmt) = stmt.as_any().downcast_ref::<gobol::ast::ImportStatement>() {
+                let module_name = import_stmt.get_module_name();
+                let path_parts: Vec<String> = module_name
+                    .split("::")
+                    .flat_map(|s| s.split('.'))
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if let Some(module_path) = resolve_module_file(&path_parts, &lib_paths, &filename) {
+                    load_module_into_ir(
+                        &module_name,
+                        &module_path,
+                        &lib_paths,
+                        &error_fmt,
+                        &mut ir,
+                        &mut visited,
+                    );
+                } else {
+                    // Module resolution failure is non-fatal here; the
+                    // semantic analyzer already reported the error.
+                }
+            }
+        }
+    }
+
     let mut monomorphizer = gobol::ir::Monomorphizer::new();
     let concrete_ir = monomorphizer.monomorphize(&ir);
 
-    match mode {
-        Mode::Jit => run_jit(&concrete_ir, is_verbose),
-        Mode::AotRun | Mode::AotNoRun => {
-            // Default output name derives from the source file stem.
-            let out = out_name.unwrap_or_else(|| {
-                Path::new(&filename)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("a.out")
-                    .to_string()
-            });
-            let run_after = matches!(mode, Mode::AotRun);
-            run_aot(&concrete_ir, &out, is_verbose, run_after)
-        }
-    }
-}
+    let out = out_name.unwrap_or_else(|| {
+        Path::new(&filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("a.out")
+            .to_string()
+    });
 
-/// JIT: compile in-memory with Cranelift and execute `main` immediately.
-fn run_jit(concrete_ir: &gobol::ir::GobolIR, is_verbose: bool) {
-    if is_verbose {
-        println!("======= Step 4: JIT Codegen (Cranelift) =======");
-    }
-    let mut backend = CraneliftBackend::new();
-    if let Err(e) = backend.compile_ir(concrete_ir) {
-        eprintln!("{}", format!("JIT compilation failed: {}", e).red());
-        process::exit(2);
-    }
-    if let Err(e) = backend.finalize() {
-        eprintln!("{}", format!("JIT finalize failed: {}", e).red());
-        process::exit(2);
-    }
-    match backend.run() {
-        Ok(code) => process::exit(code as i32),
-        Err(e) => {
-            eprintln!("{}", format!("JIT run failed: {}", e).red());
-            process::exit(2);
-        }
-    }
-}
-
-/// AOT: emit a standalone binary via Cranelift ObjectModule + C runtime linker.
-/// If `run_after` is true, execute the produced binary after linking.
-fn run_aot(
-    concrete_ir: &gobol::ir::GobolIR,
-    out_name: &str,
-    is_verbose: bool,
-    run_after: bool,
-) {
     if is_verbose {
         println!("======= Step 4: AOT Codegen (Cranelift ObjectModule) =======");
     }
@@ -416,31 +513,14 @@ fn run_aot(
         println!("Using runtime: {}", runtime_c.display());
     }
 
-    let backend = CraneliftBackend::new_aot();
-    if let Err(e) = backend.compile_to_binary(concrete_ir, out_name, runtime_c.to_str().unwrap()) {
+    let backend = CraneliftBackend::new();
+    let extern_libs = semantic_analyzer.get_extern_libs().clone();
+    if let Err(e) = backend.compile_to_binary(&concrete_ir, &out, runtime_c.to_str().unwrap(), &extern_libs) {
         eprintln!("{}", format!("AOT compilation failed: {}", e).red());
         process::exit(2);
     }
 
     if is_verbose {
-        println!("AOT binary written to {}", out_name);
-    }
-
-    if run_after {
-        // Bare names need a `./` prefix to execute from the cwd; paths
-        // (absolute or containing a separator) are executed as-is.
-        let run_path = if out_name.contains(std::path::MAIN_SEPARATOR) || out_name.starts_with("./") {
-            out_name.to_string()
-        } else {
-            format!("./{}", out_name)
-        };
-        let status = process::Command::new(&run_path)
-            .status()
-            .map_err(|e| {
-                eprintln!("{}", format!("Failed to run {}: {}", run_path, e).red());
-                process::exit(2);
-            })
-            .unwrap();
-        process::exit(status.code().unwrap_or(1));
+        println!("AOT binary written to {}", out);
     }
 }

@@ -1,6 +1,6 @@
 // Test :: namespace import syntax
-import std::io;
+import std;
 
 func main() {
-    std::io::println("Hello from :: namespace path");
+    io::println("Hello from :: namespace path");
 }

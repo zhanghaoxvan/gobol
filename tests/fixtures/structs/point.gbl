@@ -1,4 +1,4 @@
-import io;
+import std;
 
 struct Point {
     x: int,
@@ -18,6 +18,6 @@ impl Point {
 }
 
 func main() {
-    var p = Point.new(3, 4);
-    io.println(@"distance: {p.distance()}");
+    var p = Point::new(3, 4);
+    io::println(@"distance: {p.distance()}");
 }

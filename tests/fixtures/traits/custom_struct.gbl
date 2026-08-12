@@ -1,16 +1,28 @@
-// Test trait-based operator dispatch with custom function
-// Demonstrates that +, -, * operators work through intrinsic method dispatch
-import io;
+// Test: custom struct operator overloading via `impl Trait for Type`
+// p1 + p2 is desugared to p1.add(p2) and must return 10
+import std;
 
-// Helper: uses operators which are desugared to trait method calls (add, mul, sub)
-func compute(a: int, b: int, c: int): int {
-    a * b + c - a
+struct Num {
+    value: int,
+};
+
+// Inherent impl must come before trait impl that calls its methods
+impl Num {
+    func new(value: int): Num {
+        self.value = value;
+        self
+    }
+}
+
+impl std::ops::Add for Num {
+    func add(self, other: Num): Num {
+        Num::new(self.value + other.value)
+    }
 }
 
 func main() {
-    // 5 * 3 = 15  (mul intrinsic)
-    // 15 + 2 = 17 (add intrinsic)
-    // 17 - 5 = 12 (sub intrinsic)
-    var result = compute(5, 3, 2);
-    io.println(@"compute(5, 3, 2) = {result}");
+    var p1 = Num::new(4);
+    var p2 = Num::new(6);
+    var r = p1 + p2;       // 4 + 6 = 10
+    io::println("p1 + p2 ok");
 }

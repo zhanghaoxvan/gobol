@@ -141,6 +141,14 @@ fn test_errors_undefined_variable() {
     result.assert_failure(ExitCode::CompileError);
 }
 
+/// 用例：errors/missing_impl.gbl | 预期编译失败
+#[test]
+fn test_errors_missing_impl() {
+    let path = fixture_path("fixtures/errors/missing_impl.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_failure(ExitCode::CompileError);
+}
+
 /// 用例：functions/add.gbl | 预期正常运行
 #[test]
 fn test_functions_add() {
@@ -165,13 +173,13 @@ fn test_functions_void_return() {
     result.assert_success();
 }
 
-/// 用例：modules/lib/math.gbl | 预期编译通过（库文件，无main）
+/// 用例：modules/lib/math.gbl | 预期编译失败（库文件，无main，AOT链接缺main符号）
 #[test]
 fn test_modules_lib_math() {
     let path = fixture_path("fixtures/modules/lib/math.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
-    // Library file without main — expect runtime error (no main function)
-    result.assert_failure(ExitCode::RuntimePanic);
+    // Library file without main — AOT linking fails (no main symbol) → CompileError
+    result.assert_failure(ExitCode::CompileError);
 }
 
 /// 用例：modules/main.gbl | 预期正常运行
@@ -294,6 +302,14 @@ fn test_traits_custom_struct() {
     result.assert_success();
 }
 
+/// 用例：traits/multiple_impl.gbl | 预期正常运行
+#[test]
+fn test_traits_multiple_impl() {
+    let path = fixture_path("fixtures/traits/multiple_impl.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
 /// 用例：namespace/import.gbl | 预期正常运行
 #[test]
 fn test_namespace_import() {
@@ -309,3 +325,45 @@ fn test_namespace_path_access() {
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
 }
+
+/// 用例：metaprogramming/expand.gbl | 预期正常运行
+#[test]
+fn test_metaprogramming_expand() {
+    let path = fixture_path("fixtures/metaprogramming/expand.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：ffi/variadic.gbl | 预期正常运行
+#[test]
+fn test_ffi_variadic() {
+    let path = fixture_path("fixtures/ffi/variadic.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：stdlib/ref_test.gbl | 预期正常运行
+#[test]
+fn test_stdlib_ref_test() {
+    let path = fixture_path("fixtures/stdlib/ref_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：stdlib/result_test.gbl | 预期正常运行
+#[test]
+fn test_stdlib_result_test() {
+    let path = fixture_path("fixtures/stdlib/result_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：stdlib/enum_test.gbl | 预期正常运行
+#[test]
+fn test_stdlib_enum_test() {
+    let path = fixture_path("fixtures/stdlib/enum_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+

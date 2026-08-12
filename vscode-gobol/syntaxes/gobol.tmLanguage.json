@@ -1,0 +1,135 @@
+{
+  "scopeName": "source.gobol",
+  "patterns": [{ "include": "#main" }],
+  "repository": {
+    "main": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#attributes" },
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        { "include": "#keywords" },
+        { "include": "#types" },
+        { "include": "#identifiers" },
+        { "include": "#operators" }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.gobol",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.attribute.gobol",
+          "begin": "#\\[",
+          "end": "\\]",
+          "patterns": [
+            {
+              "name": "entity.other.attribute-name.gobol",
+              "match": "\\b[[:alpha:]_][[:word:]]*\\b"
+            },
+            {
+              "name": "string.quoted.double.gobol",
+              "match": "\"[^\"]*\""
+            }
+          ]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.gobol",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.gobol",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.format.gobol",
+          "begin": "@\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.gobol",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.interpolation.gobol",
+              "match": "\\{[^}]*\\}"
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.gobol",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.gobol",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.gobol",
+          "match": "\\b(if|else|for|while|return|break|continue|in|match)\\b"
+        },
+        {
+          "name": "keyword.other.gobol",
+          "match": "\\b(func|var|val|struct|impl|trait|import|export|as|convert|operator|constructor|new)\\b"
+        },
+        {
+          "name": "constant.language.gobol",
+          "match": "\\b(true|false|null|none|self)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.gobol",
+          "match": "\\b(int|float|str|bool)\\b"
+        },
+        {
+          "name": "entity.name.type.gobol",
+          "match": "\\b([A-Z][[:word:]]*)\\b"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "entity.name.function.gobol",
+          "match": "\\b([[:alpha:]_][[:word:]]*)(?=\\()"
+        },
+        {
+          "name": "variable.other.gobol",
+          "match": "\\b[[:alpha:]_][[:word:]]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.gobol",
+          "match": "(\\+|\\-|\\*|\\/|%|=|==|!=|<|>|<=|>=|&&|\\|\\||!|&|\\||\\^|::|:|->)"
+        }
+      ]
+    }
+  }
+}

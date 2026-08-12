@@ -1,0 +1,25 @@
+// Test: missing trait method should cause compile error
+// std::ops::Add requires 'add' method, but we only provide 'sub'
+import std;
+
+struct Bad {
+    value: int,
+};
+
+impl Bad {
+    func new(value: int): Bad {
+        self.value = value;
+        self
+    }
+}
+
+impl std::ops::Add for Bad {
+    // ERROR: missing required method 'add'
+    func sub(self, other: Bad): Bad {
+        Bad::new(self.value - other.value)
+    }
+}
+
+func main() {
+    io::println("should not compile");
+}

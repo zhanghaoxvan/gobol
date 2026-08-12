@@ -1,0 +1,48 @@
+// std/env/fun.gbl — Variadic function argument holder.
+//
+// When an `extern "C"` function is declared with `...` (variadic), the
+// Gobol compiler generates a per-arity C stub at link time that forwards
+// the concrete argument list into the real variadic C routine.
+//
+// `FuncArgs` is the *language-level* description of that argument list:
+// it offers index-based access (`get`, `len`, iteration helpers) so users
+// can write their own helpers over `...` parameters in pure Gobol code.
+//
+// In practice, the compiler handles argument packing/unpacking directly in
+// the backend; this file documents the public struct so downstream modules
+// (and the LSP) know the type exists and what its API looks like.
+
+struct FuncArgs {
+    _count: int,
+    _data: int  // raw pointer to an i64[] slot array (opaque to user code)
+}
+
+impl FuncArgs {
+    /// Wrap a raw slot buffer for index-based access.
+    constructor(count: int, data: int): FuncArgs {
+        _count = count;
+        _data  = data;
+        self
+    }
+
+    /// Number of variadic arguments in the call.
+    func len(self): int {
+        _count
+    }
+
+    /// True when no variadic arguments were supplied.
+    func is_empty(self): bool {
+        _count == 0
+    }
+
+    /// Read the `i`-th argument as a raw machine word.
+    /// The caller is responsible for reinterpreting the bits to the
+    /// appropriate GoType (int, float, pointer-to-string, etc.).
+    func get(self, i: int): int {
+        if i < 0 || i >= _count {
+            panic("FuncArgs index out of bounds");
+        }
+        var slot: int = gobol_mem_load(_data + i * 8);
+        slot
+    }
+}

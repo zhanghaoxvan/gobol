@@ -1,11 +1,19 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 use colored::*;
 use git2::{Repository, ResetType};
+
+// ============ 常量 ============
+
+const GRAPE_TOML: &str = "grape.toml";
+const GRAPE_LOCK: &str = "grape.lock";
+const GRAPE_ERR: &str = "grape.err";
+const PACKAGES_DIR: &str = ".grape";
+const LIB_DIR: &str = "lib";
 
 // ============ 错误处理 ============
 
@@ -18,6 +26,7 @@ pub enum GrapeError {
     AlreadyExists(String),
     InvalidDependency(String),
     CommandFailed(String),
+    NetworkError { dep: String, reason: String },
 }
 
 impl std::fmt::Display for GrapeError {
@@ -30,6 +39,9 @@ impl std::fmt::Display for GrapeError {
             GrapeError::AlreadyExists(s) => write!(f, "Already exists: {}", s),
             GrapeError::InvalidDependency(s) => write!(f, "Invalid dependency: {}", s),
             GrapeError::CommandFailed(s) => write!(f, "Command failed: {}", s),
+            GrapeError::NetworkError { dep, reason } => {
+                write!(f, "Network error for '{}': {}", dep, reason)
+            }
         }
     }
 }
@@ -77,18 +89,82 @@ pub struct LockedPackage {
     pub commit: String,
 }
 
+// ============ 路径工具 ============
+
+/// Base directory for cached packages: `.grape/packages/`
+fn packages_dir() -> PathBuf {
+    PathBuf::from(PACKAGES_DIR).join("packages")
+}
+
+/// Project library directory: `lib/`
+fn lib_dir() -> PathBuf {
+    PathBuf::from(LIB_DIR)
+}
+
 impl DependencySpec {
     fn git_url(&self) -> String {
         format!("https://github.com/{}.git", self.repo)
     }
-    
+
     fn local_name(&self) -> String {
-        self.repo.split('/').last().unwrap().to_string()
+        self.repo
+            .split('/')
+            .last()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.repo.clone())
     }
-    
+
+    /// Cross-platform path to the cached package: `.grape/packages/<name>`
     fn local_path(&self) -> PathBuf {
-        PathBuf::from(format!(".grape/packages/{}", self.local_name()))
+        packages_dir().join(self.local_name())
     }
+
+    /// Cross-platform path to the materialised lib copy: `lib/<name>`
+    fn lib_material_path(&self) -> PathBuf {
+        lib_dir().join(self.local_name())
+    }
+}
+
+// ============ 错误日志 ============
+
+/// Append a failed dependency to `grape.err`.
+fn log_failed_dep(name: &str, reason: &str) {
+    let entry = format!("[{}] {}: {}\n",
+        chrono_or_now(),
+        name,
+        reason,
+    );
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(GRAPE_ERR)
+        .and_then(|mut f| f.write_all(entry.as_bytes()));
+}
+
+fn chrono_or_now() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("{}", d.as_secs()))
+        .unwrap_or_else(|_| "0".to_string())
+}
+
+/// Print previously failed dependencies, then remove the error log.
+fn report_failed_deps() {
+    if !Path::new(GRAPE_ERR).exists() {
+        return;
+    }
+    if let Ok(contents) = fs::read_to_string(GRAPE_ERR) {
+        if !contents.trim().is_empty() {
+            eprintln!(
+                "{}",
+                "The following dependencies failed to resolve:".red().bold()
+            );
+            for line in contents.lines() {
+                eprintln!("  {}", line.red());
+            }
+        }
+    }
+    let _ = fs::remove_file(GRAPE_ERR);
 }
 
 // ============ 主函数 ============
@@ -102,9 +178,13 @@ fn main() {
     }
 
     if let Err(e) = run_command(&args) {
-        eprintln!("Error: {}", e);
+        eprintln!("{} {}", "Error:".red().bold(), e);
+        eprintln!();
+        report_failed_deps();
         std::process::exit(1);
     }
+
+    report_failed_deps();
 }
 
 fn run_command(args: &[String]) -> Result<()> {
@@ -122,7 +202,7 @@ fn run_command(args: &[String]) -> Result<()> {
             Ok(())
         }
         "version" | "--version" => {
-            println!("Grape version: 0.1.0, binding with Gobol 0.1.0");
+            println!("Grape version: 0.2.0, binding with Gobol 0.2.0");
             Ok(())
         }
         _ => Err(GrapeError::NotFound(format!("Unknown command: {}", args[1]))),
@@ -133,31 +213,33 @@ fn print_help() {
     println!("Grape - Package Manager for Gobol");
     println!();
     println!("Usage:");
-    println!("  grape init               Initialize a new Gobol project");
-    println!("  grape add <dep>          Add a dependency (format: user/repo@tag)");
+    println!("  grape init                  Initialize a new Gobol project");
+    println!("  grape add <dep>             Add a dependency (format: user/repo@tag)");
     println!("  grape add <dep> --optional  Add as optional dependency");
-    println!("  grape remove <name>      Remove a dependency");
-    println!("  grape update [name]      Update dependencies");
-    println!("  grape list               List all dependencies");
-    println!("  grape run [--verbose]    Build and run the Gobol program");
-    println!("  grape build [-o <file>]  Compile to a native binary");
-    println!("  grape clean              Clean cached packages");
-    println!("  grape version            Show the version");
-    println!("  grape help               Show this help message");
+    println!("  grape remove <name>         Remove a dependency");
+    println!("  grape update [name]         Update dependencies (use --latest for newest tag)");
+    println!("  grape list                  List all dependencies");
+    println!("  grape run [--verbose]       Build and run the Gobol program");
+    println!("  grape build [-o <file>] [--release]  Compile to native binary");
+    println!("  grape clean                 Clean cached packages");
+    println!("  grape version               Show the version");
+    println!("  grape help                  Show this help message");
     println!();
     println!("Examples:");
     println!("  grape add gobol-org/math@0.1.0");
     println!("  grape add gobol-org/test@0.2.0 --optional");
     println!("  grape remove math");
-    println!("  grape update");
-    println!("  grape run --verbose");
+    println!("  grape update --latest");
+    println!("  grape build --release -o myapp");
 }
 
 // ============ 命令实现 ============
 
 fn cmd_init() -> Result<()> {
-    if Path::new("grape.toml").exists() {
-        return Err(GrapeError::AlreadyExists("grape.toml already exists".to_string()));
+    if Path::new(GRAPE_TOML).exists() {
+        return Err(GrapeError::AlreadyExists(
+            "grape.toml already exists".to_string(),
+        ));
     }
 
     println!("Initializing new Gobol project...");
@@ -169,13 +251,12 @@ fn cmd_init() -> Result<()> {
         .unwrap_or("project")
         .to_string();
 
-    // 询问用户信息
     print!("Author name (optional): ");
     io::stdout().flush().unwrap();
     let mut author = String::new();
     io::stdin().read_line(&mut author).ok();
     let author = author.trim();
-    
+
     let authors = if author.is_empty() {
         None
     } else {
@@ -194,19 +275,19 @@ fn cmd_init() -> Result<()> {
         dependencies: HashMap::new(),
     };
 
-    let toml_str = toml::to_string_pretty(&config).map_err(|e| GrapeError::Toml(e.to_string()))?;
-    fs::write("grape.toml", toml_str).map_err(GrapeError::Io)?;
-    fs::create_dir_all(".grape/packages").map_err(GrapeError::Io)?;
-    fs::create_dir_all("lib").map_err(GrapeError::Io)?;
-    fs::create_dir_all("lib/c").map_err(GrapeError::Io)?;
+    let toml_str =
+        toml::to_string_pretty(&config).map_err(|e| GrapeError::Toml(e.to_string()))?;
+    fs::write(GRAPE_TOML, toml_str).map_err(GrapeError::Io)?;
+    fs::create_dir_all(packages_dir()).map_err(GrapeError::Io)?;
+    fs::create_dir_all(lib_dir()).map_err(GrapeError::Io)?;
 
-    println!("✓ Project initialized successfully");
+    println!(" Project initialized successfully");
 
     if !Path::new("main.gbl").exists() {
-        let content = r#"import io
+        let content = r#"import std;
 
 func main() {
-    io.println("Hello, World!")
+    io::println("Hello, World!");
 }
 "#;
         fs::write("main.gbl", content).map_err(GrapeError::Io)?;
@@ -218,14 +299,14 @@ func main() {
     println!("  2. Add your own gobol modules in lib/ (e.g. lib/utils.gbl)");
     println!("  3. Add dependencies: grape add user/repo@tag");
     println!("  4. Run your program: grape run");
-    
+
     Ok(())
 }
 
 fn cmd_add(deps: &[String]) -> Result<()> {
     if deps.is_empty() {
         return Err(GrapeError::InvalidDependency(
-            "No dependency specified. Usage: grape add <user/repo@tag>".to_string()
+            "No dependency specified. Usage: grape add <user/repo@tag>".to_string(),
         ));
     }
 
@@ -235,171 +316,278 @@ fn cmd_add(deps: &[String]) -> Result<()> {
 
     if deps.is_empty() {
         return Err(GrapeError::InvalidDependency(
-            "No dependency specified. Usage: grape add <user/repo@tag>".to_string()
+            "No dependency specified. Usage: grape add <user/repo@tag>".to_string(),
         ));
     }
 
     for dep in deps {
-        println!("📦 Adding dependency: {}", dep);
+        println!(" Adding dependency: {}", dep);
 
         let (repo, tag) = dep.split_once('@').ok_or_else(|| {
-            GrapeError::InvalidDependency(format!("Invalid format '{}'. Expected: user/repo@tag", dep))
+            GrapeError::InvalidDependency(format!(
+                "Invalid format '{}'. Expected: user/repo@tag",
+                dep
+            ))
         })?;
 
         let parts: Vec<&str> = repo.split('/').collect();
         if parts.len() != 2 {
-            return Err(GrapeError::InvalidDependency(
-                format!("Invalid repo format '{}'. Expected: user/repo", repo)
-            ));
+            return Err(GrapeError::InvalidDependency(format!(
+                "Invalid repo format '{}'. Expected: user/repo",
+                repo
+            )));
         }
 
         let var_name = parts[1].to_string();
-        
-        // 检查是否已存在
+
         if config.dependencies.contains_key(&var_name) {
-            return Err(GrapeError::AlreadyExists(
-                format!("Dependency '{}' already exists. Use 'grape update {}' to update", var_name, var_name)
-            ));
+            return Err(GrapeError::AlreadyExists(format!(
+                "Dependency '{}' already exists. Use 'grape update {}' to update",
+                var_name, var_name
+            )));
         }
 
-        let dep_spec = DependencySpec {
+        // Validate the tag exists on the remote before attempting download.
+        let spec = DependencySpec {
             repo: repo.to_string(),
             tag: tag.to_string(),
             optional: if is_optional { Some(true) } else { None },
         };
 
-        let local_path = dep_spec.local_path();
+        if !tag_exists_remote(&spec) {
+            return Err(GrapeError::NetworkError {
+                dep: var_name.clone(),
+                reason: format!("Tag '{}' not found on remote {}", tag, spec.git_url()),
+            });
+        }
 
-        // 下载依赖
-        println!("  Downloading from {}", dep_spec.git_url());
-        download_package(&dep_spec)?;
-        println!("  ✓ Downloaded to {}", local_path.display());
+        println!("   Downloading from {}", spec.git_url());
+        match download_package(&spec) {
+            Ok(()) => {
+                println!("   Downloaded to {}", spec.local_path().display());
+            }
+            Err(e) => {
+                let msg = format!("{}", e);
+                eprintln!("  {} {}", " Failed:".red(), msg.red());
+                log_failed_dep(&var_name, &msg);
+                continue;
+            }
+        }
 
-        config.dependencies.insert(var_name.clone(), dep_spec);
-        println!("  ✓ Added dependency: {}", var_name);
+        config.dependencies.insert(var_name.clone(), spec);
+        println!("   Added dependency: {}", var_name);
     }
 
     save_grape_toml(&config)?;
     update_lock_file(&config)?;
-    
-    println!("✓ Dependencies added successfully");
+
+    println!(" Dependencies processed");
     Ok(())
 }
 
 fn cmd_remove(deps: &[String]) -> Result<()> {
     if deps.is_empty() {
         return Err(GrapeError::InvalidDependency(
-            "No dependency specified. Usage: grape remove <name>".to_string()
+            "No dependency specified. Usage: grape remove <name>".to_string(),
         ));
     }
 
     let mut config = read_grape_toml()?;
-    
+
     for dep in deps {
         if config.dependencies.remove(dep).is_some() {
-            println!("✓ Removed dependency: {}", dep);
-            
-            // 删除本地文件
-            let local_path = PathBuf::from(format!(".grape/packages/{}", dep));
+            println!(" Removed dependency: {}", dep);
+
+            let local_path = packages_dir().join(dep);
             if local_path.exists() {
                 fs::remove_dir_all(&local_path).map_err(GrapeError::Io)?;
                 println!("  Removed local files: {}", local_path.display());
             }
+
+            let lib_path = lib_dir().join(dep);
+            if lib_path.exists() {
+                fs::remove_dir_all(&lib_path).map_err(GrapeError::Io)?;
+            }
         } else {
-            println!("⚠ Dependency not found: {}", dep);
+            println!(" Dependency not found: {}", dep);
         }
     }
-    
+
     save_grape_toml(&config)?;
     update_lock_file(&config)?;
-    
-    println!("✓ Dependencies removed successfully");
+
+    println!(" Dependencies removed successfully");
     Ok(())
 }
 
 fn cmd_update(args: &[String]) -> Result<()> {
-    let config = read_grape_toml()?;
-    let specific_dep = args.first();
-    
-    println!("🔄 Updating dependencies...");
-    
+    let mut config = read_grape_toml()?;
+    let use_latest = args.iter().any(|a| a == "--latest");
+    let specific_dep = args.iter().find(|a| !a.starts_with('-'));
+
+    if use_latest {
+        println!(" Fetching latest tags from GitHub...");
+    } else {
+        println!(" Updating dependencies...");
+    }
+
     let deps_to_update: Vec<(String, DependencySpec)> = if let Some(name) = specific_dep {
         if let Some(spec) = config.dependencies.get(name).cloned() {
             vec![(name.clone(), spec)]
         } else {
-            return Err(GrapeError::NotFound(format!("Dependency '{}' not found", name)));
+            return Err(GrapeError::NotFound(format!(
+                "Dependency '{}' not found",
+                name
+            )));
         }
     } else {
         config.dependencies.clone().into_iter().collect()
     };
-    
-    for (name, spec) in deps_to_update {
+
+    let mut any_change = false;
+
+    for (name, mut spec) in deps_to_update {
+        if use_latest {
+            match fetch_latest_tag(&spec.repo) {
+                Ok(latest_tag) if latest_tag != spec.tag => {
+                    println!(
+                        "  {} {}: {} → {}",
+                        name, "upgrading".yellow(),
+                        spec.tag, latest_tag.green()
+                    );
+                    spec.tag = latest_tag;
+                    config.dependencies.insert(name.clone(), spec.clone());
+                    any_change = true;
+                }
+                Ok(_) => {
+                    println!("  {} is already at the latest version ({})", name, spec.tag);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  Could not fetch latest tag for {}: {}",
+                        name,
+                        e
+                    );
+                }
+            }
+        }
+
         println!("  Updating {}@{}", name, spec.tag);
-        
-        // 重新下载
+
         let local_path = spec.local_path();
         if local_path.exists() {
             fs::remove_dir_all(&local_path).map_err(GrapeError::Io)?;
         }
-        
-        download_package(&spec)?;
-        println!("  ✓ Updated {}", name);
+
+        match download_package(&spec) {
+            Ok(()) => println!("   Updated {}", name),
+            Err(e) => {
+                let msg = format!("{}", e);
+                eprintln!("  {} {}", " Failed:".red(), msg.red());
+                log_failed_dep(&name, &msg);
+            }
+        }
     }
-    
-    save_grape_toml(&config)?;
+
+    if any_change || use_latest {
+        save_grape_toml(&config)?;
+    }
     update_lock_file(&config)?;
-    
-    println!("✓ Dependencies updated successfully");
+
+    if any_change {
+        println!(" grape.toml updated with latest versions. Please review the changes.");
+    }
+    println!(" Dependencies updated successfully");
     Ok(())
 }
 
 fn cmd_list() -> Result<()> {
     let config = read_grape_toml()?;
-    
+
     if config.dependencies.is_empty() {
         println!("No dependencies found.");
         println!("Add one with: grape add user/repo@tag");
         return Ok(());
     }
-    
+
     println!("Dependencies:");
     for (name, spec) in &config.dependencies {
-        let optional = if spec.optional.unwrap_or(false) { " (optional)" } else { "" };
+        let optional = if spec.optional.unwrap_or(false) {
+            " (optional)"
+        } else {
+            ""
+        };
         println!("     {} = {}{}", name, spec.repo, optional);
         println!("       tag: {}", spec.tag);
-        
+
         let local_path = spec.local_path();
         if local_path.exists() {
-            println!("       ✓ Downloaded");
+            println!("        Downloaded");
         } else {
-            println!("       ✗ Not downloaded (run 'grape update' to download)");
+            println!("        Not downloaded (run 'grape update' to download)");
         }
     }
-    
+
     Ok(())
 }
+
+// ============ cmd_run — build + optionally execute ============
 
 fn cmd_run(args: &[String]) -> Result<()> {
     let is_verbose = args.iter().any(|a| a == "--verbose");
     let no_check = args.iter().any(|a| a == "--no-check");
+    let is_release = args.iter().any(|a| a == "--release");
+    let compile_only = args.iter().any(|a| a == "-c" || a == "--compile-only");
 
     println!("{}", " Running Gobol program...".bold().green());
 
-    if !Path::new("grape.toml").exists() {
+    // Call shared build logic; compile_only controls execution.
+    build_project(args, is_release, is_verbose, no_check, compile_only)
+}
+
+// ============ cmd_build — independent build command ============
+
+fn cmd_build(args: &[String]) -> Result<()> {
+    let is_verbose = args.iter().any(|a| a == "--verbose");
+    let is_release = args.iter().any(|a| a == "--release");
+
+    println!("{}", " Building Gobol project...".bold().green());
+
+    // Build only, never execute.
+    build_project(args, is_release, is_verbose, false, true)
+}
+
+/// Shared build logic used by both `grape run` and `grape build`.
+///
+/// * `compile_only`: if true, skip binary execution (grape build).
+/// * `is_release`:  pass `--release` to gobol.
+/// * `is_verbose`:  pass `--verbose` to gobol + print extra info.
+fn build_project(
+    args: &[String],
+    is_release: bool,
+    is_verbose: bool,
+    no_check: bool,
+    compile_only: bool,
+) -> Result<()> {
+    if !Path::new(GRAPE_TOML).exists() {
         return Err(GrapeError::NotFound(
-            "grape.toml not found. Run 'grape init' first.".to_string()
+            "grape.toml not found. Run 'grape init' first.".to_string(),
         ));
     }
 
     let config = read_grape_toml()?;
 
-    let out_name = args.iter()
+    let out_name = args
+        .iter()
         .position(|a| a == "-o" || a == "--output")
         .and_then(|i| args.get(i + 1).cloned())
         .unwrap_or_else(|| config.project.name.clone());
 
-    if !no_check && !Path::new("grape.lock").exists() {
-        println!("grape.lock not found, generating...");
+    // Lock file management
+    if !no_check && !Path::new(GRAPE_LOCK).exists() {
+        if is_verbose {
+            println!("grape.lock not found, generating...");
+        }
         update_lock_file(&config)?;
     } else if !no_check {
         verify_lock_file(&config)?;
@@ -407,10 +595,16 @@ fn cmd_run(args: &[String]) -> Result<()> {
 
     let entry_file = &config.project.entry;
     if !Path::new(entry_file).exists() {
-        return Err(GrapeError::NotFound(format!("Entry file '{}' not found.", entry_file)));
+        return Err(GrapeError::NotFound(format!(
+            "Entry file '{}' not found.",
+            entry_file
+        )));
     }
 
-    ensure_dependencies_downloaded(&config)?;
+    // Resolve dependencies into lib/<name>/
+    let mut resolved: HashSet<String> = HashSet::new();
+    resolve_dependencies(&config, &mut resolved, is_verbose)?;
+
     let lib_paths = build_lib_paths(&config);
 
     if is_verbose {
@@ -420,42 +614,57 @@ fn cmd_run(args: &[String]) -> Result<()> {
         println!("Lib paths: {:?}", lib_paths);
     }
 
+    // Invoke gobol
     let mut cmd = process::Command::new("gobol");
-    cmd.arg("-o").arg(&out_name);
-    for path in &lib_paths { cmd.arg("--lib-path").arg(path); }
-    if is_verbose { cmd.arg("--verbose"); }
-    // Pass through extra flags from caller (e.g. --no-run from grape build)
-    for a in args {
-        if a == "-c" {
-            cmd.arg(a);
-        }
+    cmd.arg("build")
+        .arg(entry_file)
+        .arg("-o")
+        .arg(&out_name);
+    if is_release {
+        cmd.arg("--release");
+    } else {
+        cmd.arg("--debug");
     }
-    cmd.arg(entry_file);
+    for path in &lib_paths {
+        cmd.arg("--lib-path").arg(path);
+    }
+    if is_verbose {
+        cmd.arg("--verbose");
+    }
 
     let status = cmd.status().map_err(|_| {
-        GrapeError::CommandFailed("Failed to run gobol. Make sure gobol is installed.".to_string())
+        GrapeError::CommandFailed(
+            "Failed to run gobol. Make sure gobol is installed.".to_string(),
+        )
     })?;
 
     if !status.success() {
         process::exit(status.code().unwrap_or(1));
     }
+
+    // Execute the compiled binary unless compile-only.
+    if !compile_only {
+        let exe_path = if out_name.contains('/') || out_name.contains('\\') {
+            out_name.clone()
+        } else {
+            format!("./{}", out_name)
+        };
+        let run_status = process::Command::new(&exe_path).status().map_err(|e| {
+            GrapeError::CommandFailed(format!("Failed to execute '{}': {}", exe_path, e))
+        })?;
+        if !run_status.success() {
+            process::exit(run_status.code().unwrap_or(1));
+        }
+    }
+
     Ok(())
 }
 
-fn cmd_build(args: &[String]) -> Result<()> {
-    // grape build = compile only
-    let mut build_args: Vec<String> = args.to_vec();
-    build_args.push("-c".to_string());
-    cmd_run(&build_args)
-}
-
-
 fn cmd_clean() -> Result<()> {
     println!("Cleaning cached packages...");
-    
-    let packages_dir = Path::new(".grape/packages");
-    if packages_dir.exists() {
-        for entry in fs::read_dir(packages_dir).map_err(GrapeError::Io)? {
+
+    if packages_dir().exists() {
+        for entry in fs::read_dir(packages_dir()).map_err(GrapeError::Io)? {
             let entry = entry.map_err(GrapeError::Io)?;
             let path = entry.path();
             if path.is_dir() {
@@ -464,103 +673,148 @@ fn cmd_clean() -> Result<()> {
             }
         }
     }
-    
-    // 清理锁文件（可选）
-    if Path::new("grape.lock").exists() {
-        fs::remove_file("grape.lock").map_err(GrapeError::Io)?;
+
+    if Path::new(GRAPE_LOCK).exists() {
+        fs::remove_file(GRAPE_LOCK).map_err(GrapeError::Io)?;
         println!("  Removed: grape.lock");
     }
-    
-    println!("✓ Clean completed");
+
+    if Path::new(GRAPE_ERR).exists() {
+        fs::remove_file(GRAPE_ERR).map_err(GrapeError::Io)?;
+    }
+
+    println!(" Clean completed");
     Ok(())
 }
 
 // ============ 辅助函数 ============
 
 fn read_grape_toml() -> Result<GrapeToml> {
-    let contents = fs::read_to_string("grape.toml").map_err(GrapeError::Io)?;
-    let config: GrapeToml = toml::from_str(&contents).map_err(|e| GrapeError::Toml(e.to_string()))?;
-    Ok(config)
+    let contents = fs::read_to_string(GRAPE_TOML).map_err(GrapeError::Io)?;
+    toml::from_str(&contents).map_err(|e| GrapeError::Toml(e.to_string()))
 }
 
 fn save_grape_toml(config: &GrapeToml) -> Result<()> {
-    let toml_str = toml::to_string_pretty(config).map_err(|e| GrapeError::Toml(e.to_string()))?;
-    fs::write("grape.toml", toml_str).map_err(GrapeError::Io)?;
-    Ok(())
+    let toml_str =
+        toml::to_string_pretty(config).map_err(|e| GrapeError::Toml(e.to_string()))?;
+    fs::write(GRAPE_TOML, toml_str).map_err(GrapeError::Io)
 }
 
 fn read_lock_file() -> Result<GrapeLock> {
-    if !Path::new("grape.lock").exists() {
+    if !Path::new(GRAPE_LOCK).exists() {
         return Ok(GrapeLock {
             version: 1,
             packages: HashMap::new(),
         });
     }
-    
-    let contents = fs::read_to_string("grape.lock").map_err(GrapeError::Io)?;
-    let lock: GrapeLock = toml::from_str(&contents).map_err(|e| GrapeError::Toml(e.to_string()))?;
-    Ok(lock)
+    let contents = fs::read_to_string(GRAPE_LOCK).map_err(GrapeError::Io)?;
+    toml::from_str(&contents).map_err(|e| GrapeError::Toml(e.to_string()))
 }
 
 fn save_lock_file(lock: &GrapeLock) -> Result<()> {
-    let toml_str = toml::to_string_pretty(lock).map_err(|e| GrapeError::Toml(e.to_string()))?;
-    fs::write("grape.lock", toml_str).map_err(GrapeError::Io)?;
-    Ok(())
+    let toml_str =
+        toml::to_string_pretty(lock).map_err(|e| GrapeError::Toml(e.to_string()))?;
+    fs::write(GRAPE_LOCK, toml_str).map_err(GrapeError::Io)
 }
 
 fn update_lock_file(config: &GrapeToml) -> Result<()> {
     let mut lock = read_lock_file()?;
-    
+
     for (name, spec) in &config.dependencies {
-        // 获取当前 commit hash
         let local_path = spec.local_path();
         if local_path.exists() {
             if let Ok(commit) = get_current_commit(&local_path) {
-                lock.packages.insert(name.clone(), LockedPackage {
-                    repo: spec.repo.clone(),
-                    tag: spec.tag.clone(),
-                    commit,
-                });
+                lock.packages.insert(
+                    name.clone(),
+                    LockedPackage {
+                        repo: spec.repo.clone(),
+                        tag: spec.tag.clone(),
+                        commit,
+                    },
+                );
             }
         }
     }
-    
-    save_lock_file(&lock)?;
-    Ok(())
+
+    save_lock_file(&lock)
 }
 
 fn verify_lock_file(config: &GrapeToml) -> Result<()> {
     let lock = read_lock_file()?;
-    
+
     for (name, spec) in &config.dependencies {
         if let Some(locked) = lock.packages.get(name) {
             if locked.tag != spec.tag {
-                println!("⚠ Warning: {} version mismatch (grape.toml: {}, grape.lock: {})", 
-                         name, spec.tag, locked.tag);
+                println!(
+                    " Warning: {} version mismatch (grape.toml: {}, grape.lock: {})",
+                    name, spec.tag, locked.tag
+                );
                 println!("  Run 'grape update' to sync");
             }
         }
     }
-    
+
     Ok(())
 }
 
-fn ensure_dependencies_downloaded(config: &GrapeToml) -> Result<()> {
+// ============ 依赖解析 ============
+
+fn resolve_dependencies(
+    config: &GrapeToml,
+    resolved: &mut HashSet<String>,
+    verbose: bool,
+) -> Result<()> {
+    let _ = verbose;
     for (name, spec) in &config.dependencies {
-        let local_path = spec.local_path();
-        if !local_path.exists() {
-            println!("📦 Downloading missing dependency: {}", name);
-            download_package(spec)?;
+        if !resolved.insert(name.clone()) {
+            continue; // cycle detected
+        }
+
+        let cache_path = spec.local_path();
+        if !cache_path.exists() {
+            match download_package(spec) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    eprintln!(
+                        "   Failed to download {}: {}",
+                        name,
+                        msg.red()
+                    );
+                    log_failed_dep(name, &msg);
+                    continue; // don't block the build for one failed dep
+                }
+            }
+        }
+
+        // Materialise into lib/<name>/
+        let lib_dest = spec.lib_material_path();
+        if !lib_dest.exists() {
+            if let Err(e) = fs::create_dir_all(&lib_dest) {
+                eprintln!("Warning: could not create {}: {}", lib_dest.display(), e);
+            }
+        }
+
+        // Recurse into sub-package
+        let sub_toml = cache_path.join(GRAPE_TOML);
+        if sub_toml.exists() {
+            if let Ok(sub_contents) = fs::read_to_string(&sub_toml) {
+                if let Ok(sub_config) = toml::from_str::<GrapeToml>(&sub_contents) {
+                    resolve_dependencies(&sub_config, resolved, verbose)?;
+                }
+            }
         }
     }
     Ok(())
 }
+
+// ============ 包下载 ============
 
 fn download_package(spec: &DependencySpec) -> Result<()> {
     let git_url = spec.git_url();
     let tag = &spec.tag;
     let target_dir = spec.local_path();
-    
+
     if target_dir.exists() {
         return Ok(());
     }
@@ -571,89 +825,191 @@ fn download_package(spec: &DependencySpec) -> Result<()> {
 
     println!("  Cloning {} (tag: {})", git_url, tag);
 
-    // 尝试浅克隆
     match clone_tag_shallow(&git_url, tag, &target_dir) {
-        Ok(_) => {
-            println!("  ✓ Successfully cloned");
+        Ok(()) => {
+            println!("   Successfully cloned");
             Ok(())
         }
-        Err(e) => {
-            println!("  ⚠ Shallow clone failed: {}, retrying with full clone...", e);
+        Err(_shallow_err) => {
+            println!(
+                "  Shallow clone failed, retrying with full clone...",
+            );
             clone_tag_full(&git_url, tag, &target_dir)?;
-            println!("  ✓ Successfully cloned with full clone");
+            println!("   Successfully cloned with full clone");
             Ok(())
         }
     }
 }
 
 fn clone_tag_shallow(git_url: &str, tag: &str, target_dir: &Path) -> Result<()> {
-    // 使用命令行进行浅克隆（git2 对浅克隆支持有限）
     let status = std::process::Command::new("git")
-        .args(&["clone", "--depth", "1", "--branch", tag, git_url, target_dir.to_str().unwrap()])
+        .args(&[
+            "clone", "--depth", "1", "--branch", tag,
+            git_url,
+            target_dir.to_str().unwrap(),
+        ])
         .status()
         .map_err(|_| GrapeError::CommandFailed("git not found".to_string()))?;
-    
+
     if status.success() {
         Ok(())
     } else {
-        Err(GrapeError::CommandFailed(format!("Failed to clone tag {}", tag)))
+        Err(GrapeError::CommandFailed(format!(
+            "Failed to shallow-clone tag {}",
+            tag
+        )))
     }
 }
 
 fn clone_tag_full(git_url: &str, tag: &str, target_dir: &Path) -> Result<()> {
     let repo = Repository::clone(git_url, target_dir).map_err(GrapeError::Git)?;
-    
-    // 查找 tag
+
     let tag_ref_name = format!("refs/tags/{}", tag);
     let branch_ref_name = format!("refs/heads/{}", tag);
-    
+
     let commit_id = {
         if let Ok(reference) = repo.find_reference(&tag_ref_name) {
-            let annotated = repo.reference_to_annotated_commit(&reference)
+            let annotated = repo
+                .reference_to_annotated_commit(&reference)
                 .map_err(GrapeError::Git)?;
             annotated.id()
-        }
-        else if let Ok(reference) = repo.find_reference(&branch_ref_name) {
-            let annotated = repo.reference_to_annotated_commit(&reference)
+        } else if let Ok(reference) = repo.find_reference(&branch_ref_name) {
+            let annotated = repo
+                .reference_to_annotated_commit(&reference)
                 .map_err(GrapeError::Git)?;
             annotated.id()
         } else {
-            return Err(GrapeError::NotFound(format!("Tag/branch '{}' not found", tag)));
+            return Err(GrapeError::NotFound(format!(
+                "Tag/branch '{}' not found",
+                tag
+            )));
         }
     };
-    
+
     let commit = repo.find_commit(commit_id).map_err(GrapeError::Git)?;
     repo.reset(&commit.as_object(), ResetType::Hard, None)
         .map_err(GrapeError::Git)?;
-    
+
     Ok(())
 }
 
 fn get_current_commit(repo_path: &Path) -> Result<String> {
     let repo = Repository::open(repo_path).map_err(GrapeError::Git)?;
     let head = repo.head().map_err(GrapeError::Git)?;
-    let commit_id = head.target().ok_or_else(|| {
-        GrapeError::NotFound("No commit found".to_string())
-    })?;
+    let commit_id = head
+        .target()
+        .ok_or_else(|| GrapeError::NotFound("No commit found".to_string()))?;
     Ok(commit_id.to_string())
 }
 
-fn build_lib_paths(config: &GrapeToml) -> Vec<String> {
-    let mut paths = Vec::new();
-    
-    for (var_name, _spec) in &config.dependencies {
-        let dep_path = format!(".grape/packages/{}", var_name);
-        
-        let src_path = format!("{}/src", dep_path);
-        if Path::new(&src_path).exists() {
-            paths.push(src_path);
+// ============ Tag 验证与获取 ============
+
+/// Check whether a tag exists on the remote without cloning.
+fn tag_exists_remote(spec: &DependencySpec) -> bool {
+    let output = std::process::Command::new("git")
+        .args(&["ls-remote", "--tags", &spec.git_url(), &spec.tag])
+        .output();
+
+    match output {
+        Ok(o) => {
+            // git ls-remote outputs refs/tags/<name>^{} if found
+            !String::from_utf8_lossy(&o.stdout).trim().is_empty()
         }
-        
-        if Path::new(&dep_path).exists() {
-            paths.push(dep_path);
+        Err(_) => {
+            // Can't reach remote — let the actual download decide.
+            true
         }
     }
-    
+}
+
+/// Fetch the latest tag from a GitHub repository using `git ls-remote`.
+fn fetch_latest_tag(repo: &str) -> std::result::Result<String, String> {
+    let git_url = format!("https://github.com/{}.git", repo);
+    let output = std::process::Command::new("git")
+        .args(&["ls-remote", "--tags", "--refs", &git_url])
+        .output()
+        .map_err(|e| format!("git ls-remote failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err("git ls-remote exited with error".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut tags: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 2 {
+                parts[1].strip_prefix("refs/tags/")
+            } else {
+                None
+            }
+        })
+        .filter(|t| !t.ends_with("^{}")) // skip peeled tags
+        .collect();
+
+    if tags.is_empty() {
+        return Err("no tags found".to_string());
+    }
+
+    // Simple semver-aware sort: prefer `v1.2.3` or `1.2.3` patterns.
+    tags.sort_by(|a, b| compare_tags(b, a));
+
+    Ok(tags[0].to_string())
+}
+
+fn compare_tags(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_clean = a.trim_start_matches('v');
+    let b_clean = b.trim_start_matches('v');
+
+    let a_parts: Vec<u32> = a_clean
+        .split('.')
+        .filter_map(|s| s.parse::<u32>().ok())
+        .collect();
+    let b_parts: Vec<u32> = b_clean
+        .split('.')
+        .filter_map(|s| s.parse::<u32>().ok())
+        .collect();
+
+    a_parts.cmp(&b_parts)
+}
+
+// ============ 库路径构建 ============
+
+fn build_lib_paths(config: &GrapeToml) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+
+    // Local project lib/ directory.
+    if lib_dir().exists() {
+        paths.push(lib_dir());
+    }
+
+    for (var_name, spec) in &config.dependencies {
+        // Preference 1: materialised lib/<name>/
+        let mat = spec.lib_material_path();
+        if mat.exists() {
+            paths.push(mat);
+        }
+
+        // Preference 2: package cache src/
+        let cache_src = spec.local_path().join("src");
+        if cache_src.exists() {
+            paths.push(cache_src);
+        }
+
+        // Preference 3: package cache root
+        let cache_root = spec.local_path();
+        if cache_root.exists() {
+            paths.push(cache_root);
+        }
+
+        // legacy: direct lib/<name> for compat
+        let legacy_lib = lib_dir().join(var_name);
+        if legacy_lib.exists() && !paths.contains(&legacy_lib) {
+            paths.push(legacy_lib);
+        }
+    }
+
     paths
 }
 
@@ -662,25 +1018,137 @@ fn build_lib_paths(config: &GrapeToml) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    // ---- 路径测试 ----
+
     #[test]
-    fn test_dependency_spec() {
+    fn test_dependency_local_path() {
         let spec = DependencySpec {
             repo: "test/repo".to_string(),
             tag: "1.0.0".to_string(),
             optional: None,
         };
-        
         assert_eq!(spec.git_url(), "https://github.com/test/repo.git");
         assert_eq!(spec.local_name(), "repo");
-        assert_eq!(spec.local_path(), PathBuf::from(".grape/packages/repo"));
+        assert_eq!(
+            spec.local_path(),
+            PathBuf::from(".grape").join("packages").join("repo")
+        );
+        assert_eq!(
+            spec.lib_material_path(),
+            PathBuf::from("lib").join("repo")
+        );
     }
-    
+
+    #[test]
+    fn test_local_path_cross_platform() {
+        let spec = DependencySpec {
+            repo: "github/user/my-lib".to_string(),
+            tag: "v2.0.0".to_string(),
+            optional: None,
+        };
+        let p = spec.local_path();
+        // Must be relative (not hardcoded to a specific OS root).
+        assert!(p.is_relative(), "path should be relative, got {:?}", p);
+        // Must use PathBuf join semantics (components, not string fmt).
+        let comps: Vec<_> = p.components().collect();
+        assert!(comps.len() >= 3, "expected at least 3 components, got {:?}", comps);
+        // Verify the expected logical structure: .grape → packages → name
+        assert_eq!(comps[0].as_os_str(), ".grape");
+        assert_eq!(comps[1].as_os_str(), "packages");
+        assert_eq!(comps[2].as_os_str(), "my-lib");
+    }
+
+    #[test]
+    fn test_lib_paths_uses_pathbuf() {
+        let config = GrapeToml {
+            project: Project {
+                name: "test".into(),
+                version: "0.1.0".into(),
+                entry: "main.gbl".into(),
+                authors: None,
+                description: None,
+                license: None,
+            },
+            dependencies: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "repo".into(),
+                    DependencySpec {
+                        repo: "test/repo".into(),
+                        tag: "1.0.0".into(),
+                        optional: None,
+                    },
+                );
+                m
+            },
+        };
+        let paths = build_lib_paths(&config);
+        // All paths must be relative (no hardcoded separators).
+        for p in &paths {
+            assert!(p.is_relative(), "expected relative path, got {:?}", p);
+        }
+    }
+
+    // ---- Tag 解析测试 ----
+
+    #[test]
+    fn test_tag_comparison_semver() {
+        assert_eq!(compare_tags("1.0.0", "0.9.0"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_tags("v2.0.0", "v1.9.9"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_tags("0.1.0", "0.1.0"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_tags("v1.0.0", "1.0.0"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_tags("0.1.0", "0.2.0"), std::cmp::Ordering::Less);
+    }
+
+    // ---- 依赖解析测试 ----
+
     #[test]
     fn test_dependency_parsing() {
         let dep = "user/repo@1.0.0";
         let (repo, tag) = dep.split_once('@').unwrap();
         assert_eq!(repo, "user/repo");
         assert_eq!(tag, "1.0.0");
+    }
+
+    #[test]
+    fn test_dependency_parsing_with_v() {
+        let dep = "gobol-org/math@v0.3.1";
+        let parts: Vec<&str> = dep.split_once('@').unwrap().0.split('/').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1], "math");
+    }
+
+    // ---- build 参数测试 ----
+
+    #[test]
+    fn test_build_args_detection() {
+        let args = vec![
+            "grape".to_string(),
+            "build".to_string(),
+            "--release".to_string(),
+            "-o".to_string(),
+            "mybin".to_string(),
+        ];
+        let is_release = args.iter().any(|a| a == "--release");
+        let out_name = args
+            .iter()
+            .position(|a| a == "-o")
+            .and_then(|i| args.get(i + 1).cloned());
+        assert!(is_release);
+        assert_eq!(out_name, Some("mybin".to_string()));
+    }
+
+    #[test]
+    fn test_run_args_detection() {
+        let args = vec![
+            "grape".to_string(),
+            "run".to_string(),
+            "--verbose".to_string(),
+        ];
+        let compile_only = args.iter().any(|a| a == "-c" || a == "--compile-only");
+        assert!(!compile_only);
+        let is_verbose = args.iter().any(|a| a == "--verbose");
+        assert!(is_verbose);
     }
 }

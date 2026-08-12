@@ -1,10 +1,10 @@
-import io;
+import std;
 
 func main() {
     var i = 0;
     while i < 5 {
-        io.print(i);
+        io::print(i);
         i += 1;
     }
-    io.print("\n");
+    io::print("\n");
 }

@@ -1,0 +1,65 @@
+{
+  "name": "vscode-gobol",
+  "displayName": "Gobol Language Support",
+  "description": "Language server, syntax highlighting, and IDE features for the Gobol programming language.",
+  "version": "0.1.0",
+  "publisher": "zhanghaoxvan",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "scripts": {
+    "vscode:prepublish": "node build.js",
+    "build": "node build.js"
+  },
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "gobol",
+        "aliases": [
+          "Gobol",
+          "gobol"
+        ],
+        "extensions": [
+          ".gbl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "gobol",
+        "scopeName": "source.gobol",
+        "path": "./syntaxes/gobol.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Gobol",
+      "properties": {
+        "gobol.lspPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the gobol-lsp binary. If empty, uses the built binary from the project."
+        },
+        "gobol.cargoRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, run via 'cargo run --bin gobol-lsp' instead of a pre-built binary (slower, for development)."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhanghaoxvan/gobol"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

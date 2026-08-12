@@ -1,4 +1,4 @@
-import io;
+import std;
 
 func factorial(n: int): int {
     if n <= 1 {
@@ -9,5 +9,5 @@ func factorial(n: int): int {
 
 func main() {
     var result = factorial(5);
-    io.println(@"5! = {result}");
+    io::println(@"5! = {result}");
 }

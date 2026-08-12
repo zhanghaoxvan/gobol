@@ -1,0 +1,17 @@
+import std;
+
+func main() {
+    // This test verifies that the net module compiles and the struct
+    // types are constructible. Actual network connections are not tested
+    // here to avoid flaky CI / privilege issues.
+    io::println("net module loaded");
+
+    // TcpListener::bind on port 1 will fail (returns _fd=0) but the
+    // constructor call itself exercises the intrinsic dispatch path.
+    var listener = TcpListener::bind("127.0.0.1", 1);
+    io::println("listener created");
+
+    // TcpStream::connect on port 1 will also fail gracefully.
+    var stream = TcpStream::connect("127.0.0.1", 1);
+    io::println("stream created");
+}

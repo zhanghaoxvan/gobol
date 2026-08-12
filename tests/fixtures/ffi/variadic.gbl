@@ -1,0 +1,27 @@
+import std;
+
+// extern "C" variadic functions — declared with `...`.
+// The compiler generates per-arity C stubs at link time.
+#[header("/usr/include/stdio.h")]
+extern "C" {
+    func printf(format: str, ...): int;
+}
+
+func main() {
+    // printf with 1 arg (format only)
+    printf("Hello, variadic world!\n");
+
+    // printf with 2 args (format + int)
+    printf("The answer is %d\n", 42);
+
+    // printf with 3 args (format + int + int)
+    printf("%d + %d = %d\n", 3, 4, 7);
+
+    // printf with mixed types
+    var name = "Gobol";
+    printf("Language: %s, Version: %d\n", name, 2);
+
+    // Use the return value
+    var written = printf("printed\n");
+    io::println(@"printf returned {written}");
+}

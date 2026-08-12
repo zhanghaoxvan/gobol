@@ -1,0 +1,35 @@
+import std;
+
+struct Point {
+    x: int,
+    y: int,
+};
+
+impl Point {
+    func new(x: int, y: int): Point {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
+    func distance(self): float {
+        ((self.x * self.x + self.y * self.y) as float)
+    }
+}
+
+// Test New trait via #[dynamic_args] — Point::new with arbitrary args
+// Test :: syntax for constructor calls
+func main(): int {
+    // Constructor via :: syntax
+    var p = Point::new(3, 4);
+    io::println(@"Point({p.x}, {p.y})");
+
+    // Instance method via . syntax
+    io::println(@"distance = {p.distance()}");
+
+    // Constructor via :: with different args
+    var p2 = Point::new(10, 20);
+    io::println(@"Point2({p2.x}, {p2.y})");
+
+    0
+}

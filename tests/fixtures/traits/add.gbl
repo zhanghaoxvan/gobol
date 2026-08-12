@@ -1,7 +1,7 @@
 // Test: 1 + 2 returns 3 via trait's add method (intrinsic)
-import io;
+import std;
 
 func main() {
     var result = 1 + 2;
-    io.println(@"1 + 2 = {result}");
+    io::println(@"1 + 2 = {result}");
 }

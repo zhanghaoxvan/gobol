@@ -2,50 +2,47 @@
 #[builtin("float64")]
 struct float {}
 
-// Float trait implementations using intrinsic runtime functions
-impl float {
+// Trait implementations for float using intrinsic runtime functions.
+// Float supports the arithmetic traits (Add/Sub/Mul/Div) and the
+// comparison traits (Eq/Cmp), but not Rem (no float modulo).
+// Intrinsic methods have no body — the implementation is supplied by
+// the backend (#[intrinsic] → native Cranelift instruction).
+
+impl std::ops::Add for float {
     #[intrinsic("f64_add")]
-    func add(self, other: float): float {
-        self
-    }
+    func add(self, other: float): float;
+}
 
+impl std::ops::Sub for float {
     #[intrinsic("f64_sub")]
-    func sub(self, other: float): float {
-        self
-    }
+    func sub(self, other: float): float;
+}
 
+impl std::ops::Mul for float {
     #[intrinsic("f64_mul")]
-    func mul(self, other: float): float {
-        self
-    }
+    func mul(self, other: float): float;
+}
 
+impl std::ops::Div for float {
     #[intrinsic("f64_div")]
-    func div(self, other: float): float {
-        self
-    }
+    func div(self, other: float): float;
+}
 
+impl std::cmp::Eq for float {
     #[intrinsic("f64_eq")]
-    func eq(self, other: float): bool {
-        false
-    }
+    func eq(self, other: float): bool;
+}
 
+impl std::cmp::Cmp for float {
     #[intrinsic("f64_lt")]
-    func lt(self, other: float): bool {
-        false
-    }
+    func lt(self, other: float): bool;
 
     #[intrinsic("f64_le")]
-    func le(self, other: float): bool {
-        false
-    }
+    func le(self, other: float): bool;
 
     #[intrinsic("f64_gt")]
-    func gt(self, other: float): bool {
-        false
-    }
+    func gt(self, other: float): bool;
 
     #[intrinsic("f64_ge")]
-    func ge(self, other: float): bool {
-        false
-    }
+    func ge(self, other: float): bool;
 }

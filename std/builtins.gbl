@@ -1,0 +1,21 @@
+// std/builtins.gbl — Runtime function declarations.
+//
+// Declares the C runtime functions that provide I/O, memory allocation,
+// and panic/exit.  Previously these were hardcoded in the semantic
+// analyzer as the pseudo-module `__builtins__`.
+//
+// Every Gobol program auto-imports this module via __setup__.
+#[library_features(hidden = true)]
+
+#[header("std/runtime.h")]
+extern "C" {
+    // I/O
+    func gobol_print(s: int);
+    func gobol_println(s: int);
+    func gobol_eprint(s: int);
+    func gobol_eprintln(s: int);
+    func gobol_read(): str;
+
+    // Memory
+    func gobol_alloc(size: int): int;
+}

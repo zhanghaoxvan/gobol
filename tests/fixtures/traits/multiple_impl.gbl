@@ -1,0 +1,36 @@
+// Test: multiple impl blocks for the same struct are correctly merged
+// Two separate impl blocks and one trait impl should all work together
+import std;
+
+struct Multi {
+    value: int,
+};
+
+impl Multi {
+    func new(value: int): Multi {
+        self.value = value;
+        self
+    }
+}
+
+// Trait impl in a separate block
+impl std::ops::Add for Multi {
+    func add(self, other: Multi): Multi {
+        Multi::new(self.value + other.value)
+    }
+}
+
+// Another inherent impl block
+impl Multi {
+    func double(self): Multi {
+        Multi::new(self.value * 2)
+    }
+}
+
+func main() {
+    var a = Multi::new(3);
+    var b = Multi::new(7);
+    var c = a + b;          // 3 + 7 = 10 (via trait impl)
+    var d = c.double();     // 10 * 2 = 20 (via method in second impl)
+    io::println("multiple impl blocks ok");
+}

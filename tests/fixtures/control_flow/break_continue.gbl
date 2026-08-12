@@ -1,4 +1,4 @@
-import io;
+import std;
 
 func main() {
     for i in 0..10 {
@@ -8,7 +8,7 @@ func main() {
         if i > 5 {
             break;
         }
-        io.print(i);
+        io::print(i);
     }
-    io.print("\n");
+    io::print("\n");
 }

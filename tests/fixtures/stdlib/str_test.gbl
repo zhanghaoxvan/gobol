@@ -1,0 +1,18 @@
+import std;
+
+func main() {
+    var s = "  Hello, Gobol!  ";
+    io::println(@"len: {s.len()}");
+
+    var trimmed = s.trim();
+    io::println(@"trimmed: '{trimmed}'");
+
+    if s.contains("Gobol") {
+        io::println("contains: yes");
+    } else {
+        io::println("contains: no");
+    }
+
+    var replaced = s.replace("Gobol", "World");
+    io::println(@"replaced: '{replaced}'");
+}

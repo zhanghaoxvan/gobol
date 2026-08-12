@@ -1,0 +1,35 @@
+// std/net.gbl — Networking module.
+//
+// Provides TCP client and server primitives via `TcpStream` and
+// `TcpListener` structs. All low-level operations are `#[intrinsic]`
+// and dispatched to the C runtime (runtime.c).
+
+struct TcpStream {
+    _fd: int
+};
+
+impl TcpStream {
+    #[intrinsic("tcp_connect")]
+    func connect(addr: str, port: int): TcpStream;
+
+    #[intrinsic("tcp_send")]
+    func send(self, data: str): int;
+
+    #[intrinsic("tcp_recv")]
+    func recv(self, len: int): str;
+
+    #[intrinsic("tcp_close")]
+    func close(self);
+};
+
+struct TcpListener {
+    _fd: int
+};
+
+impl TcpListener {
+    #[intrinsic("tcp_bind")]
+    func bind(addr: str, port: int): TcpListener;
+
+    #[intrinsic("tcp_accept")]
+    func accept(self): TcpStream;
+};

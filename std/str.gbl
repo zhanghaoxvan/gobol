@@ -16,5 +16,5 @@ impl str {
     func trim(self): str;
 
     #[intrinsic("str_replace")]
-    func replace(self, from: str, to: str): str;
+    func replace(self, old: str, to: str): str;
 };

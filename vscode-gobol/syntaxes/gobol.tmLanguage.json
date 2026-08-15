@@ -7,7 +7,10 @@
         { "include": "#comments" },
         { "include": "#attributes" },
         { "include": "#strings" },
+        { "include": "#chars" },
         { "include": "#numbers" },
+        { "include": "#imports" },
+        { "include": "#generics" },
         { "include": "#keywords" },
         { "include": "#types" },
         { "include": "#identifiers" },
@@ -16,6 +19,12 @@
     },
     "comments": {
       "patterns": [
+        {
+          "name": "comment.block.gobol",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [{ "include": "#comments" }]
+        },
         {
           "name": "comment.line.double-slash.gobol",
           "match": "//.*$"
@@ -50,7 +59,7 @@
           "patterns": [
             {
               "name": "constant.character.escape.gobol",
-              "match": "\\\\."
+              "match": "\\\\(u\\{[0-9a-fA-F]+\\}|x[0-9a-fA-F]{2}|.)"
             }
           ]
         },
@@ -61,13 +70,23 @@
           "patterns": [
             {
               "name": "constant.character.escape.gobol",
-              "match": "\\\\."
+              "match": "\\\\(u\\{[0-9a-fA-F]+\\}|x[0-9a-fA-F]{2}|.)"
             },
             {
               "name": "meta.interpolation.gobol",
-              "match": "\\{[^}]*\\}"
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [{ "include": "#main" }]
             }
           ]
+        }
+      ]
+    },
+    "chars": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.char.gobol",
+          "match": "'([^'\\\\]|\\\\(u\\{[0-9a-fA-F]+\\}|x[0-9a-fA-F]{2}|.))'"
         }
       ]
     },
@@ -75,11 +94,48 @@
       "patterns": [
         {
           "name": "constant.numeric.float.gobol",
-          "match": "\\b[0-9]+\\.[0-9]+\\b"
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9_]+)?\\b"
         },
         {
-          "name": "constant.numeric.integer.gobol",
-          "match": "\\b[0-9]+\\b"
+          "name": "constant.numeric.integer.hex.gobol",
+          "match": "\\b0x[0-9a-fA-F][0-9a-fA-F_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.binary.gobol",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.octal.gobol",
+          "match": "\\b0o[0-7][0-7_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.decimal.gobol",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "generics": {
+      "patterns": [
+        {
+          "name": "meta.generics.gobol",
+          "begin": "<",
+          "end": ">",
+          "patterns": [
+            { "include": "#types" },
+            { "include": "#keywords" },
+            {
+              "name": "punctuation.separator.comma.gobol",
+              "match": ","
+            },
+            {
+              "name": "punctuation.separator.colon.gobol",
+              "match": ":"
+            },
+            {
+              "name": "keyword.operator.bound.gobol",
+              "match": "\\+"
+            }
+          ]
         }
       ]
     },
@@ -87,15 +143,27 @@
       "patterns": [
         {
           "name": "keyword.control.gobol",
-          "match": "\\b(if|else|for|while|return|break|continue|in|match)\\b"
+          "match": "\\b(if|else|for|while|return|break|continue|in|match|loop)\\b"
         },
         {
-          "name": "keyword.other.gobol",
-          "match": "\\b(func|var|val|struct|impl|trait|import|export|as|convert|operator|constructor|new)\\b"
+          "name": "keyword.declaration.gobol",
+          "match": "\\b(func|var|val|struct|enum|impl|trait|extern|import|from|export|as|convert|operator|constructor|static|type|where)\\b"
+        },
+        {
+          "comment": "`new` is only a keyword in allocation context (new T[..] / new Type(..)). When used as a function/method name (func new(), Vec::new()), it must NOT be highlighted as a keyword — the function-name pattern in #identifiers will catch it instead.",
+          "name": "keyword.other.new.gobol",
+          "match": "\\bnew\\b(?=\\s+[A-Za-z_])"
+        },
+        {
+          "name": "keyword.extern-linkage.gobol",
+          "match": "(?<=extern\\s)\"[^\"]*\"",
+          "captures": {
+            "0": { "name": "string.quoted.double.linkage.gobol" }
+          }
         },
         {
           "name": "constant.language.gobol",
-          "match": "\\b(true|false|null|none|self)\\b"
+          "match": "\\b(true|false|null|none|nil|self|Self)\\b"
         }
       ]
     },
@@ -103,19 +171,79 @@
       "patterns": [
         {
           "name": "storage.type.primitive.gobol",
-          "match": "\\b(int|float|str|bool)\\b"
+          "match": "\\b(int|float|str|bool|void|char|unit)\\b"
+        },
+        {
+          "name": "storage.type.array.gobol",
+          "match": "(?<=\\])(\\[\\])",
+          "captures": {
+            "1": { "name": "storage.type.array.gobol" }
+          }
         },
         {
           "name": "entity.name.type.gobol",
           "match": "\\b([A-Z][[:word:]]*)\\b"
+        },
+        {
+          "name": "entity.name.type.alias.gobol",
+          "match": "(?<=:\\s*)([a-zA-Z_][[:word:]]*(?:\\:\\:[a-zA-Z_][[:word:]]*)*)"
+        }
+      ]
+    },
+    "imports": {
+      "patterns": [
+        {
+          "comment": "`from module import member1, member2;` — module is support.other.module, members are entity.name.function.",
+          "match": "\\b(from)\\s+([a-zA-Z_][[:word:]]*)\\s+(import)\\s+([a-zA-Z_][[:word:]]*(?:\\s*,\\s*[a-zA-Z_][[:word:]]*)*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.gobol" },
+            "2": { "name": "support.other.module.gobol" },
+            "3": { "name": "keyword.declaration.gobol" },
+            "4": {
+              "patterns": [
+                {
+                  "match": "[a-zA-Z_][[:word:]]*",
+                  "name": "entity.name.function.gobol"
+                },
+                {
+                  "match": ",",
+                  "name": "punctuation.separator.comma.gobol"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "comment": "`import module as alias;` — module is support.other.module, alias is entity.name.type.alias.",
+          "match": "\\b(import)\\s+([a-zA-Z_][[:word:]]*)\\s+(as)\\s+([a-zA-Z_][[:word:]]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.gobol" },
+            "2": { "name": "support.other.module.gobol" },
+            "3": { "name": "keyword.declaration.gobol" },
+            "4": { "name": "entity.name.type.alias.gobol" }
+          }
+        },
+        {
+          "comment": "`import module;` — only the module name (first segment, no `::` path).",
+          "match": "\\b(import)\\s+([a-zA-Z_][[:word:]]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.gobol" },
+            "2": { "name": "support.other.module.gobol" }
+          }
         }
       ]
     },
     "identifiers": {
       "patterns": [
         {
+          "comment": "Module qualifier before `::` (e.g. `io::println`, `Vec::new`).",
+          "name": "support.other.module.gobol",
+          "match": "\\b([a-zA-Z_][[:word:]]*)(?=\\:\\:)"
+        },
+        {
+          "comment": "Function/method name. Allows optional generic params between name and `(`: `f()`, `f<T>()`, `f<T, U>()`, `Vec::new()`.",
           "name": "entity.name.function.gobol",
-          "match": "\\b([[:alpha:]_][[:word:]]*)(?=\\()"
+          "match": "\\b([[:alpha:]_][[:word:]]*)(?=(?:<[^<>]*>)?\\s*\\()"
         },
         {
           "name": "variable.other.gobol",
@@ -126,8 +254,64 @@
     "operators": {
       "patterns": [
         {
-          "name": "keyword.operator.gobol",
-          "match": "(\\+|\\-|\\*|\\/|%|=|==|!=|<|>|<=|>=|&&|\\|\\||!|&|\\||\\^|::|:|->)"
+          "name": "keyword.operator.scope.gobol",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.range.gobol",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.range.gobol",
+          "match": "\\.\\."
+        },
+        {
+          "name": "keyword.operator.arrow.gobol",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.fat-arrow.gobol",
+          "match": "=>"
+        },
+        {
+          "name": "keyword.operator.assignment.gobol",
+          "match": "(\\+=|\\-=|\\*=|\\/=|%=|&=|\\|=|\\^=|<<=|>>=|=)"
+        },
+        {
+          "name": "keyword.operator.comparison.gobol",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.gobol",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.bitwise.gobol",
+          "match": "(&|\\||\\^|<<|>>)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.gobol",
+          "match": "(\\+|\\-|\\*|\\/|%)"
+        },
+        {
+          "name": "keyword.operator.question.gobol",
+          "match": "\\?"
+        },
+        {
+          "name": "punctuation.separator.colon.gobol",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.accessor.dot.gobol",
+          "match": "\\.(?!\\.)"
+        },
+        {
+          "name": "punctuation.terminator.semicolon.gobol",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.comma.gobol",
+          "match": ","
         }
       ]
     }

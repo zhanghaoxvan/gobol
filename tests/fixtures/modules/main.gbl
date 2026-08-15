@@ -1,5 +1,5 @@
 import std;
-import lib.math as m;
+import std::math as m;
 
 func main() {
     var result = m::add(5, 3);

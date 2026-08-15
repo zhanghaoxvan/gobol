@@ -6,35 +6,40 @@
 // it calls this library
 #[library_features(hidden = true)]
 
-struct vec<T> {
+import ref;
+import iterator;
+
+struct Vec<T> {
     _data: T[]?,
     _len: int,
     _cap: int
 };
 
-impl<T> vec<T> {
-    constructor(): vec<T> {
+impl<T> New<T> for Vec<T> {
+    func new(): Vec<T> {
         _data = null;
         _len = 0;
         _cap = 0;
         self
     }
 
-    constructor(arr: T[]): vec<T> {
-        var v: vec<T> = vec<T>();
+    func new(arr: T[]): Vec<T> {
+        var v: Vec<T> = new Vec<T>();
         for item in arr {
             v.push(item);
         }
         v
     }
     
-    constructor(capacity: int): vec<T> {
+    func new(capacity: int): Vec<T> {
         _data = new T[capacity]?;
         _len = 0;
         _cap = capacity;
         self
     }
-    
+}
+
+impl<T> Vec<T> {
     func len(self): int {
         _len
     }
@@ -62,8 +67,8 @@ impl<T> vec<T> {
     }
     
     func push(self, value: T) {
-        if _len >= _cap { 
-            _grow(self); 
+        if _len >= _cap {
+            self._grow();
         }
         if _data == null {
             _data = new T[4]?;
@@ -91,14 +96,9 @@ impl<T> vec<T> {
         result
     }
     
-    iter(self) {
-        vec_iterator(_data, _len)
+    func iter(self): VecIterator<T> {
+        VecIterator<T>::new(_data, _len)
     }
-
-    // Index/IndexMut trait implementations.
-    // index(i) returns the element value.
-    // index_mut(i) returns a Ref<T> pointing directly at the element slot,
-    // enabling `v[i] = x` to desugar to `v.index_mut(i).write(x)`.
 
     func index(self, index: int): T {
         self.get(index)
@@ -111,71 +111,43 @@ impl<T> vec<T> {
         var addr = gobol_array_elem_addr(_data, index);
         Ref<T>::new(addr)
     }
+
+    func _grow(self) {
+        var new_cap: int = 0;
+        if _cap == 0 {
+            new_cap = 4;
+        } else {
+            new_cap = _cap * 2;
+        }
+        var new_data: T[] = new T[new_cap]?;
+        for i in 0.._len {
+            new_data[i] = _data[i];
+        }
+        _data = new_data;
+        _cap = new_cap;
+    }
 };
 
-func _grow<T>(self: vec<T>) {
-    var new_cap: int = if _cap == 0 { 4 } else { _cap * 2 };
-    var new_data: T[] = new T[new_cap]?;
-    for i in 0.._len {
-        new_data[i] = _data[i];
-    }
-    _data = new_data;
-    _cap = new_cap;
-}
-
-struct vec_iterator<T> {
+struct VecIterator<T> {
     _data: T[]?,
     _len: int,
     _index: int
 };
 
-impl<T> vec_iterator<T> {
-    constructor(data: T[]?, len: int): vec_iterator<T> {
-        _data = data;
-        _len = len;
-        _index = 0;
-        self
+impl<T> New<T> for VecIterator<T> {
+    func new(data: T[]?, len: int): VecIterator<T> {
+        VecIterator { _data: data, _len: len, _index: 0 }
     }
-    
-    func next(self): (T, bool) {
-        if _index >= _len { 
-            return (null, false); 
+}
+
+impl<T> Iterator<T> for VecIterator<T> {
+    type Value = T;
+    func next(self): Option<T> {
+        if _index >= _len {
+            return Option::None();
         }
         var value: T = _data[_index];
         _index += 1;
-        (value, true)
+        Option::Some(value)
     }
 };
-
-// ==================== 运算符重载（全局函数）====================
-operator [](self: vec<T>, index: int): T {
-    self.get(index)
-}
-
-operator []=(self: vec<T>, index: int, value: T) {
-    self.set(index, value);
-}
-
-operator +(left: vec<T>, right: vec<T>): vec<T> {
-    var result: vec<T> = vec<T>::new();
-    for i in 0..left.len() {
-        result.push(left[i]);
-    }
-    for i in 0..right.len() {
-        result.push(right[i]);
-    }
-    result
-}
-
-operator ==(left: vec<T>, right: vec<T>): bool {
-    if left.len() != right.len() { 
-        return false; 
-    }
-    for i in 0..left.len() {
-        if left[i] != right[i] { 
-            return false; 
-        }
-    }
-    true
-}
-

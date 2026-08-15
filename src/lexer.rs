@@ -14,9 +14,9 @@ impl Lexer {
         let mut keywords = HashSet::new();
         let kw = [
             "if", "else", "for", "return", "int", "float", "str", "func", "var", "val",
-            "import", "in", "as", "true", "false", "while", "break", "continue",
+            "import", "in", "as", "true", "false", "while", "break", "continue", "from",
             "null", "self", "export", "struct", "impl", "constructor", "new", "match",
-            "convert", "operator", "extern", "trait", "enum",
+            "convert", "operator", "extern", "trait", "enum", "lambda",
         ];
         for k in &kw {
             keywords.insert(k.to_string());
@@ -359,7 +359,8 @@ impl Lexer {
                     self.consume();
                     return Token::with_pos(TokenType::Operator, "&&", tok_line, tok_col);
                 }
-                Token::with_pos(TokenType::Unknown, "&", tok_line, tok_col)
+                // `&` is the address-of operator (for function references).
+                Token::with_pos(TokenType::Operator, "&", tok_line, tok_col)
             }
             '|' => {
                 self.consume();
@@ -394,6 +395,9 @@ impl Lexer {
                     self.consume();
                     return Token::with_pos(TokenType::Operator, "#[", tok_line, tok_col);
                 }
+                // `#` is only valid before `[` (attributes); a lone `#` is
+                // unexpected. Markdown headings (`#`, `##`, `###`) belong
+                // inside `///` doc comments, not as standalone tokens.
                 Token::with_pos(TokenType::Unknown, "#", tok_line, tok_col)
             }
             _ => {

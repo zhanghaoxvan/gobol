@@ -268,9 +268,9 @@ var p3 = Point(1, 2);        // Bare constructor sugar / 裸构造器语法糖
 
 `new Type(args)` 是语法糖，等价于 `Type::new(args)`。这是推荐的构造值的方式。
 
-The `New<T>` trait (defined in `std/mem.gbl`) documents the constructor contract. The `#[dynamic_args]` attribute on the trait's `new` method signals that each implementer may define its own parameter list; the compiler skips arity checking against the trait declaration. This enables `new Range(0, 10)`, `new Point(3, 4)`, `new Channel<int>()`, etc.
+The `New<T>` trait (defined in `std/mem.gbl`) documents the constructor contract. The `#[dynamic]` attribute on the trait's `new` method signals that each implementer may define its own functions; the compiler skips arity checking against the trait declaration. This enables `new Range(0, 10)`, `new Point(3, 4)`, `new Channel<int>()`, etc.
 
-`New<T>` trait（定义于 `std/mem.gbl`）约定了构造器协议。trait 中 `new` 方法上的 `#[dynamic_args]` 属性表示每个实现者可以自由定义自己的参数列表；编译器会跳过对 trait 声明的参数数量检查。这使得 `new Range(0, 10)`、`new Point(3, 4)`、`new Channel<int>()` 等形式都能正常工作。
+`New<T>` trait（定义于 `std/mem.gbl`）约定了构造器协议。trait 中 `new` 方法上的 `#[dynamic]` 属性表示每个实现者可以自由定义自己的函数；编译器会跳过对 trait 声明的参数数量检查。这使得 `new Range(0, 10)`、`new Point(3, 4)`、`new Channel<int>()` 等形式都能正常工作。
 
 ```gobol
 // std/mem.gbl
@@ -504,8 +504,8 @@ The `New<T>` and `Drop` traits (`std/mem.gbl`) form the memory management protoc
 
 ```gobol
 // std/mem.gbl
-#[dynamic_args]
 trait New<T> {
+    #[dynamic]
     func new(): T
 }
 
@@ -514,9 +514,9 @@ trait Drop {
 }
 ```
 
-**`New<T>`** — Construction trait. The `#[dynamic_args]` attribute allows each implementer to define its own parameter list; the compiler skips arity checking against the trait. Three constructor call forms are supported:
+**`New<T>`** — Construction trait. The `#[dynamic]` attribute allows each implementer to define its own functions; the compiler skips arity checking against the trait. Three constructor call forms are supported:
 
-**`New<T>`** — 构造器 trait。`#[dynamic_args]` 属性允许每个实现者自由定义参数列表；编译器跳过对 trait 声明的参数数量检查。支持三种构造器调用形式：
+**`New<T>`** — 构造器 trait。`#[dynamic]` 属性允许每个实现者自由定义参数列表；编译器跳过对 trait 声明的参数数量检查。支持三种构造器调用形式：
 
 ```gobol
 var p1 = Point::new(3, 4);     // explicit :: call / 显式 :: 调用
@@ -611,11 +611,11 @@ operator + (left: Point, right: Point): Point {
 }
 
 // Index / 索引
-operator [] (self: vec<T>, index: int): T {
+operator [] (self: Vec<T>, index: int): T {
     self.get(index)
 }
 
-operator []= (self: vec<T>, index: int, value: T) {
+operator []= (self: Vec<T>, index: int, value: T) {
     self.set(index, value)
 }
 
@@ -739,16 +739,16 @@ val root = math::sqrt(16.0);
 val s = math::sin(1.0);
 ```
 
-### 11.9 vec<T> Type / vec<T> 类型
+### 11.9 Vec<T> Type / Vec<T> 类型
 
 ```gobol
-var v = vec<int>::new();
+var v = Vec<int>::new();
 v.push(10);
 v.push(20);
 var x = v[0];           // 10
 
 // From array / 从数组创建
-var v2 = vec<int>.from_array([1, 2, 3]);
+var v2 = Vec<int>.from_array([1, 2, 3]);
 
 // Iteration / 迭代
 for i, v in my_vec {
@@ -787,7 +787,7 @@ for i, v in my_vec {
 
 | Attribute / 属性 | Applies to / 适用于 | Description / 描述 |
 |:---|:---|:---|
-| `#[dynamic_args]` | Trait method / Trait 方法 | Allow impls to define arbitrary parameter lists / 允许实现者自由定义参数列表 |
+| `#[dynamic]` | Trait method / Trait 方法 | Allow impls to define arbitrary functions / 允许实现者自由定义函数 |
 | `#[header("path")]` | `extern "C"` block / 外部块 | C header for function validation / 用于函数验证的 C 头文件 |
 | `#[library_features(hidden = true)]` | Module / 模块 | Hide module prefix in qualified names / 隐藏模块前缀 |
 | `#[internal]` | Function, Struct, Trait | Not exported; module-private / 不导出，模块私有 |
@@ -911,7 +911,7 @@ std/runtime/
 ├── io.h / io.c       Standard I/O / 标准输入输出
 ├── str.h / str.c     String conversion & manipulation / 字符串转换与操作
 ├── mem.h / mem.c     Memory allocation & raw access / 内存分配与原始访问
-├── array.h / array.c Growable array (vec<T> backing) / 可增长数组
+├── array.h / array.c Growable array (Vec<T> backing) / 可增长数组
 ├── math.h / math.c   Math intrinsics (sin, cos, pow) / 数学内置函数
 ├── fs.h / fs.c       File system operations / 文件系统操作
 ├── net.h / net.c     TCP networking / TCP 网络

@@ -56,7 +56,7 @@ func main() {
     io::print(@"Doubled: {doubled}\n");
 
     // New feature: extended for (index + value)
-    var items: vec<int> = [10, 20, 30];
+    var items: Vec<int> = [10, 20, 30];
     io::print("Items: ");
     for i, v in items {
         io::print(i);

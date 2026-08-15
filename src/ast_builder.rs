@@ -142,7 +142,73 @@ impl AstBuilder {
         attrs
     }
 
-    /// Parse a string or identifier value inside attribute parentheses.
+    /// Returns true when the current token can be used as a name binding
+    /// (method/function/parameter name). This includes plain Identifiers as
+    /// well as keywords that double as common identifiers in this language —
+    /// most notably `new` (the `New` trait constructor) and `convert`.
+    fn is_name_token(&self) -> bool {
+        if self.match_type(&TokenType::Identifier) {
+            return true;
+        }
+        if self.match_type(&TokenType::Keyword) {
+            return matches!(
+                self.current_token().value.as_str(),
+                "new" | "convert" | "match"
+            );
+        }
+        false
+    }
+
+    /// Parse an associated type declaration inside a trait body:
+    ///   `type Name;`
+    ///   `type Name = SomeType;`
+    /// The declaration is consumed and discarded — associated types are not
+    /// yet modelled in the AST, but the syntax must parse so that trait
+    /// definitions like `Iterator { type Value; ... }` are accepted.
+    fn parse_trait_assoc_type(&mut self) {
+        // consume 'type'
+        self.advance();
+        if !self.is_name_token() {
+            self.log_error("Expected associated type name after 'type'");
+            return;
+        }
+        // consume name
+        self.advance();
+        // optional default binding: `= Type`
+        if self.match_value("=") {
+            self.advance();
+            let _ = self.parse_type();
+        }
+        if self.match_value(";") {
+            self.advance();
+        }
+        self.consume_end_of_line();
+    }
+
+    /// Parse an associated type binding inside an impl block:
+    ///   `type Name = ConcreteType;`
+    /// Like trait associated types, these are consumed and discarded — the
+    /// impl block's methods already carry concrete signatures, so the binding
+    /// is documentary at this stage.
+    fn parse_impl_assoc_type(&mut self) {
+        // consume 'type'
+        self.advance();
+        if !self.is_name_token() {
+            self.log_error("Expected associated type name after 'type'");
+            return;
+        }
+        // consume name
+        self.advance();
+        if self.match_value("=") {
+            self.advance();
+            let _ = self.parse_type();
+        }
+        if self.match_value(";") {
+            self.advance();
+        }
+        self.consume_end_of_line();
+    }
+
     /// Parse a possibly `::`-qualified name like "std::io::println" or "int".
     /// Returns the full qualified name string.
     fn parse_qualified_name(&mut self) -> Option<String> {
@@ -225,6 +291,29 @@ impl AstBuilder {
         self.is_end_of_line() || self.is_semicolon()
     }
 
+    fn save_state(&self) -> usize {
+        self.current_position
+    }
+
+    fn restore_state(&mut self, checkpoint: usize) {
+        self.current_position = checkpoint;
+    }
+    /// 执行一次"试探性解析"（Lookahead + Backtracking）。
+    ///
+    /// 保存当前解析位置，执行 `parse_fn`。无论成功与否，解析位置都会恢复到调用前的状态。
+    /// 若 `parse_fn` 返回 `true`，则试探成功；否则失败。
+    ///
+    /// 这是解决 `<` 符号歧义（泛型 vs 比较运算符）的核心工具方法。
+    fn lookahead<F>(&mut self, mut parse_fn: F) -> bool
+    where
+        F: FnMut(&mut Self) -> bool,
+    {
+        let checkpoint = self.save_state();
+        let success = parse_fn(self);
+        self.restore_state(checkpoint);
+        success
+    }
+
     fn consume_end_of_line(&mut self) {
         while self.is_end_of_line() || self.is_semicolon() {
             self.advance();
@@ -303,6 +392,7 @@ impl AstBuilder {
 
             match keyword.as_str() {
                 "import" => return self.parse_import(),
+                "from" => return self.parse_from_import(),
                 "func" => return self.parse_function(attrs),
                 "var" | "val" => return self.parse_declaration(),
                 "for" => return self.parse_for_statement(),
@@ -369,17 +459,18 @@ impl AstBuilder {
     fn parse_import(&mut self) -> Option<Box<dyn Statement>> {
         self.advance(); // consume 'import'
 
-        // Import path components can be identifiers OR primitive type keywords
-        // (e.g. "import int" loads std/int.gbl).
+        // `import` loads a module file. Multi-segment paths (e.g.
+        // `import lib.math`) are allowed for nested modules.
+        // To import specific members, use `from module import member;`.
         if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
-            self.log_error("Expected identifier after 'import'");
+            self.log_error("Expected module name after 'import'");
             return None;
         }
 
         let mut path = vec![self.current_token().value.clone()];
         self.advance();
 
-        // Handle "import a.b.c" or "import a::b::c"
+        // Handle "import a.b.c" or "import a::b::c" (nested module paths)
         while self.match_value(".") || self.match_value("::") {
             self.advance(); // consume '.' or '::'
             if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
@@ -390,7 +481,7 @@ impl AstBuilder {
             self.advance();
         }
 
-        // Handle "import a as b"
+        // Handle "import module as alias"
         let alias = if self.match_type(&TokenType::Keyword) && self.current_token().value == "as" {
             self.advance(); // consume 'as'
             if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
@@ -407,6 +498,64 @@ impl AstBuilder {
         self.consume_end_of_line();
 
         Some(Box::new(ImportStatement::new(path, alias)))
+    }
+
+    fn parse_from_import(&mut self) -> Option<Box<dyn Statement>> {
+        self.advance(); // consume 'from'
+
+        // Module name (single segment; identifiers or keywords like `int`)
+        if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+            self.log_error("Expected module name after 'from'");
+            return None;
+        }
+        let module = self.current_token().value.clone();
+        self.advance();
+
+        // Reject `from io::sub import ...` — only a single module name is allowed.
+        if self.match_value("::") || self.match_value(".") {
+            self.log_error("'from' only accepts a single module name");
+            while self.match_value("::") || self.match_value(".") {
+                self.advance();
+                if self.match_type(&TokenType::Identifier)
+                    || self.match_type(&TokenType::Keyword)
+                {
+                    self.advance();
+                }
+            }
+        }
+
+        // Expect `import` keyword
+        if !self.match_type(&TokenType::Keyword) || self.current_token().value != "import" {
+            self.log_error("Expected 'import' after module name in 'from' statement");
+            return None;
+        }
+        self.advance(); // consume 'import'
+
+        // Parse comma-separated member list
+        let mut members = Vec::new();
+        loop {
+            if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+                self.log_error("Expected member name after 'import' in 'from' statement");
+                return None;
+            }
+            members.push(self.current_token().value.clone());
+            self.advance();
+
+            if self.match_value(",") {
+                self.advance(); // consume ','
+                continue;
+            }
+            break;
+        }
+
+        if members.is_empty() {
+            self.log_error("'from' import requires at least one member");
+            return None;
+        }
+
+        self.consume_end_of_line();
+
+        Some(Box::new(FromImportStatement::new(module, members)))
     }
 
     fn parse_export_statement(&mut self) -> Option<Box<dyn Statement>> {
@@ -456,6 +605,42 @@ impl AstBuilder {
         self.consume_end_of_line();
 
         Some(Box::new(ExportStatement::new(names)))
+    }
+
+    /// try parse the generic args <T, U, ...>
+    /// 如果成功，返回参数列表并消费 token；如果失败，不消费任何 token。
+    fn try_parse_generic_args(&mut self) -> Option<Vec<String>> {
+        let is_generic = self.lookahead(|parser| {
+            if !parser.match_value("<") { return false; }
+            parser.advance(); // consume '<'
+            loop {
+                if !parser.match_type(&TokenType::Identifier) { return false; }
+                parser.advance();
+                if parser.match_value(",") { 
+                    parser.advance(); 
+                } else { 
+                    break; 
+                }
+            }
+            if !parser.match_value(">") { return false; }
+            parser.advance(); // consume '>'
+            true
+        });
+
+        if is_generic {
+            self.advance(); // consume '<'
+            let mut params = Vec::new();
+            loop {
+                if !self.match_type(&TokenType::Identifier) { break; }
+                params.push(self.current_token().value.clone());
+                self.advance();
+                if self.match_value(",") { self.advance(); } else { break; }
+            }
+            if self.match_value(">") { self.advance(); }
+            Some(params)
+        } else {
+            None
+        }
     }
 
     fn parse_struct_definition(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
@@ -517,31 +702,25 @@ impl AstBuilder {
         Some(Box::new(StructDefinition::new(name, fields, generic_params).with_attributes(attrs)))
     }
 
-    fn parse_impl_block(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
+        fn parse_impl_block(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
         self.advance(); // consume 'impl'
 
-        let mut generic_params = Vec::new();
-        if self.match_value("<") {
-            self.advance();
-            loop {
-                if !self.match_type(&TokenType::Identifier) { break; }
-                generic_params.push(self.current_token().value.clone());
-                self.advance();
-                if self.match_value(",") { self.advance(); } else { break; }
-            }
-            if !self.match_value(">") { self.log_error("Expected '>'"); }
-            else { self.advance(); }
-        }
+        // 1. 解析 impl 级别的泛型: impl<T> ...
+        let generic_params = self.try_parse_generic_args().unwrap_or_default();
 
+        // 2. 解析 trait/type 名称
         let first_name = match self.parse_qualified_name() {
             Some(n) => n,
             None => {
-                self.log_error("Expected struct/trait name after 'impl'");
+                self.log_error("Expected type/trait name after 'impl'");
                 return None;
             }
         };
 
-        // Check for `impl Trait for Type` syntax
+        // 3. 解析 trait 的泛型: impl New<T> for ...
+        let trait_generic_params = self.try_parse_generic_args();
+
+        // 4. 检查 for 关键字，区分 impl Trait for Type 还是 impl Type
         let (struct_name, trait_name) = if self.match_type(&TokenType::Keyword) && self.current_token().value == "for" {
             self.advance(); // consume 'for'
             let type_name = match self.parse_qualified_name() {
@@ -551,19 +730,25 @@ impl AstBuilder {
                     return None;
                 }
             };
-            (type_name, Some(first_name))
-        } else {
-            (first_name, None)
-        };
+            
+            // 5. 解析 struct 的泛型: impl Trait for Type<T>
+            let _struct_generic_params = self.try_parse_generic_args();
 
-        // Optionally <T> after struct name
-        if self.match_value("<") {
-            self.advance();
-            while !self.match_value(">") && !self.error_occurred {
-                self.advance();
-            }
-            if self.match_value(">") { self.advance(); }
-        }
+            let full_trait_name = if let Some(params) = trait_generic_params {
+                format!("{}<{}>", first_name, params.join(", "))
+            } else {
+                first_name
+            };
+            (type_name, Some(full_trait_name))
+        } else {
+            // impl Type { ... }
+            let full_name = if let Some(params) = trait_generic_params {
+                format!("{}<{}>", first_name, params.join(", "))
+            } else {
+                first_name
+            };
+            (full_name, None)
+        };
 
         self.consume_end_of_line();
         self.consume_value("{", "Expected '{' at start of impl block");
@@ -573,30 +758,47 @@ impl AstBuilder {
         while !self.match_value("}") && !self.error_occurred {
             self.consume_end_of_line();
             if self.match_value("}") { break; }
+            
+            // Parse attributes on methods (e.g., #[intrinsic("i32_add")])
+            let method_attrs = self.parse_attributes();
+
+            // Associated type binding inside an impl block:
+            //   `type Name = ConcreteType;`
+            // Consumed and discarded — see parse_impl_assoc_type.
+            if (self.match_type(&TokenType::Keyword)
+                || self.match_type(&TokenType::Identifier))
+                && self.current_token().value == "type"
+            {
+                self.parse_impl_assoc_type();
+                continue;
+            }
 
             if self.match_type(&TokenType::Keyword) {
                 let kw = self.current_token().value.clone();
                 match kw.as_str() {
-                    "constructor" => {
-                        if let Some(func) = self.parse_method("constructor") {
-                            items.push(ImplItem::Constructor(Box::new(func)));
-                        }
-                    }
                     "func" => {
-                        if let Some(func) = self.parse_method("func") {
+                        if let Some(func) = self.parse_method("func", method_attrs.clone()) {
                             items.push(ImplItem::Method(Box::new(func)));
                         }
                     }
                     "convert" => {
-                        if let Some(func) = self.parse_method("convert") {
+                        if let Some(func) = self.parse_method("convert", method_attrs.clone()) {
                             items.push(ImplItem::Convert(Box::new(func)));
+                        }
+                    }
+                    // `new` is a keyword but is a valid method name (New trait).
+                    // Pass empty keyword so parse_method reads `new` itself as
+                    // the method name (same path as the bare-identifier shorthand).
+                    "new" => {
+                        if let Some(func) = self.parse_method("", method_attrs.clone()) {
+                            items.push(ImplItem::Method(Box::new(func)));
                         }
                     }
                     _ => { self.advance(); }
                 }
             } else if self.match_type(&TokenType::Identifier) {
                 // Method shorthand: name(params): type { body }
-                if let Some(func) = self.parse_method("") {
+                if let Some(func) = self.parse_method("", method_attrs) {
                     items.push(ImplItem::Method(Box::new(func)));
                 }
             } else {
@@ -604,7 +806,7 @@ impl AstBuilder {
             }
             self.consume_end_of_line();
         }
-
+        
         self.consume_value("}", "Expected '}' after impl block");
         self.consume_end_of_line();
 
@@ -652,12 +854,28 @@ impl AstBuilder {
             let method_attrs = self.parse_attributes();
 
             // Parse method signature: func name(params): ret_type
+            // Associated type declaration inside a trait body:
+            //   type Name;
+            //   type Name = SomeType;   (default binding)
+            // These are recorded but not deeply validated by the semantic
+            // analyser — they exist so trait/impl blocks that use associated
+            // types (e.g. `Iterator::Value`) parse cleanly.
+            if (self.match_type(&TokenType::Keyword)
+                || self.match_type(&TokenType::Identifier))
+                && self.current_token().value == "type"
+            {
+                self.parse_trait_assoc_type();
+                continue;
+            }
+
             // func keyword is optional in trait defs
             if self.match_type(&TokenType::Keyword) && self.current_token().value == "func" {
                 self.advance(); // consume 'func'
             }
 
-            if !self.match_type(&TokenType::Identifier) {
+            // Method names may be keywords that double as identifiers in
+            // this language — most notably `new` (the New trait constructor).
+            if !self.is_name_token() {
                 self.log_error("Expected method name in trait definition");
                 break;
             }
@@ -775,6 +993,8 @@ impl AstBuilder {
                 break;
             }
 
+            // Parse attributes on extern functions (e.g., #[intrinsic("c_printf")])
+            let func_attrs = self.parse_attributes();
             if !(self.match_type(&TokenType::Keyword) && self.current_token().value == "func") {
                 self.log_error("Expected 'func' keyword in extern block");
                 break;
@@ -832,7 +1052,7 @@ impl AstBuilder {
             }
             self.consume_end_of_line();
 
-            functions.push(ExternFunc::new(func_name, params, return_type, is_variadic));
+            functions.push(ExternFunc::new(func_name, params, return_type, is_variadic).with_attributes(func_attrs));
         }
 
         self.consume_value("}", "Expected '}' after extern block");
@@ -842,14 +1062,12 @@ impl AstBuilder {
         Some(Box::new(block))
     }
 
-    fn parse_method(&mut self, keyword: &str) -> Option<Function> {
+    fn parse_method(&mut self, keyword: &str, attrs: Vec<Attribute>) -> Option<Function> {
         if !keyword.is_empty() {
-            self.advance(); // consume keyword (constructor/func/convert)
+            self.advance(); // consume keyword (func/convert)
         }
 
-        let method_name = if keyword == "constructor" {
-            "constructor".to_string()
-        } else if keyword == "convert" {
+        let method_name = if keyword == "convert" {
             // Parse target type as name
             let target = self.parse_type()?;
             let name = target.get_name().to_string();
@@ -859,6 +1077,26 @@ impl AstBuilder {
             self.advance();
             name
         };
+
+        // Method-level generic params: `func map<U>(self, f: ...)` — the `<U>`
+        // sits between the method name and its parameter list.
+        let mut generic_params = Vec::new();
+        if self.match_value("<") {
+            self.advance();
+            while !self.match_value(">") && !self.error_occurred {
+                if self.is_name_token() {
+                    generic_params.push(self.current_token().value.clone());
+                    self.advance();
+                    if self.match_value(",") { self.advance(); }
+                } else if self.match_value("<") || self.match_value(">") {
+                    if self.match_value(">") { break; }
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume_value(">", "Expected '>' closing method generic params");
+        }
 
         self.consume_value("(", "Expected '(' for method parameters");
 
@@ -894,13 +1132,18 @@ impl AstBuilder {
             None
         };
 
-        Some(Function::new(method_name, params, return_type, body))
+        let func = Function::new(method_name, params, return_type, body)
+            .with_attributes(attrs)
+            .with_generic_params(generic_params);
+        Some(func)
     }
 
     fn parse_function(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
         self.advance(); // consume 'func'
 
-        if !self.match_type(&TokenType::Identifier) {
+        // Function names may be keywords that double as identifiers in this
+        // language — most notably `new`. See is_name_token.
+        if !self.is_name_token() {
             self.log_error("Expected function name");
             return None;
         }
@@ -980,7 +1223,7 @@ impl AstBuilder {
     }
 
     fn parse_parameter(&mut self) -> Option<Parameter> {
-        if !self.match_type(&TokenType::Identifier)
+        if !self.is_name_token()
             && !(self.match_type(&TokenType::Keyword) && self.current_token().value == "self")
         {
             self.log_error("Expected parameter name");
@@ -999,7 +1242,69 @@ impl AstBuilder {
         Some(Parameter::new(param_name, param_type))
     }
 
+    /// Parse a lambda expression: `lambda<GenericParams>(params): RetType { body }`
+    fn parse_lambda(&mut self) -> Option<Box<dyn Expression>> {
+        self.advance(); // consume 'lambda'
+
+        // Generic params <T, U>
+        let mut generic_params = Vec::new();
+        if self.match_value("<") {
+            self.advance();
+            while !self.match_value(">") && !self.error_occurred {
+                if self.match_type(&TokenType::Identifier) {
+                    generic_params.push(self.current_token().value.clone());
+                    self.advance();
+                    if self.match_value(",") {
+                        self.advance();
+                    }
+                } else {
+                    break;
+                }
+            }
+            self.consume_value(">", "Expected '>' closing lambda generic params");
+        }
+
+        // Parameters (params)
+        self.consume_value("(", "Expected '(' after lambda");
+        let params = self.parse_parameter_list();
+        self.consume_value(")", "Expected ')' after lambda parameters");
+
+        // Return type : RetType
+        let mut return_type = None;
+        if self.match_value(":") {
+            self.advance();
+            return_type = self.parse_type();
+        }
+
+        // Body { body }
+        let body = if self.match_value("{") {
+            self.advance();
+            self.consume_end_of_line();
+            let b = self.parse_block();
+            self.consume_value("}", "Expected '}' at end of lambda body");
+            self.consume_end_of_line();
+            b
+        } else {
+            self.log_error("Expected '{' for lambda body");
+            return None;
+        };
+
+        let body = match body {
+            Some(b) => b,
+            None => return None,
+        };
+
+        let lambda = Lambda::new(params, return_type, body).with_generic_params(generic_params);
+        Some(Box::new(lambda))
+    }
+
     fn parse_type(&mut self) -> Option<Box<dyn Type>> {
+        // Function type: `func(T1, T2): R` or `func(): R` or `func(T1, T2)`.
+        // Used as the type of callback parameters (e.g. `f: func(T): U`).
+        if self.match_type(&TokenType::Keyword) && self.current_token().value == "func" {
+            return self.parse_function_type();
+        }
+
         if !self.match_type(&TokenType::Keyword) && !self.match_type(&TokenType::Identifier) {
             self.log_error("Expected type name");
             return None;
@@ -1065,6 +1370,38 @@ impl AstBuilder {
         }
 
         Some(tp)
+    }
+
+    /// Parse a function type `func(T1, T2): R` (return type optional).
+    /// The current token is the `func` keyword on entry.
+    fn parse_function_type(&mut self) -> Option<Box<dyn Type>> {
+        self.advance(); // consume 'func'
+
+        self.consume_value("(", "Expected '(' after 'func' in function type");
+
+        let mut param_types: Vec<Box<dyn Type>> = Vec::new();
+        if !self.match_value(")") {
+            loop {
+                let arg = self.parse_type()?;
+                param_types.push(arg);
+                if self.match_value(",") {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.consume_value(")", "Expected ')' closing function type parameters");
+
+        let return_type = if self.match_value(":") {
+            self.advance();
+            self.parse_type()
+        } else {
+            None
+        };
+
+        Some(Box::new(FunctionType::new(param_types, return_type)))
     }
 
     fn parse_block(&mut self) -> Option<Box<Block>> {
@@ -1196,6 +1533,15 @@ impl AstBuilder {
                                 }
                                 if let Some(nt) = any.downcast_ref::<NullableType>() {
                                     return Box::new(NullableType::new(clone_type(nt.get_inner_type())));
+                                }
+                                if let Some(ft) = any.downcast_ref::<FunctionType>() {
+                                    let params: Vec<Box<dyn Type>> = ft
+                                        .get_param_types()
+                                        .iter()
+                                        .map(|t| clone_type(*t))
+                                        .collect();
+                                    let ret = ft.get_return_type().map(|t| clone_type(t));
+                                    return Box::new(FunctionType::new(params, ret));
                                 }
                                 if let Some(gt) = any.downcast_ref::<GenericType>() {
                                     let args: Vec<Box<dyn Type>> = gt
@@ -1431,8 +1777,8 @@ impl AstBuilder {
                 }
             };
 
-            // Desugar 0..10 → range::new(0, 10[, step])
-            let range_new = Box::new(PathAccess::new(vec!["range".to_string()], "new"));
+            // Desugar 0..10 → Range::new(0, 10[, step])
+            let range_new = Box::new(PathAccess::new(vec!["Range".to_string()], "new"));
             let mut args = vec![start, end];
             if let Some(s) = step {
                 args.push(s);
@@ -1567,7 +1913,7 @@ impl AstBuilder {
     }
 
     fn parse_unary(&mut self) -> Option<Box<dyn Expression>> {
-        if self.match_value("!") || self.match_value("-") || self.match_value("+") {
+        if self.match_value("!") || self.match_value("-") || self.match_value("+") || self.match_value("&") {
             let op = self.current_token().value.clone();
             self.advance();
             let operand = self.parse_unary()?;
@@ -1614,19 +1960,65 @@ impl AstBuilder {
     }
 
     fn parse_primary(&mut self) -> Option<Box<dyn Expression>> {
+        // Lambda expression: lambda<GenericParams>(params): RetType { body }
+        if self.match_type(&TokenType::Keyword) && self.current_token().value == "lambda" {
+            return self.parse_lambda();
+        }
+
         // 标识符 (可能是变量名或结构体类型名，也可能是 :: 命名空间路径)
         if self.match_type(&TokenType::Identifier) {
             let name = self.current_token().value.clone();
             self.advance();
 
-            // 检查是否是 :: 命名空间路径: std::io::println
+            // Lookahead: 判断当前标识符后是否紧跟泛型参数 <T> 或 <T, U>
+            // 如果是，则进入泛型解析路径；否则保留 < 给比较运算符处理
+            if self.match_value("<") {
+                let is_generic = self.lookahead(|parser| {
+                    parser.advance(); // 跳过 '<'
+                    // 至少一个类型参数（Identifier 或类型关键字如 int/float/str/bool）
+                    if !parser.match_type(&TokenType::Identifier)
+                        && !(parser.match_type(&TokenType::Keyword)
+                            && matches!(
+                                parser.current_token().value.as_str(),
+                                "int" | "float" | "str" | "bool"
+                            ))
+                    {
+                        return false;
+                    }
+                    parser.advance();
+                    // 后续可有逗号分隔的更多类型参数
+                    while parser.match_value(",") {
+                        parser.advance();
+                        if !parser.match_type(&TokenType::Identifier)
+                            && !(parser.match_type(&TokenType::Keyword)
+                                && matches!(
+                                    parser.current_token().value.as_str(),
+                                    "int" | "float" | "str" | "bool"
+                                ))
+                        {
+                            return false;
+                        }
+                        parser.advance();
+                    }
+                    if !parser.match_value(">") {
+                        return false;
+                    }
+                    parser.advance();
+                    true
+                });
+                if is_generic {
+                    return self.parse_generic_type_or_call(name);
+                }
+                // 不是泛型，< 留给后续比较运算符处理
+            }
+
+            // parse namespace: std::io::println
             if self.match_value("::") {
                 self.advance(); // consume '::'
                 return self.parse_path_access(name);
             }
 
-            // 检查是否是结构体字面量: TypeName { ... }
-            // 通过大写开头判断类型名（遵循Go命名约定）
+            // parse structure: TypeName { ... }
             if self.match_value("{") && name.chars().next().map_or(false, |c| c.is_uppercase()) {
                 return self.parse_struct_literal(Box::new(Identifier::new(name)));
             }
@@ -1973,6 +2365,31 @@ impl AstBuilder {
         let type_name = self.current_token().value.clone();
         self.advance();
 
+        // Parse generic type <T, U, ...>
+        let mut generic_args = Vec::new();
+        if self.match_value("<") {
+            // consume '<'
+            self.advance();
+            while !self.match_value(">") && !self.is_end_of_line() {
+                if !self.match_type(&TokenType::Identifier) {
+                    self.log_error("Expected generic type argument");
+                    return None;
+                }
+                let arg = self.current_token().value.clone();
+                self.advance();
+                generic_args.push(arg);
+                if !self.match_value(",") {
+                    break;
+                }
+                self.advance();
+            }
+            if !self.match_value(">") {
+                self.log_error("Expected '>' to close generic arguments");
+                return None;
+            }
+            self.advance();
+        }
+
         // Array allocation: new T[size] or new T[size]?
         if self.match_value("[") {
             self.advance();
@@ -1991,8 +2408,8 @@ impl AstBuilder {
         }
 
         // Struct construction: new Type(args) desugars to Type::new(args).
-        // The `New<T>` trait (std/new.gbl) documents the contract; the
-        // constructor is resolved as a static method call on the type.
+        // The `New<T>` trait (std/new.gbl) documents the contract; this
+        // is resolved as a static method call on the type.
         let args = if self.match_value("(") {
             self.advance();
             let mut args = Vec::new();
@@ -2086,6 +2503,78 @@ impl AstBuilder {
         self.consume_value("continue", "continue statement must start with 'continue' keyword");
         self.consume_end_of_line();
         Some(Box::new(ContinueStatement::new()))
+    }
+
+    /// 解析泛型类型或调用：`Vec<int>`、`Result<str, int>`、`Vec<int>::new()` 等。
+    /// 当 `parse_primary` 通过 lookahead 确认当前标识符后跟的是泛型语法时，
+    /// 调用此方法进行完整的泛型解析。
+    fn parse_generic_type_or_call(&mut self, name: String) -> Option<Box<dyn Expression>> {
+        // 解析泛型参数列表：<T, U>（类型参数可为标识符或类型关键字 int/float/str/bool）
+        self.consume_value("<", "Expected '<' after generic type name");
+        let mut type_args = Vec::new();
+        while !self.match_value(">") && !self.error_occurred {
+            if !self.match_type(&TokenType::Identifier)
+                && !(self.match_type(&TokenType::Keyword)
+                    && matches!(self.current_token().value.as_str(), "int" | "float" | "str" | "bool"))
+            {
+                self.log_error("Expected generic type argument");
+                return None;
+            }
+            type_args.push(self.current_token().value.clone());
+            self.advance();
+            if self.match_value(",") { self.advance(); }
+        }
+        self.consume_value(">", "Expected '>' after generic arguments");
+
+        // 处理泛型类型后的 `::method(args)` 调用链，如 `Ref<T>::new(addr)`
+        if self.match_value("::") {
+            self.advance(); // consume '::'
+            // 解析方法名
+            if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+                self.log_error("Expected method name after '::'");
+                return None;
+            }
+            let method_name = self.current_token().value.clone();
+            self.advance();
+
+            // 如果后面有 `(`，解析参数列表并构建 FunctionCall
+            if self.match_value("(") {
+                self.advance();
+                let args = self.parse_argument_list();
+                self.consume_value(")", "Expected ')' after generic function call arguments");
+                let type_expr = format!("{}<{}>", name, type_args.join(", "));
+                let callee = Box::new(PathAccess::new(vec![type_expr], method_name));
+                return Some(Box::new(FunctionCall::new(Some(callee), args)));
+            }
+
+            // 没有 `(`，返回 PathAccess（泛型类型的方法引用）
+            let type_expr = format!("{}<{}>", name, type_args.join(", "));
+            let callee = Box::new(PathAccess::new(vec![type_expr], method_name));
+            return Some(callee);
+        }
+
+        // 如果后面跟着 `(`，则是泛型直接调用：Vec<int>(args)
+        if self.match_value("(") {
+            return self.parse_generic_function_call(name, type_args);
+        }
+
+        // 否则仅作为泛型类型标识：Vec<int>
+        let full_name = format!("{}<{}>", name, type_args.join(", "));
+        Some(Box::new(Identifier::new(full_name)))
+    }
+
+    /// 解析带泛型参数的函数调用：`Vec<int>::new(args)`
+    fn parse_generic_function_call(&mut self, name: String, type_args: Vec<String>) -> Option<Box<dyn Expression>> {
+        self.consume_value("(", "Expected '(' in generic function call");
+        let args = self.parse_argument_list();
+        self.consume_value(")", "Expected ')' after generic function call arguments");
+
+        // 构建调用目标：Vec<int>::new
+        let callee = Box::new(PathAccess::new(
+            vec![format!("{}<{}>", name, type_args.join(", "))],
+            "new"
+        ));
+        Some(Box::new(FunctionCall::new(Some(callee), args)))
     }
 }
 

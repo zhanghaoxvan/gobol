@@ -2,19 +2,26 @@
   "name": "vscode-gobol",
   "displayName": "Gobol Language Support",
   "description": "Language server, syntax highlighting, and IDE features for the Gobol programming language.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "zhanghaoxvan",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Snippets",
+    "Linters",
+    "Formatters"
   ],
+  "icon": "icons/gobol-icon.png",
   "scripts": {
     "vscode:prepublish": "node build.js",
     "build": "node build.js"
   },
   "main": "./out/extension.js",
+  "activationEvents": [
+    "workspaceContains:grape.toml"
+  ],
   "contributes": {
     "languages": [
       {
@@ -26,7 +33,11 @@
         "extensions": [
           ".gbl"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/gobol-file-light.png",
+          "dark": "./icons/gobol-file-dark.png"
+        }
       }
     ],
     "grammars": [
@@ -42,22 +53,75 @@
         "gobol.lspPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the gobol-lsp binary. If empty, uses the built binary from the project."
+          "description": "Path to the gobol-lsp binary. If empty, searches ~/.gobol/bin, project target/debug, target/release, and then PATH."
         },
         "gobol.cargoRun": {
           "type": "boolean",
           "default": false,
-          "description": "If true, run via 'cargo run --bin gobol-lsp' instead of a pre-built binary (slower, for development)."
+          "description": "If true, run via 'cargo run --bin gobol-lsp --release' instead of a pre-built binary (slower, for development)."
+        },
+        "gobol.trace.server": {
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the Gobol language server."
         }
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "gobol.restartLsp",
+        "title": "Gobol: Restart Language Server",
+        "category": "Gobol",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "gobol.showStatus",
+        "title": "Gobol: Show Language Server Status",
+        "category": "Gobol",
+        "icon": "$(server)"
+      },
+      {
+        "command": "gobol.showProject",
+        "title": "Gobol: Show Project Info (grape.toml)",
+        "category": "Gobol",
+        "icon": "$(package)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "gobol.restartLsp",
+          "when": "editorLangId == gobol"
+        },
+        {
+          "command": "gobol.showStatus",
+          "when": "editorLangId == gobol"
+        },
+        {
+          "command": "gobol.showProject",
+          "when": "gobol:hasProject"
+        }
+      ]
+    },
+    "snippets": [
+      {
+        "language": "gobol",
+        "path": "./snippets/gobol.code-snippets"
+      }
+    ]
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/zhanghaoxvan/gobol"
   },
   "dependencies": {
-    "vscode-languageclient": "^10.1.0"
+    "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
     "esbuild": "^0.28.2"

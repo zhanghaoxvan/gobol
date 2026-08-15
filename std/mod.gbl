@@ -21,6 +21,8 @@ import result;
 import thread;
 import mem;
 import cmp;
+import iterator;
+import option;
 
 // Re-export all submodules into the std root namespace.
-export(io, int, float, vec, range, new, trait, str, math, fs, net, debug, assert, ops, ref, result, thread, mem, cmp);
+export(io, int, float, vec, range, new, trait, str, math, fs, net, debug, assert, ops, ref, result, thread, mem, cmp, iterator, option);

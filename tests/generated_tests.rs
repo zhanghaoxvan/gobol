@@ -176,7 +176,7 @@ fn test_functions_void_return() {
 /// 用例：modules/lib/math.gbl | 预期编译失败（库文件，无main，AOT链接缺main符号）
 #[test]
 fn test_modules_lib_math() {
-    let path = fixture_path("fixtures/modules/lib/math.gbl");
+    let path = fixture_path("fixtures/modules/std/math.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
     // Library file without main — AOT linking fails (no main symbol) → CompileError
     result.assert_failure(ExitCode::CompileError);
@@ -362,6 +362,14 @@ fn test_stdlib_result_test() {
 #[test]
 fn test_stdlib_enum_test() {
     let path = fixture_path("fixtures/stdlib/enum_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：functions/lambda.gbl | 预期正常运行
+#[test]
+fn test_functions_lambda() {
+    let path = fixture_path("fixtures/functions/lambda.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
 }

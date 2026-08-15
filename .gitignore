@@ -9,3 +9,7 @@ grape.toml
 *.out
 *.out.c
 *.exe
+tmp.*
+
+vscode-gobol/node_modules/
+vscode-gobol/.marscode/

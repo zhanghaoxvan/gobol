@@ -19,13 +19,13 @@
 // the concrete impl-block signature, enabling `new Type(args)` syntax for
 // any arity.
 trait New<T> {
-    #[dynamic_args]
-    func new(): T
+    #[dynamic]
+    func new(): T;
 }
 
 // Drop — complementary trait for `New`. Values that own heap memory or
 // other resources (file handles, sockets, Ref<T> owning references) MUST
 // implement `Drop` so calls to `drop(self)` release the memory.
 trait Drop {
-    func drop(self)
+    func drop(self);
 }

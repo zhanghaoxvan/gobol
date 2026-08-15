@@ -62,9 +62,9 @@ impl<T> Channel<T> {
     // Receive a value from the channel. Blocks until a value is available.
     // Returns Result<T, int>: Ok(value) on success, Err(-1) if channel closed.
     func recv(self): Result<T, int> {
-        var val = gobol_chan_recv(_handle);
+        var value = gobol_chan_recv(_handle);
         // TODO: distinguish "value 0" from "channel closed" via status out-param
-        Result<T, int>::ok(val)
+        Result<T, int>::Ok(value)
     }
 
     func drop(self) {

@@ -13,7 +13,6 @@
     "Linters",
     "Formatters"
   ],
-  "icon": "icons/gobol-icon.png",
   "scripts": {
     "vscode:prepublish": "node build.js",
     "build": "node build.js"
@@ -33,11 +32,7 @@
         "extensions": [
           ".gbl"
         ],
-        "configuration": "./language-configuration.json",
-        "icon": {
-          "light": "./icons/gobol-file-light.png",
-          "dark": "./icons/gobol-file-dark.png"
-        }
+        "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [

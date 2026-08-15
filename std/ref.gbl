@@ -10,7 +10,7 @@
 #[header("std/runtime.h")]
 extern "C" {
     func gobol_mem_load(addr: int): int;
-    func gobol_mem_store(addr: int, val: int);
+    func gobol_mem_store(addr: int, value: int);
     func gobol_array_elem_addr(arr: int, i: int): int;
 }
 

@@ -122,6 +122,7 @@ fn main() {
     }
 
     let is_verbose = args.iter().any(|s| s == "--verbose" || s == "-v");
+    let is_check_only = args.iter().any(|s| s == "--check");
 
     let mut build_mode = BuildMode::Debug;
     let mut out_name: Option<String> = None;
@@ -302,6 +303,12 @@ fn main() {
         process::exit(1);
     }
 
+    // --check: stop after semantic analysis (parse + type-check only).
+    if is_check_only {
+        println!("{}", "Semantic check passed.".green());
+        process::exit(0);
+    }
+
     let mut ir_builder = gobol::ir::IRBuilder::new();
     ir_builder.set_current_file(filename.clone());
     let mut ir = match ir_builder.build(&prog) {
@@ -450,6 +457,22 @@ fn main() {
                 } else if let Some(sub_file) = resolve_module_file(&sub_parts, lib_paths, module_file) {
                     load_module_into_ir(&sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
                 }
+            } else if let Some(from_import) = stmt.as_any().downcast_ref::<gobol::ast::FromImportStatement>() {
+                // `from module import member, ...` — load the module into IR.
+                // The bare-name function entries are created automatically by
+                // load_module_into_ir, so from-import members are resolvable.
+                let sub_name = from_import.get_module();
+                let sub_parts: Vec<String> = sub_name
+                    .split("::")
+                    .flat_map(|s| s.split('.'))
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if let Some(sub_file) = resolve_module_file_relative(&sub_parts, module_file) {
+                    load_module_into_ir(sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
+                } else if let Some(sub_file) = resolve_module_file(&sub_parts, lib_paths, module_file) {
+                    load_module_into_ir(sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
+                }
             }
         }
     }
@@ -477,6 +500,27 @@ fn main() {
                 } else {
                     // Module resolution failure is non-fatal here; the
                     // semantic analyzer already reported the error.
+                }
+            } else if let Some(from_import) = stmt.as_any().downcast_ref::<gobol::ast::FromImportStatement>() {
+                // `from module import member, ...` — load the module so its
+                // functions (including the requested members) are available
+                // in the IR for code generation.
+                let module_name = from_import.get_module();
+                let path_parts: Vec<String> = module_name
+                    .split("::")
+                    .flat_map(|s| s.split('.'))
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if let Some(module_path) = resolve_module_file(&path_parts, &lib_paths, &filename) {
+                    load_module_into_ir(
+                        module_name,
+                        &module_path,
+                        &lib_paths,
+                        &error_fmt,
+                        &mut ir,
+                        &mut visited,
+                    );
                 }
             }
         }

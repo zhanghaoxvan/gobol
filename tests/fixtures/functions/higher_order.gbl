@@ -1,0 +1,21 @@
+import std;
+
+// A higher-order function: takes a function parameter and calls it.
+func apply(f: func(int): int, x: int): int {
+    f(x)
+}
+
+// A named function to pass as an argument.
+func double(n: int): int {
+    n * 2
+}
+
+func main() {
+    // Pass a lambda as the function argument
+    var a = apply(lambda(n: int): int { n + 1 }, 10);
+    io::println(@"lambda arg: {a}");
+
+    // Pass a named function by reference
+    var b = apply(&double, 5);
+    io::println(@"named func arg: {b}");
+}

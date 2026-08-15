@@ -321,6 +321,8 @@ impl TypeResolver {
             }
             IRExpr::ArrayIndex { .. } => DataType::Int,
             IRExpr::Assignment { target, .. } => self.infer_type(target),
+            IRExpr::FuncRef(name) => self.func_return_type(name),
+            IRExpr::IndirectCall { .. } => DataType::Int,
             IRExpr::None => DataType::None_,
         }
     }
@@ -438,6 +440,11 @@ pub struct CraneliftBackend {
     /// like `Range::new(start, end)` and `Range::new(start, end, step)` to
     /// coexist with distinct symbol names.
     func_symbols: HashMap<(String, usize), String>,
+    /// Per-overload linker symbol keyed by (name, arity, occurrence_index).
+    /// Populated during the declare pass and consumed by the compile pass
+    /// so each overload's body is compiled under the symbol that was
+    /// actually declared (including disambiguator suffixes).
+    func_overload_symbols: HashMap<(String, usize, usize), String>,
     /// symbol name -> FuncId (user-defined functions + runtime imports)
     func_ids: HashMap<String, cranelift_module::FuncId>,
     /// string literal text -> DataId
@@ -497,32 +504,53 @@ impl CraneliftBackend {
         // Declare runtime functions (imports).
         self.declare_runtime_functions();
 
+        // Per-(name, arity) occurrence counter, shared across declare and
+        // compile passes so both iterate in identical order and assign the
+        // same disambiguated symbol to the same overload.
+        let mut occurrence_counter: HashMap<(String, usize), usize> = HashMap::new();
+        let next_idx = |oc: &mut HashMap<_, _>, name: &str, arity: usize| -> usize {
+            let key = (name.to_string(), arity);
+            let v = oc.entry(key).or_insert(0);
+            let idx = *v;
+            *v += 1;
+            idx
+        };
+
         // First pass: declare all user functions so calls can resolve forward.
         for f in &ir.functions {
             if f.is_main {
                 continue;
             }
-            self.declare_user_function(f)?;
+            let idx = next_idx(&mut occurrence_counter, &f.name, f.params.len());
+            self.declare_user_function(f, idx)?;
         }
         for imp in &ir.impls {
             for m in &imp.methods {
                 // declare_user_function registers (m.name, arity) -> symbol.
                 // m.name is already in "Struct::method" form (set by IRBuilder),
                 // so no additional alias registration is needed.
-                self.declare_user_function(m)?;
+                let idx = next_idx(&mut occurrence_counter, &m.name, m.params.len());
+                self.declare_user_function(m, idx)?;
             }
         }
+
+        // Reset the occurrence counter for the compile pass so it walks the
+        // same sequence and resolves the same (name, arity, occurrence_idx)
+        // triples used by the declare pass.
+        occurrence_counter.clear();
 
         // Second pass: define function bodies.
         for f in &ir.functions {
             if f.is_main {
                 continue;
             }
-            self.compile_function(f)?;
+            let idx = next_idx(&mut occurrence_counter, &f.name, f.params.len());
+            self.compile_function(f, idx)?;
         }
         for imp in &ir.impls {
             for m in &imp.methods {
-                self.compile_function(m)?;
+                let idx = next_idx(&mut occurrence_counter, &m.name, m.params.len());
+                self.compile_function(m, idx)?;
             }
         }
 
@@ -844,8 +872,8 @@ impl CraneliftBackend {
         self.func_ids.insert(name.to_string(), id);
     }
 
-    fn declare_user_function(&mut self, f: &IRFunction) -> Result<(), String> {
-        let is_extern = matches!(&f.intrinsic, Some(v) if v.starts_with("extern:"));
+    fn declare_user_function(&mut self, f: &IRFunction, occurrence_idx: usize) -> Result<(), String> {
+        let is_extern = f.attributes.contains(&"extern".to_string());
         let arity = f.params.len();
         // Variadic extern "C" functions are never declared with a fixed
         // signature — per-arity stubs are declared lazily at call sites.
@@ -855,13 +883,22 @@ impl CraneliftBackend {
             self.func_symbols.insert((f.name.clone(), arity), f.name.clone());
             return Ok(());
         }
+
+        // Intrinsic functions (e.g., int::add, int::sub) have no body — they are
+        // inlined at call sites via try_intrinsic_method. Do not declare them as
+        // Export functions; the linker would complain about missing definitions.
+        if f.attributes.iter().any(|a| a == "intrinsic") {
+            return Ok(());
+        }
+
         // extern "C" functions use the original C symbol name as the linker
         // symbol (no gbl_ prefix, no arity suffix, no module prefix).
         // After import processing, f.name may be `builtins::gobol_print`, but
-        // the intrinsic field holds the bare name `extern:gobol_print`.
+        // the attributes list may contain "extern" or "extern:name" entries.
         let sym = if is_extern {
-            f.intrinsic.as_ref()
-                .and_then(|i| i.strip_prefix("extern:"))
+            f.attributes.iter()
+                .find(|a| *a == "extern")
+                .and_then(|a| a.strip_prefix("extern:"))
                 .unwrap_or(&f.name)
                 .to_string()
         } else {
@@ -874,6 +911,38 @@ impl CraneliftBackend {
         // builtins.gbl's extern "C" block).  Skip duplicate declarations.
         if is_extern && self.func_ids.contains_key(&sym) {
             return Ok(());
+        }
+
+        // Overloaded methods may share the same (name, arity) — e.g.
+        // `Vec::new(arr: T[])` and `Vec::new(capacity: int)` both have
+        // arity 2 (self + 1 param) and thus the same base symbol
+        // `gbl_Vec_new_2`.  When that happens, mint a unique symbol by
+        // appending a numeric disambiguator so each overload gets its own
+        // linker symbol and definition.
+        let sym = if !is_extern && self.func_ids.contains_key(&sym) {
+            let mut idx = 1;
+            loop {
+                let candidate = format!("{}_{}", sym, idx);
+                if !self.func_ids.contains_key(&candidate) {
+                    // Point (name, arity) at the most recently declared
+                    // overload so call resolution still finds a symbol.
+                    self.func_symbols.insert((f.name.clone(), arity), candidate.clone());
+                    break candidate;
+                }
+                idx += 1;
+            }
+        } else {
+            sym
+        };
+
+        // Remember which symbol was used for the (name, arity, occurrence_idx)
+        // triple, so the compile pass can compile this function's body under
+        // the exact same linker symbol.
+        if !is_extern {
+            self.func_overload_symbols.insert(
+                (f.name.clone(), arity, occurrence_idx),
+                sym.clone(),
+            );
         }
 
         let mut sig = self.module.make_signature();
@@ -895,25 +964,46 @@ impl CraneliftBackend {
 
     /// Map an IR function name + arity to a Gobol-internal symbol name.
     /// Arity is included in the symbol so overloaded methods (same name,
-    /// different parameter count) get distinct linker symbols.
+    /// different parameter count) get distinct linker symbols.  Also strip
+    /// linker-invalid characters that generic parameters inject (`<`, `>`,
+    /// `?`, `,`, whitespace) so names like `Vec<T>::iter` become valid
+    /// assembler symbols.
     fn func_symbol(name: &str, arity: usize) -> String {
+        let sanitized: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))
+            .collect();
         format!(
             "gbl_{}_{}",
-            name.replace("::", "_").replace('.', "_"),
+            sanitized.replace("::", "_").replace('.', "_"),
             arity
         )
     }
 
     // ==================== function compilation ====================
 
-    fn compile_function(&mut self, ir_func: &IRFunction) -> Result<(), String> {
+    fn compile_function(&mut self, ir_func: &IRFunction, occurrence_idx: usize) -> Result<(), String> {
         // Intrinsic functions (bodyless declarations backed by the C runtime)
         // are dispatched directly at call sites — never compile a body for them.
-        if ir_func.intrinsic.is_some() {
+        if ir_func.attributes.iter().any(|a| a == "intrinsic") {
+            return Ok(());
+        }
+        // Extern "C" functions are imports — they have no body to compile.
+        // Their linker symbol is the bare C name (registered in
+        // declare_user_function), so func_symbol() would compute a wrong key.
+        if ir_func.attributes.contains(&"extern".to_string()) {
             return Ok(());
         }
         self.reset_function_state(ir_func.return_type.clone());
-        let sym = Self::func_symbol(&ir_func.name, ir_func.params.len());
+        // Resolve the exact symbol used during the declare pass. Overloaded
+        // methods with the same (name, arity) were disambiguated with a
+        // numeric suffix, so we must look up via the occurrence index.
+        let arity = ir_func.params.len();
+        let sym = self
+            .func_overload_symbols
+            .get(&(ir_func.name.clone(), arity, occurrence_idx))
+            .cloned()
+            .unwrap_or_else(|| Self::func_symbol(&ir_func.name, arity));
         let func_id = *self.func_ids.get(&sym).ok_or_else(|| format!("missing func {}", sym))?;
 
         let mut ctx = self.module.make_context();
@@ -1296,13 +1386,14 @@ impl CraneliftBackend {
 
         bcx.ins().jump(cond_b, &[]);
         // cond_b is sealed after the incr back-edge (see translate_while).
+        // incr_b is sealed after the body's fall-through jump, so Cranelift
+        // knows the body block as a predecessor before sealing.
         bcx.switch_to_block(cond_b);
         self.diverged = false;
         let cur = bcx.use_var(iv);
         let cmp = bcx.ins().icmp(cmp_op, cur, end);
         bcx.ins().brif(cmp, body_b, &[], end_b, &[]);
         bcx.seal_block(body_b);
-        bcx.seal_block(incr_b);
         bcx.seal_block(end_b);
 
         bcx.switch_to_block(body_b);
@@ -1313,6 +1404,7 @@ impl CraneliftBackend {
         if !self.diverged {
             bcx.ins().jump(incr_b, &[]);
         }
+        bcx.seal_block(incr_b);
 
         bcx.switch_to_block(incr_b);
         self.diverged = false;
@@ -1362,6 +1454,7 @@ impl CraneliftBackend {
 
         bcx.ins().jump(cond_b, &[]);
         // cond_b sealed after the incr back-edge (see translate_while).
+        // incr_b sealed after the body's fall-through jump (see translate_while).
         bcx.switch_to_block(cond_b);
         self.diverged = false;
         let i = bcx.use_var(idx_var);
@@ -1369,7 +1462,6 @@ impl CraneliftBackend {
         let cmp = bcx.ins().icmp(IntCC::SignedLessThan, i, len);
         bcx.ins().brif(cmp, body_b, &[], end_b, &[]);
         bcx.seal_block(body_b);
-        bcx.seal_block(incr_b);
         bcx.seal_block(end_b);
 
         bcx.switch_to_block(body_b);
@@ -1386,6 +1478,7 @@ impl CraneliftBackend {
         if !self.diverged {
             bcx.ins().jump(incr_b, &[]);
         }
+        bcx.seal_block(incr_b);
 
         bcx.switch_to_block(incr_b);
         self.diverged = false;
@@ -1426,6 +1519,7 @@ impl CraneliftBackend {
 
         bcx.ins().jump(cond_b, &[]);
         // cond_b sealed after the incr back-edge (see translate_while).
+        // incr_b sealed after the body's fall-through jump (see translate_while).
         bcx.switch_to_block(cond_b);
         self.diverged = false;
         let i = bcx.use_var(idx_var);
@@ -1433,7 +1527,6 @@ impl CraneliftBackend {
         let cmp = bcx.ins().icmp(IntCC::SignedLessThan, i, len);
         bcx.ins().brif(cmp, body_b, &[], end_b, &[]);
         bcx.seal_block(body_b);
-        bcx.seal_block(incr_b);
         bcx.seal_block(end_b);
 
         bcx.switch_to_block(body_b);
@@ -1447,6 +1540,7 @@ impl CraneliftBackend {
         if !self.diverged {
             bcx.ins().jump(incr_b, &[]);
         }
+        bcx.seal_block(incr_b);
 
         bcx.switch_to_block(incr_b);
         self.diverged = false;
@@ -1590,6 +1684,10 @@ impl CraneliftBackend {
             IRExpr::Assignment { target, value } => {
                 self.translate_assignment(bcx, target, value)?;
                 Ok(self.translate_expr(bcx, target)?)
+            }
+            IRExpr::FuncRef(name) => self.translate_func_ref(bcx, name),
+            IRExpr::IndirectCall { callee, args } => {
+                self.translate_indirect_call(bcx, callee, args)
             }
             IRExpr::None => Ok(bcx.ins().iconst(types::I64, 0)),
         }
@@ -1773,6 +1871,88 @@ impl CraneliftBackend {
         self.translate_call_with_args(bcx, func, &arg_vals)
     }
 
+    /// Resolve a function name to its linker symbol, looking up both the
+    /// full name and the short name (for cross-module calls).
+    fn resolve_func_symbol(&self, func: &str, arity: usize) -> Option<String> {
+        if let Some(sym) = self.func_symbols.get(&(func.to_string(), arity)) {
+            return Some(sym.clone());
+        }
+        let short = func.rsplit("::").next().unwrap_or(func);
+        if let Some(sym) = self.func_symbols.get(&(short.to_string(), arity)) {
+            return Some(sym.clone());
+        }
+        None
+    }
+
+    /// Translate a function reference (`FuncRef(name)`) into the function's
+    /// address as an i64 value. Used to pass functions as arguments to
+    /// higher-order functions.
+    fn translate_func_ref(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        name: &str,
+    ) -> Result<ir::Value, String> {
+        // Try arity 0..=16 to find a declared symbol for this function name.
+        // Function references don't carry arity info, so probe common arities.
+        for arity in 0..=32usize {
+            if let Some(sym) = self.resolve_func_symbol(name, arity) {
+                if let Some(fid) = self.func_ids.get(&sym) {
+                    let fref = self.module.declare_func_in_func(*fid, &mut bcx.func);
+                    let addr = bcx.ins().func_addr(types::I64, fref);
+                    return Ok(addr);
+                }
+            }
+        }
+        Err(format!("cannot take address of unknown function '{}'", name))
+    }
+
+    /// Translate an indirect call through a function pointer value.
+    /// All arguments and the return value are i64 (the universal value type
+    /// in the GoBol ABI), so a single signature suffices.
+    fn translate_indirect_call(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        callee: &IRExpr,
+        args: &[IRExpr],
+    ) -> Result<ir::Value, String> {
+        let arg_vals = self.translate_args(bcx, args)?;
+        let arity = arg_vals.len();
+
+        // 如果 callee 是 FuncRef，根据实际参数个数解析重载
+        if let IRExpr::FuncRef(name) = callee {
+            if let Some(sym) = self.resolve_func_symbol(name, arity) {
+                if let Some(fid) = self.func_ids.get(&sym) {
+                    let fref = self.module.declare_func_in_func(*fid, &mut bcx.func);
+                    let call = bcx.ins().call(fref, &arg_vals);
+                    let results = bcx.inst_results(call);
+                    if results.is_empty() {
+                        return Ok(bcx.ins().iconst(types::I64, 0));
+                    } else {
+                        return Ok(results[0]);
+                    }
+                }
+            }
+        }
+
+        let callee_val = self.translate_expr(bcx, callee)?;
+
+        // Build a signature: all params are i64, return is i64.
+        let mut sig = self.module.make_signature();
+        for _ in &arg_vals {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+        let sig_ref = bcx.import_signature(sig);
+
+        let call = bcx.ins().call_indirect(sig_ref, callee_val, &arg_vals);
+        let results = bcx.inst_results(call);
+        if results.is_empty() {
+            Ok(bcx.ins().iconst(types::I64, 0))
+        } else {
+            Ok(results[0])
+        }
+    }
+
     /// Check whether `func` (or its short name) is a variadic extern "C" function.
     fn is_variadic_func(&self, func: &str) -> bool {
         if self.variadic_funcs.contains(func) {
@@ -1845,11 +2025,13 @@ impl CraneliftBackend {
     ) -> Result<ir::Value, String> {
         // Built-in IO functions — call runtime directly with pre-translated args.
         if let Some(rt) = builtin_runtime(func) {
-            if rt == "gobol_print" || rt == "gobol_println" {
-                self.call_runtime(bcx, rt, arg_vals);
-                return Ok(bcx.ins().iconst(types::I64, 0));
+            // Void-ish runtime IO helpers: call runtime but return dummy value.
+            // `read` actually returns a string (i64), so forward that value.
+            // For the others, just discard the call result.
+            if rt == "gobol_read" {
+                return Ok(self.call_runtime(bcx, rt, arg_vals));
             }
-            let _rt = rt;
+            self.call_runtime(bcx, rt, arg_vals);
             return Ok(bcx.ins().iconst(types::I64, 0));
         }
         // panic(msg)
@@ -2289,14 +2471,19 @@ impl CraneliftBackend {
         let fid = self.func_ids[name];
         let fref = self.module.declare_func_in_func(fid, &mut bcx.func);
         let call = bcx.ins().call(fref, args);
-        if self.func_returns_void(name) {
+        let results = bcx.inst_results(call);
+        if results.is_empty() {
+            // Runtime call with void return — use 0 placeholder so the caller
+            // always gets a Value (the compiler only reads this placeholder
+            // when the enclosing expression is in a void context anyway).
             let _ = call;
             bcx.ins().iconst(types::I64, 0)
         } else {
-            bcx.inst_results(call)[0]
+            results[0]
         }
     }
 
+    #[allow(dead_code)]
     fn func_returns_void(&self, name: &str) -> bool {
         matches!(name,
             "gobol_print" | "gobol_println" | "gobol_eprint" | "gobol_eprintln"
@@ -2507,6 +2694,7 @@ impl CraneliftBackend {
             module,
             fn_ctx: FunctionBuilderContext::new(),
             func_symbols: HashMap::new(),
+            func_overload_symbols: HashMap::new(),
             func_ids: HashMap::new(),
             string_data: HashMap::new(),
             constructors: HashMap::new(),
@@ -2596,14 +2784,16 @@ impl CraneliftBackend {
 
 /// Map a Gobol builtin call name to its runtime function.
 fn builtin_runtime(name: &str) -> Option<&'static str> {
-    // Strip any :: namespace prefix and match on the function name
+    // Strip any :: namespace prefix and match on the function name.
+    // Call sites sometimes use bare names (`print`) or sometimes the
+    // module-qualified C name (`builtins::gobol_print`).
     let short = name.rsplit("::").next().unwrap_or(name);
     match short {
-        "print" | "_print" => Some("gobol_print"),
-        "println" | "_println" => Some("gobol_println"),
-        "eprint" | "_eprint" => Some("gobol_eprint"),
-        "eprintln" | "_eprintln" => Some("gobol_eprintln"),
-        "read" | "_read" => Some("gobol_read"),
+        "print" | "_print" | "gobol_print" => Some("gobol_print"),
+        "println" | "_println" | "gobol_println" => Some("gobol_println"),
+        "eprint" | "_eprint" | "gobol_eprint" => Some("gobol_eprint"),
+        "eprintln" | "_eprintln" | "gobol_eprintln" => Some("gobol_eprintln"),
+        "read" | "_read" | "gobol_read" => Some("gobol_read"),
         // math intrinsics
         "sin" => Some("gobol_math_sin"),
         "cos" => Some("gobol_math_cos"),

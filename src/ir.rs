@@ -1,7 +1,7 @@
 // ir.rs
 use crate::ast::*;
 use crate::environment::DataType;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ==================== IR 数据结构 ====================
 
@@ -23,7 +23,7 @@ pub struct IRFunction {
     pub is_main: bool,
     pub is_method: bool,
     pub struct_name: Option<String>,
-    pub intrinsic: Option<String>,
+    pub attributes: Vec<String>,
     /// extern "C" variadic functions (declared with `...`) set this to true.
     pub is_variadic: bool,
 }
@@ -54,6 +54,7 @@ pub struct IRImpl {
     pub struct_name: String,
     pub generic_params: Vec<String>,
     pub methods: Vec<IRFunction>,
+    pub attributes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +90,11 @@ pub enum IRExpr {
     ArrayLiteral(Vec<IRExpr>),
     StructLiteral { name: String, fields: Vec<(String, IRExpr)> },
     Cast { expr: Box<IRExpr>, target: DataType },
-    Assignment { target: Box<IRExpr>, value: Box<IRExpr> },  // ← 添加这个
+    Assignment { target: Box<IRExpr>, value: Box<IRExpr> },
+    /// Address of a named function (used to pass functions as arguments).
+    FuncRef(String),
+    /// Call a function through a pointer value (e.g. a `func(...)` parameter).
+    IndirectCall { callee: Box<IRExpr>, args: Vec<IRExpr> },
     None,
 }
 
@@ -135,6 +140,11 @@ pub struct IRBuilder {
     current_file: String,
     // Counter for generating unique temp variable names (e.g. __try_tmp_N)
     tmp_counter: usize,
+    // Counter for generating unique anonymous lambda function names (__lambda_N)
+    lambda_counter: usize,
+    // Tracks local variable types in the current function scope so that
+    // captured variables (free vars in lambdas) can be typed correctly.
+    var_types: HashMap<String, DataType>,
 }
 
 impl IRBuilder {
@@ -162,6 +172,8 @@ impl IRBuilder {
             expand_functions: HashMap::new(),
             current_file: String::new(),
             tmp_counter: 0,
+            lambda_counter: 0,
+            var_types: HashMap::new(),
         }
     }
 
@@ -218,7 +230,7 @@ impl IRBuilder {
                         is_main: false,
                         is_method: false,
                         struct_name: None,
-                        intrinsic: Some(format!("extern:{}", name)),
+                        attributes: vec!["extern".to_string()],
                         is_variadic: func.is_variadic(),
                     });
                 }
@@ -296,6 +308,11 @@ impl IRBuilder {
 
         // 检查数组类型 → return Unknown to mark as array
         if ty.as_type_any().downcast_ref::<ArrayType>().is_some() {
+            return DataType::Unknown;
+        }
+
+        // Function type `func(T1, T2): R` → function pointer (i64).
+        if ty.as_type_any().downcast_ref::<FunctionType>().is_some() {
             return DataType::Unknown;
         }
 
@@ -379,7 +396,7 @@ impl IRBuilder {
             // Bodyless declarations (e.g. `#[intrinsic(...)] func foo(...);`)
             // keep body = None so the backend knows to dispatch them to the
             // C runtime instead of compiling a (non-existent) body.
-            if func.intrinsic.is_some() && self.current_block.is_empty() {
+            if Self::has_attr(&func.attributes, "intrinsic") && self.current_block.is_empty() {
                 func.body = None;
                 std::mem::take(&mut self.current_block);
             } else {
@@ -660,6 +677,215 @@ impl IRBuilder {
             _ => None,
         }
     }
+
+    fn has_attr(attrs: &[String], name: &str) -> bool {
+        attrs.iter().any(|a| a == name)
+    }
+
+    fn collect_attr_names(attrs: &[Attribute]) -> Vec<String> {
+        attrs.iter().map(|a| a.name.clone()).collect()
+    }
+
+    /// Best-effort type inference for an IR expression. Used to infer the
+    /// type of `var x = expr;` declarations that omit an explicit type, so
+    /// that captured variables in lambdas get a concrete type instead of
+    /// `None_` (which Cranelift cannot lower to a parameter).
+    fn infer_expr_type(&self, e: &IRExpr) -> DataType {
+        match e {
+            IRExpr::Literal(LitValue::Int(_)) => DataType::Int,
+            IRExpr::Literal(LitValue::Float(_)) => DataType::Float,
+            IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
+            IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
+            IRExpr::Literal(LitValue::None) => DataType::None_,
+            IRExpr::Variable(name) => self.var_types.get(name).cloned().unwrap_or(DataType::Int),
+            IRExpr::StructLiteral { name, .. } => DataType::Struct(name.clone()),
+            IRExpr::Call { func, .. } => {
+                // Look up the function's return type among already-collected functions.
+                for f in &self.ir.functions {
+                    if f.name == *func {
+                        return f.return_type.clone();
+                    }
+                }
+                DataType::Int
+            }
+            IRExpr::MethodCall { object, method, .. } => {
+                // Struct constructor: Type::new(...)
+                if method == "new" {
+                    if let IRExpr::Variable(name) = object.as_ref() {
+                        if self.structs.contains_key(name) {
+                            return DataType::Struct(name.clone());
+                        }
+                    }
+                }
+                let obj_ty = self.infer_expr_type(object);
+                if let DataType::Struct(sname) = &obj_ty {
+                    let full = format!("{}::{}", sname, method);
+                    for f in &self.ir.functions {
+                        if f.name == full {
+                            return f.return_type.clone();
+                        }
+                    }
+                }
+                DataType::Int
+            }
+            IRExpr::Binary { op, left, right } => {
+                if matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||") {
+                    return DataType::Bool;
+                }
+                let lt = self.infer_expr_type(left);
+                let rt = self.infer_expr_type(right);
+                if matches!(lt, DataType::Float) || matches!(rt, DataType::Float) {
+                    return DataType::Float;
+                }
+                // String concatenation: if either side is str, result is str.
+                if op == "+" && (matches!(lt, DataType::Str) || matches!(rt, DataType::Str)) {
+                    return DataType::Str;
+                }
+                lt
+            }
+            IRExpr::Unary { op, operand } => {
+                if op == "!" {
+                    return DataType::Bool;
+                }
+                self.infer_expr_type(operand)
+            }
+            IRExpr::Cast { target, .. } => target.clone(),
+            IRExpr::ArrayIndex { .. } => DataType::Int,
+            IRExpr::Assignment { target, .. } => self.infer_expr_type(target),
+            IRExpr::ArrayLiteral(_) => DataType::Unknown,
+            IRExpr::MemberAccess { .. } => DataType::Int,
+            IRExpr::FuncRef(name) => {
+                // Look up the referenced function's return type.
+                for f in &self.ir.functions {
+                    if f.name == *name {
+                        return f.return_type.clone();
+                    }
+                }
+                DataType::Int
+            }
+            IRExpr::IndirectCall { .. } => DataType::Int,
+            IRExpr::None => DataType::None_,
+        }
+    }
+
+    // ==================== Lambda compilation ====================
+
+    /// Compile a lambda expression into an anonymous IR function.
+    ///
+    /// Captures `var` variables from the enclosing scope by:
+    /// 1. Scanning the lambda body for free identifiers (not bound by the
+    ///    lambda's own parameters or inner declarations).
+    /// 2. Filtering those against the enclosing function's variable table
+    ///    (`var_types`) to determine which are actually captured and their
+    ///    types.
+    /// 3. Adding captured variables as leading parameters to the generated
+    ///    anonymous function (`__lambda_N`).
+    ///
+    /// Returns `(function_name, captured_vars)` where `captured_vars` is a
+    /// list of `(name, type)` pairs. Call sites must prepend the current
+    /// values of captured variables as leading arguments.
+    fn compile_lambda_function(&mut self, lambda: &Lambda) -> (String, Vec<(String, DataType)>) {
+        let name = format!("__lambda_{}", self.lambda_counter);
+        self.lambda_counter += 1;
+
+        // Collect lambda parameter names (these are bound, not captured).
+        let param_names: Vec<String> = lambda.get_parameters()
+            .map(|ps| ps.iter().map(|p| p.get_name().to_string()).collect())
+            .unwrap_or_default();
+
+        // Collect free variable names referenced in the lambda body.
+        let mut bound: HashSet<String> = param_names.iter().cloned().collect();
+        let mut free_names: Vec<String> = Vec::new();
+        collect_free_vars_from_block(lambda.get_body(), &mut bound, &mut free_names);
+
+        // Filter free vars to those that exist in the enclosing scope.
+        let mut captured: Vec<(String, DataType)> = Vec::new();
+        for n in &free_names {
+            if let Some(ty) = self.var_types.get(n) {
+                if !captured.iter().any(|(cn, _)| cn == n) {
+                    captured.push((n.clone(), ty.clone()));
+                }
+            }
+        }
+
+        // Build the full parameter list: captured vars first, then lambda params.
+        let mut params: Vec<IRParam> = Vec::new();
+        for (cn, ct) in &captured {
+            params.push(IRParam { name: cn.clone(), ty: ct.clone() });
+        }
+        if let Some(ps) = lambda.get_parameters() {
+            for p in ps {
+                let pname = p.get_name().to_string();
+                let pty = self.ast_type_to_data_type(p.get_type());
+                params.push(IRParam { name: pname, ty: pty });
+            }
+        }
+
+        let return_type = lambda.get_return_type()
+            .map(|t| self.ast_type_to_data_type(Some(t)))
+            .unwrap_or(DataType::None_);
+
+        // Save the enclosing function's compilation context.
+        let saved_function = self.current_function.take();
+        let saved_return = self.current_function_return.clone();
+        let saved_ir_function = self.current_ir_function.take();
+        let saved_block = std::mem::take(&mut self.current_block);
+        let saved_in_function = self.in_function;
+        let saved_var_types = std::mem::take(&mut self.var_types);
+        let saved_generic_stack = self.generic_stack.clone();
+
+        // Register captured vars + lambda params in the lambda's var_types.
+        for p in &params {
+            self.var_types.insert(p.name.clone(), p.ty.clone());
+        }
+
+        // Push generic params from the lambda (combined with enclosing ones).
+        let mut combined_generics: Vec<String> = Vec::new();
+        for g in lambda.get_generic_params() {
+            if !combined_generics.contains(g) {
+                combined_generics.push(g.clone());
+            }
+        }
+        self.push_generic_scope(&combined_generics);
+
+        self.current_function = Some(name.clone());
+        self.in_function = true;
+        self.current_function_return = return_type.clone();
+        self.current_ir_function = Some(IRFunction {
+            name: name.clone(),
+            // Lambdas are emitted as concrete functions (not monomorphized):
+            // the generic scope above still lets type names like `T` resolve
+            // within the body, but the function itself is not marked generic
+            // so the monomorphizer keeps it as-is and call sites resolve.
+            generic_params: Vec::new(),
+            params: params.clone(),
+            return_type: return_type.clone(),
+            body: None,
+            is_main: false,
+            is_method: false,
+            struct_name: None,
+            attributes: Vec::new(),
+            is_variadic: false,
+        });
+
+        // Compile the lambda body in this fresh context.
+        lambda.get_body().accept(self);
+
+        // Register the anonymous function.
+        self.finish_function();
+
+        // Restore the enclosing function's context.
+        self.pop_generic_scope();
+        self.current_function = saved_function;
+        self.current_function_return = saved_return;
+        self.current_ir_function = saved_ir_function;
+        self.current_block = saved_block;
+        self.in_function = saved_in_function;
+        self.var_types = saved_var_types;
+        self.generic_stack = saved_generic_stack;
+
+        (name, captured)
+    }
 }
 
 // ==================== AstVisitor 实现 ====================
@@ -687,10 +913,7 @@ impl AstVisitor for IRBuilder {
 
         self.pop_generic_scope();
 
-        let mut struct_attrs = Vec::new();
-        if Attribute::has_attr(node.get_attributes(), "no_gc") {
-            struct_attrs.push("no_gc".to_string());
-        }
+        let struct_attrs = Self::collect_attr_names(node.get_attributes());
 
         let ir_struct = IRStruct {
             name: name.clone(),
@@ -726,10 +949,7 @@ impl AstVisitor for IRBuilder {
             variant_idx += 1;
         }
 
-        let mut enum_attrs = Vec::new();
-        if Attribute::has_attr(node.get_attributes(), "no_gc") {
-            enum_attrs.push("no_gc".to_string());
-        }
+        let enum_attrs = Self::collect_attr_names(node.get_attributes());
 
         let ir_struct = IRStruct {
             name: name.clone(),
@@ -742,7 +962,7 @@ impl AstVisitor for IRBuilder {
 
         self.pop_generic_scope();
 
-        // Generate constructor methods for each variant as an impl block.
+        // Generate variant constructor methods for each variant as an impl block.
         let mut methods = Vec::new();
         variant_idx = 0;
         for variant in node.get_variants() {
@@ -795,7 +1015,7 @@ impl AstVisitor for IRBuilder {
                 is_main: false,
                 is_method: true,
                 struct_name: Some(name.clone()),
-                intrinsic: None,
+                attributes: vec![],
                 is_variadic: false,
             };
 
@@ -812,6 +1032,7 @@ impl AstVisitor for IRBuilder {
             struct_name: name.clone(),
             generic_params,
             methods,
+            attributes: Vec::new(),
         };
         self.ir.impls.push(ir_impl);
     }
@@ -828,7 +1049,7 @@ impl AstVisitor for IRBuilder {
         
         for item in node.get_items() {
             match item {
-                ImplItem::Method(func) | ImplItem::Constructor(func) | ImplItem::Convert(func) => {
+                ImplItem::Method(func) | ImplItem::Convert(func) => {
                     // 保存当前状态
                     let prev_function = self.current_function.clone();
                     let prev_return = self.current_function_return.clone();
@@ -876,6 +1097,7 @@ impl AstVisitor for IRBuilder {
             struct_name,
             generic_params,
             methods,
+            attributes: Vec::new(),
         };
         self.ir.impls.push(ir_impl);
     }
@@ -891,14 +1113,16 @@ impl AstVisitor for IRBuilder {
         self.current_function = Some(name.clone());
         self.in_function = true;
         self.push_generic_scope(&generic_params);
+        // Fresh variable-type table for this function's scope.
+        self.var_types.clear();
 
         // 解析参数
         let mut params: Vec<IRParam> = node.get_parameters()
             .map(|ps| {
                 ps.iter()
                     .map(|p| {
-                        let name = p.get_name().to_string();
-                        let ty = if name == "self" {
+                        let pname = p.get_name().to_string();
+                        let ty = if pname == "self" {
                             if let Some(s) = &self.current_struct {
                                 DataType::Struct(s.clone())
                             } else {
@@ -907,13 +1131,14 @@ impl AstVisitor for IRBuilder {
                         } else {
                             self.ast_type_to_data_type(p.get_type())
                         };
-                        IRParam { name, ty }
+                        self.var_types.insert(pname.clone(), ty.clone());
+                        IRParam { name: pname, ty }
                     })
                     .collect()
             })
             .unwrap_or_default();
 
-        // For methods without explicit self parameter (e.g., constructors),
+        // For methods without explicit self parameter
         // prepend self as the first parameter
         if is_method && !params.iter().any(|p| p.name == "self") {
             if let Some(ref sname) = self.current_struct {
@@ -954,7 +1179,7 @@ impl AstVisitor for IRBuilder {
             is_main,
             is_method,
             struct_name: self.current_struct.clone(),
-            intrinsic: Attribute::get_attr_value(node.get_attributes(), "intrinsic").map(|s| s.to_string()),
+            attributes: Self::collect_attr_names(node.get_attributes()),
             is_variadic: false,
         });
 
@@ -999,22 +1224,41 @@ impl AstVisitor for IRBuilder {
         let ty = self.ast_type_to_data_type(node.get_type());
 
         let init = if let Some(init_expr) = node.get_initializer() {
-            // Handle block expressions specially: extract the tail expression value
-            if let Some(block) = init_expr.as_any().downcast_ref::<Block>() {
-                // Process block statements with a sub-builder
+            // The initializer may be a control-flow expression (if/match/block)
+            // which the AST layer represents by implementing Statement +
+            // Expression on the same struct.  All of these go through the
+            // sub-builder path so that branch-level Return(Some(v)) is
+            // converted to a plain Expression(v) and the overall produced
+            // value is returned as the init expr.
+            //
+            // Pure expressions (literals, variables, calls, binary ops, ...)
+            // that push a single value onto expr_stack skip the sub-builder.
+            let is_stmt_like = init_expr.as_any().downcast_ref::<Block>().is_some()
+                || init_expr.as_any().downcast_ref::<IfStatement>().is_some()
+                || init_expr.as_any().downcast_ref::<MatchExpression>().is_some();
+            if is_stmt_like {
                 let mut sub = IRBuilder::new();
                 sub.generic_stack = self.generic_stack.clone();
                 sub.structs = self.structs.clone();
                 sub.in_function = self.in_function;
-                for stmt in block.get_statements() {
-                    stmt.accept(&mut sub);
+                // If it's a Block, iterate its statements. Otherwise run the
+                // `accept` on the node directly (it already implements
+                // Statement visitor dispatch).
+                if let Some(block) = init_expr.as_any().downcast_ref::<Block>() {
+                    for stmt in block.get_statements() {
+                        stmt.accept(&mut sub);
+                    }
+                } else {
+                    init_expr.accept(&mut sub);
                 }
-                // Extract the value from the last Return statement (block expression result)
+                // Extract the value from the last Return statement (control
+                // flow blocks lower branches as IRStmt::Return of the tail
+                // value).  Convert Return → Expression so subsequent Cranelift
+                // translation doesn't prematurely exit the enclosing function.
                 let mut expr = IRExpr::None;
                 for stmt in sub.current_block.iter_mut().rev() {
                     if let IRStmt::Return(Some(val)) = stmt {
                         expr = val.clone();
-                        // Convert Return → Expression so it doesn't exit the function
                         *stmt = IRStmt::Expression(val.clone());
                         break;
                     } else if matches!(stmt, IRStmt::Return(None)) {
@@ -1034,7 +1278,26 @@ impl AstVisitor for IRBuilder {
             None
         };
 
-        self.current_block.push(IRStmt::Declaration { name, ty, init });
+        // If the declaration omitted an explicit type, infer it from the
+        // initializer so that lambda captures get a concrete type (Cranelift
+        // cannot lower None_/Unknown to a function parameter).
+        let ty = if matches!(ty, DataType::None_ | DataType::Unknown) {
+            if let Some(e) = &init {
+                let inferred = self.infer_expr_type(e);
+                if matches!(inferred, DataType::None_) {
+                    DataType::Int
+                } else {
+                    inferred
+                }
+            } else {
+                DataType::Int
+            }
+        } else {
+            ty
+        };
+
+        self.current_block.push(IRStmt::Declaration { name: name.clone(), ty: ty.clone(), init });
+        self.var_types.insert(name, ty);
     }
 
     fn visit_expression_statement(&mut self, node: &ExpressionStatement) {
@@ -1280,9 +1543,18 @@ impl AstVisitor for IRBuilder {
     fn visit_unary_expression(&mut self, node: &UnaryExpression) {
         let op = node.get_operator().to_string();
         let operand = node.get_operand().unwrap();
+
+        // `&name` — address-of operator: take a function's address as a FuncRef.
+        if op == "&" {
+            if let Some(id) = operand.as_any().downcast_ref::<Identifier>() {
+                self.push_expr(IRExpr::FuncRef(id.get_name().to_string()));
+                return;
+            }
+        }
+
         operand.accept(self);
         let operand_expr = self.pop_expr();
-        
+
         self.push_expr(IRExpr::Unary {
             op,
             operand: Box::new(operand_expr),
@@ -1315,6 +1587,23 @@ impl AstVisitor for IRBuilder {
         }
 
         if let Some(callee_expr) = callee {
+            // Lambda immediate invocation: lambda(params): ret { body }(args)
+            // Compile the lambda into an anonymous function and emit a call
+            // to it, prepending captured variables as leading arguments.
+            if let Some(lambda) = callee_expr.as_any().downcast_ref::<Lambda>() {
+                let (func_name, captured) = self.compile_lambda_function(lambda);
+                let mut full_args: Vec<IRExpr> = captured.iter()
+                    .map(|(n, _)| IRExpr::Variable(n.clone()))
+                    .collect();
+                full_args.extend(args);
+                self.push_expr(IRExpr::Call {
+                    func: func_name,
+                    args: full_args,
+                    generic_args,
+                });
+                return;
+            }
+
             // 检查是否是方法调用 (obj.method)
             if let Some(member) = callee_expr.as_any().downcast_ref::<MemberAccess>() {
                 let obj = member.get_object().unwrap();
@@ -1378,6 +1667,18 @@ impl AstVisitor for IRBuilder {
                     self.push_expr(IRExpr::StructLiteral {
                         name: func_name,
                         fields,
+                    });
+                    return;
+                }
+
+                // If the name is a local variable / parameter (not a known
+                // function), treat it as an indirect call through a function
+                // pointer. This supports higher-order functions where a
+                // `func(...)` parameter is called inside the body.
+                if self.var_types.contains_key(&func_name) {
+                    self.push_expr(IRExpr::IndirectCall {
+                        callee: Box::new(IRExpr::Variable(func_name)),
+                        args,
                     });
                     return;
                 }
@@ -1684,6 +1985,16 @@ impl AstVisitor for IRBuilder {
         self.push_expr(expr);
     }
 
+    // ==================== Lambda ====================
+
+    fn visit_lambda(&mut self, node: &Lambda) {
+        // A standalone lambda (used as an argument, stored in a var, etc.)
+        // is compiled into an anonymous function and its address is yielded
+        // as a FuncRef so it can be passed to higher-order functions.
+        let (name, _captured) = self.compile_lambda_function(node);
+        self.push_expr(IRExpr::FuncRef(name));
+    }
+
     // ==================== Stub visitors ====================
 
     fn visit_ast_node(&mut self, _node: &dyn AstNode) {}
@@ -1717,7 +2028,199 @@ impl AstVisitor for IRBuilder {
         }
     }
     fn visit_import_statement(&mut self, _node: &ImportStatement) {}
+    fn visit_from_import_statement(&mut self, _node: &FromImportStatement) {}
     fn visit_export_statement(&mut self, _node: &ExportStatement) {}
+}
+
+// ==================== 自由变量收集器（Lambda 捕获分析） ====================
+
+/// Walk a block and collect free variable names (identifiers not bound by
+/// `bound` or by inner declarations). Results are appended to `free` in
+/// first-use order without duplicates.
+fn collect_free_vars_from_block(block: &Block, bound: &mut HashSet<String>, free: &mut Vec<String>) {
+    // Inner block scope: local declarations only shadow within this block,
+    // so clone the bound set so siblings don't see each other's locals.
+    let mut local_bound = bound.clone();
+    for stmt in block.get_statements() {
+        collect_free_vars_from_stmt(stmt.as_ref(), &mut local_bound, free);
+    }
+}
+
+fn collect_free_vars_from_stmt(stmt: &dyn Statement, bound: &mut HashSet<String>, free: &mut Vec<String>) {
+    let any = stmt.as_any();
+    if let Some(decl) = any.downcast_ref::<Declaration>() {
+        if let Some(init) = decl.get_initializer() {
+            collect_free_vars_from_expr(init, bound, free);
+        }
+        bound.insert(decl.get_name().to_string());
+        return;
+    }
+    if let Some(block) = any.downcast_ref::<Block>() {
+        collect_free_vars_from_block(block, bound, free);
+        return;
+    }
+    if let Some(expr_stmt) = any.downcast_ref::<ExpressionStatement>() {
+        if let Some(e) = expr_stmt.get_expression() {
+            collect_free_vars_from_expr(e, bound, free);
+        }
+        return;
+    }
+    if let Some(ret) = any.downcast_ref::<ReturnStatement>() {
+        if let Some(v) = ret.get_value() {
+            collect_free_vars_from_expr(v, bound, free);
+        }
+        return;
+    }
+    if let Some(if_stmt) = any.downcast_ref::<IfStatement>() {
+        if let Some(c) = if_stmt.get_condition() {
+            collect_free_vars_from_expr(c, bound, free);
+        }
+        if let Some(t) = if_stmt.get_then_branch() {
+            collect_free_vars_from_stmt(t, bound, free);
+        }
+        if let Some(e) = if_stmt.get_else_branch() {
+            collect_free_vars_from_stmt(e, bound, free);
+        }
+        return;
+    }
+    if let Some(while_stmt) = any.downcast_ref::<WhileStatement>() {
+        if let Some(c) = while_stmt.get_condition() {
+            collect_free_vars_from_expr(c, bound, free);
+        }
+        if let Some(b) = while_stmt.get_body() {
+            collect_free_vars_from_stmt(b, bound, free);
+        }
+        return;
+    }
+    if let Some(for_stmt) = any.downcast_ref::<ForStatement>() {
+        if let Some(it) = for_stmt.get_iterable() {
+            collect_free_vars_from_expr(it, bound, free);
+        }
+        for v in for_stmt.get_loop_variables() {
+            bound.insert(v.clone());
+        }
+        if let Some(b) = for_stmt.get_body() {
+            let mut local = bound.clone();
+            collect_free_vars_from_block(b, &mut local, free);
+        }
+        return;
+    }
+    // MatchExpression is both Statement and Expression.
+    if let Some(m) = any.downcast_ref::<MatchExpression>() {
+        collect_free_vars_from_expr(m.as_expression(), bound, free);
+        return;
+    }
+}
+
+fn collect_free_vars_from_expr(expr: &dyn Expression, bound: &HashSet<String>, free: &mut Vec<String>) {
+    let any = expr.as_any();
+    if let Some(id) = any.downcast_ref::<Identifier>() {
+        let name = id.get_name();
+        if !bound.contains(name) && !free.iter().any(|n| n == name) {
+            free.push(name.to_string());
+        }
+        return;
+    }
+    if let Some(bin) = any.downcast_ref::<BinaryExpression>() {
+        if let Some(l) = bin.get_left() { collect_free_vars_from_expr(l, bound, free); }
+        if let Some(r) = bin.get_right() { collect_free_vars_from_expr(r, bound, free); }
+        return;
+    }
+    if let Some(un) = any.downcast_ref::<UnaryExpression>() {
+        if let Some(o) = un.get_operand() { collect_free_vars_from_expr(o, bound, free); }
+        return;
+    }
+    if let Some(cast) = any.downcast_ref::<CastExpression>() {
+        if let Some(e) = cast.get_expression() { collect_free_vars_from_expr(e, bound, free); }
+        return;
+    }
+    if let Some(call) = any.downcast_ref::<FunctionCall>() {
+        if let Some(c) = call.get_callee() {
+            // A bare Identifier callee is a function name, not a variable
+            // reference — skip it so we don't falsely "capture" function names.
+            if c.as_any().downcast_ref::<Identifier>().is_none() {
+                collect_free_vars_from_expr(c, bound, free);
+            }
+        }
+        if let Some(args) = call.get_arguments() {
+            for a in args {
+                collect_free_vars_from_expr(a.as_ref(), bound, free);
+            }
+        }
+        return;
+    }
+    if let Some(mem) = any.downcast_ref::<MemberAccess>() {
+        if let Some(o) = mem.get_object() { collect_free_vars_from_expr(o, bound, free); }
+        return;
+    }
+    if let Some(arr) = any.downcast_ref::<ArrayIndex>() {
+        if let Some(a) = arr.get_array() { collect_free_vars_from_expr(a, bound, free); }
+        if let Some(i) = arr.get_index() { collect_free_vars_from_expr(i, bound, free); }
+        return;
+    }
+    if let Some(grp) = any.downcast_ref::<GroupedExpression>() {
+        if let Some(e) = grp.get_expression() { collect_free_vars_from_expr(e, bound, free); }
+        return;
+    }
+    if let Some(arr_lit) = any.downcast_ref::<ArrayLiteral>() {
+        for e in arr_lit.get_elements() {
+            collect_free_vars_from_expr(e.as_ref(), bound, free);
+        }
+        return;
+    }
+    if let Some(struct_lit) = any.downcast_ref::<StructLiteral>() {
+        for f in struct_lit.get_fields() {
+            match f {
+                StructFieldInit::Named { value, .. } => {
+                    collect_free_vars_from_expr(value.as_ref(), bound, free);
+                }
+                StructFieldInit::Positional(e) => {
+                    collect_free_vars_from_expr(e.as_ref(), bound, free);
+                }
+            }
+        }
+        return;
+    }
+    if let Some(rng) = any.downcast_ref::<RangeExpression>() {
+        for a in rng.get_arguments() {
+            collect_free_vars_from_expr(a.as_ref(), bound, free);
+        }
+        return;
+    }
+    if let Some(try_op) = any.downcast_ref::<TryOperator>() {
+        if let Some(e) = try_op.get_inner() { collect_free_vars_from_expr(e, bound, free); }
+        return;
+    }
+    if let Some(fmt) = any.downcast_ref::<FormatString>() {
+        for v in fmt.get_variables() {
+            // VariablePosition.value holds the expression referencing the interpolated value.
+            if let Some(e) = v.value.as_ref() {
+                collect_free_vars_from_expr(e.as_ref(), bound, free);
+            }
+        }
+        return;
+    }
+    if let Some(m) = any.downcast_ref::<MatchExpression>() {
+        if let Some(s) = m.get_scrutinee() { collect_free_vars_from_expr(s, bound, free); }
+        for arm in m.get_arms() {
+            // Variable patterns bind a name, so add it to a local bound set.
+            let mut arm_bound = bound.clone();
+            if let MatchPattern::Variable(name) = &arm.pattern {
+                arm_bound.insert(name.clone());
+            }
+            if let Some(body) = &arm.body {
+                collect_free_vars_from_stmt(body.as_ref(), &mut arm_bound, free);
+            }
+        }
+        return;
+    }
+    // Lambda inside a lambda: nested captures are not tracked here (the inner
+    // lambda would be compiled separately and capture from this lambda's
+    // scope). Skip its internals to avoid false captures.
+    if any.downcast_ref::<Lambda>().is_some() {
+        return;
+    }
+    // Literals (Number, String, Boolean, Null), PathAccess: no variable refs.
 }
 
 // ==================== 单态化器（Monomorphizer） ====================

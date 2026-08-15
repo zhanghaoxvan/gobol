@@ -12,7 +12,7 @@ struct RangeIterator {
     _step: int
 }
 
-impl Range {
+impl New for Range {
     func new(start: int, end: int): Range {
         _start = start;
         _end = end;
@@ -26,7 +26,9 @@ impl Range {
         _step = step;
         self
     }
+}
 
+impl Range {
     convert int[](self): int[] {
         var result: int[];
         var i: int = _start;
@@ -66,14 +68,16 @@ impl Range {
     }
 }
 
-impl RangeIterator {
+impl New for RangeIterator {
     func new(current: int, end: int, step: int): RangeIterator {
         _current = current;
         _end = end;
         _step = step;
         self
     }
+}
 
+impl RangeIterator {
     func next(self): (int, bool) {
         if _step > 0 {
             if _current >= _end { return (0, false); }

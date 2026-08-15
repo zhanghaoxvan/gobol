@@ -1,0 +1,88 @@
+// std/option.gbl
+// Option<T> — 表示可能存在或不存在的值
+// 这个文件实现了标准的 Option 类型和常用方法
+
+#[library_features(hidden = true)]
+
+import result;
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+impl<T> Option<T> {
+    // 判断是否是 Some
+    func is_some(self): bool {
+        _tag == 0
+    }
+
+    // 判断是否是 None
+    func is_none(self): bool {
+        _tag == 1
+    }
+
+    // 安全取出值，如果是 None 则触发 panic
+    func take(self): T {
+        if self.is_none() {
+            panic("took a None value");
+        }
+        // 返回 _0 字段（Some 携带的 payload）
+        _0
+    }
+
+    // 如果为 None，返回默认值
+    func value(self, default: T): T {
+        if self.is_none() {
+            default
+        } else {
+            _0
+        }
+    }
+
+    // 映射函数：如果为 Some，对内部值应用 f，否则返回 None
+    func map<U>(self, f: func(T): U): Option<U> {
+        if self.is_none() {
+            Option::None()
+        } else {
+            Option::Some(f(_0))
+        }
+    }
+
+    // 扁平化映射：如果为 Some，返回 f(value)，否则返回 None
+    func flat_map<U>(self, f: func(T): Option<U>): Option<U> {
+        if self.is_none() {
+            Option::None()
+        } else {
+            f(_0)
+        }
+    }
+
+    // 如果为 None，执行闭包并返回 Option
+    func or_else(self, f: func(): T): T {
+        if self.is_none() {
+            f()
+        } else {
+            _0
+        }
+    }
+
+    // 转换为 Result<T, str>，如果为 None 则返回 Err 字符串
+    func ok_or(self, err: str): Result<T, str> {
+        if self.is_none() {
+            Result::Err(err)
+        } else {
+            Result::Ok(_0)
+        }
+    }
+}
+
+impl<T> New<T> for Option<T> {
+    func new(): Option<T> {
+        Option::None()
+    }
+
+    func new(value: T): Option<T> {
+        Option::Some(value)
+    }
+}

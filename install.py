@@ -1,565 +1,263 @@
 #!/usr/bin/env python3
 """
-Gobol Installer & Version Manager (rustup-style)
-
-Layout created under ~/.gobol/:
-    ~/.gobol/
-        bin/                       # symlinks/copies of the active toolchain
-            gobol[.exe]
-            grape[.exe]
-        lib/                       # runtime files
-            std/                   # Gobol standard library (*.gbl)
-            c/                     # C companion runtime (*.c)
-        versions/                  # one subdir per installed version
-            v0.1.0/
-                bin/
-                lib/
-            v0.2.0/
-                bin/
-                lib/
-        active                     # text file: name of the active version (e.g. v0.1.0)
-        env.{sh,fish,ps1}          # generated env files for sourcing
-
-Usage:
-    python3 install.py                          # build + install current dir as the active version
-    python3 install.py --version-tag v0.2.0     # tag the install with a custom version
-    python3 install.py --no-build               # skip `cargo build`
-    python3 install.py --uninstall              # remove ~/.gobol entirely
-    python3 install.py --list                   # list installed versions
-    python3 install.py --switch v0.1.0          # switch active version
-    python3 install.py --version                # show installer version
+Gobol Installer TUI — Terminal User Interface for the Gobol toolchain.
+Version management disabled, single global install only.
 """
 
-import argparse
 import os
-import platform
-import shutil
-import subprocess
 import sys
+import time
+import shutil
+import platform
+import subprocess
 from pathlib import Path
 
-__version__ = "0.2.0"
+# ==================== Terminal Colors (pure Python, no dependencies) ====================
 
-# ==================== Platform detection ====================
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    GREY = '\033[90m'
+
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def print_menu(title, options, footer=""):
+    clear_screen()
+    print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.OKCYAN}{Colors.BOLD}{title:^60}{Colors.ENDC}")
+    print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
+    print()
+    for i, option in enumerate(options, 1):
+        print(f"{Colors.OKBLUE}{i:>2}{Colors.ENDC}. {option}")
+    print()
+    if footer:
+        print(f"{Colors.GREY}{footer}{Colors.ENDC}")
+    print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.GREY}Select a number, or press 'q' to quit{Colors.ENDC}")
+
+def print_status(message, status_type="info"):
+    if status_type == "info":
+        print(f"{Colors.OKCYAN}[INFO]{Colors.ENDC} {message}")
+    elif status_type == "ok":
+        print(f"{Colors.OKGREEN}[ OK ]{Colors.ENDC} {message}")
+    elif status_type == "warn":
+        print(f"{Colors.WARNING}[WARN]{Colors.ENDC} {message}")
+    elif status_type == "fail":
+        print(f"{Colors.FAIL}[FAIL]{Colors.ENDC} {message}")
+
+# ==================== Core Functions ====================
 
 def detect_platform():
-    """Return (os_name, arch) where os_name ∈ {linux, macos, windows} and
-    arch ∈ {x86_64, aarch64}."""
     raw_os = platform.system().lower()
-    if raw_os == "linux":
-        os_name = "linux"
-    elif raw_os == "darwin":
-        os_name = "macos"
-    elif raw_os == "windows":
-        os_name = "windows"
-    else:
-        os_name = raw_os
-
+    if raw_os == "linux": os_name = "linux"
+    elif raw_os == "darwin": os_name = "macos"
+    elif raw_os == "windows": os_name = "windows"
+    else: os_name = raw_os
     raw_arch = platform.machine().lower()
-    if raw_arch in ("x86_64", "amd64"):
-        arch = "x86_64"
-    elif raw_arch in ("aarch64", "arm64"):
-        arch = "aarch64"
-    else:
-        arch = raw_arch
-
+    if raw_arch in ("x86_64", "amd64"): arch = "x86_64"
+    elif raw_arch in ("aarch64", "arm64"): arch = "aarch64"
+    else: arch = raw_arch
     return os_name, arch
-
-
-def binary_suffix():
-    return ".exe" if sys.platform == "win32" else ""
-
 
 def is_windows():
     return sys.platform == "win32"
 
-
-# ==================== Paths ====================
-
 def gobol_home():
-    """~/.gobol — the root of the install layout."""
     if override := os.environ.get("GOBOL_HOME"):
         return Path(override)
     return Path.home() / ".gobol"
 
+# ==================== TUI Task Functions ====================
 
-def active_version_file():
-    return gobol_home() / "active"
-
-
-def versions_dir():
-    return gobol_home() / "versions"
-
-
-def bin_dir():
-    return gobol_home() / "bin"
-
-
-def lib_dir():
-    return gobol_home() / "lib"
-
-
-def read_active_version():
-    f = active_version_file()
-    if not f.exists():
-        return None
-    return f.read_text().strip() or None
-
-
-def write_active_version(tag):
-    active_version_file().write_text(tag + "\n")
-
-
-def version_path(tag):
-    return versions_dir() / tag
-
-
-# ==================== Build ====================
-
-def build_project(verbose=False):
-    print("[INFO] Building Gobol (cargo build --release)...")
-    cmd = ["cargo", "build", "--release", "--bins"]
-    if verbose:
-        result = subprocess.run(cmd)
-    else:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print("[FAIL] Build failed", file=sys.stderr)
-        if not verbose and result.stderr:
-            print(result.stderr, file=sys.stderr)
-        return False
-    print("[ OK ] Build successful")
-    return True
-
-
-# ==================== Install one version ====================
-
-def install_version(tag, no_build=False, verbose=False):
-    """Build + install the current source tree as `tag` under ~/.gobol/versions/,
-    then activate it (symlink/copy into ~/.gobol/bin)."""
+def task_build_and_install(no_build=False):
+    """Build and install the Gobol toolchain (single global install, no version manager)."""
+    clear_screen()
+    print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.OKCYAN}{Colors.BOLD}   Build & Install Gobol Toolchain   {Colors.ENDC}")
+    print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
+    
     os_name, arch = detect_platform()
-    print(f"[INFO] Platform: {os_name}/{arch}")
-
-    # 0. Determine version tag
-    if not tag:
-        tag = read_cargo_version() or "v0.0.0-dev"
-        # Ensure leading 'v'
-        if not tag.startswith("v"):
-            tag = "v" + tag
-    print(f"[INFO] Installing version: {tag}")
-
-    # 1. Build
+    print_status(f"Platform: {os_name}/{arch}", "info")
+    
     if not no_build:
-        if not build_project(verbose=verbose):
-            sys.exit(1)
+        print_status("Building (cargo build --release)...", "info")
+        cmd = ["cargo", "build", "--release", "--bins"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print_status("Build failed!", "fail")
+            print(result.stderr)
+            input("Press Enter to return to main menu...")
+            return
+        print_status("Build successful!", "ok")
     else:
-        print("[INFO] Skipping build (--no-build)")
-
-    # 2. Layout
+        print_status("Skipping build (--no-build)", "warn")
+    
     home = gobol_home()
     home.mkdir(parents=True, exist_ok=True)
-    versions_dir().mkdir(parents=True, exist_ok=True)
-    bin_dir().mkdir(parents=True, exist_ok=True)
-    lib_dir().mkdir(parents=True, exist_ok=True)
-
-    # 3. Versioned install: copy binaries + lib into versions/<tag>/
-    vpath = version_path(tag)
-    if vpath.exists():
-        print(f"[INFO] Replacing existing version at {vpath}")
-        shutil.rmtree(vpath)
-    vbin = vpath / "bin"
-    vlib = vpath / "lib"
-    vbin.mkdir(parents=True)
-    vlib.mkdir(parents=True)
-
-    suffix = binary_suffix()
+    (home / "bin").mkdir(parents=True, exist_ok=True)
+    (home / "lib").mkdir(parents=True, exist_ok=True)
+    
+    suffix = ".exe" if is_windows() else ""
     binaries = [f"gobol{suffix}", f"grape{suffix}", f"gobol-lsp{suffix}"]
     for name in binaries:
         src = Path("target/release") / name
         if not src.exists():
-            print(f"[WARN] {name} not found in target/release, skipping")
+            print_status(f"{name} not found, skipping", "warn")
             continue
-        dst = vbin / name
+        dst = home / "bin" / name
+        # 直接覆盖全局bin，无版本隔离
+        if dst.exists():
+            print_status(f"Overwriting existing {name}", "warn")
+            dst.unlink()
         shutil.copy2(src, dst)
         if not is_windows():
             dst.chmod(0o755)
-        print(f"[ OK ] {name} -> {dst}")
-
-    # 4. Install stdlib + runtime C companions
-    install_std_into(vlib)
-
-    # 5. Activate this version
-    activate_version(tag)
-
-    # 6. PATH setup
-    configure_path()
-
-    print()
-    print("=" * 60)
-    print(f"[ OK ] Gobol {tag} installed and activated")
-    print(f"      Versions dir: {versions_dir()}")
-    print(f"      Active bin:    {bin_dir()}")
-    print(f"      Stdlib:        {lib_dir() / 'std'}")
-    print("=" * 60)
-    print()
-    print_post_install_hint()
-
-
-def install_std_into(target_lib):
-    """Copy ./std and ./std/c into <target_lib>/std and <target_lib>/c."""
+        print_status(f"{name} -> {dst}", "ok")
+    
+    print_status("Installing standard library...", "info")
     src_std = Path("std")
-    if not src_std.exists():
-        print("[WARN] ./std not found; skipping stdlib install")
-        return
-    dst_std = target_lib / "std"
-    if dst_std.exists():
-        shutil.rmtree(dst_std)
-    shutil.copytree(src_std, dst_std)
-    print(f"[ OK ] std/ -> {dst_std}")
-
-    # C companions
-    src_c = src_std / "c"
-    if src_c.exists():
-        dst_c = target_lib / "c"
-        if dst_c.exists():
-            shutil.rmtree(dst_c)
-        shutil.copytree(src_c, dst_c)
-        print(f"[ OK ] std/c/ -> {dst_c}")
-
-
-# ==================== Activate / switch ====================
-
-def activate_version(tag):
-    """Make `tag` the active version: refresh ~/.gobol/bin and ~/.gobol/lib
-    symlinks (Unix) or copies (Windows) pointing at versions/<tag>/."""
-    vpath = version_path(tag)
-    if not vpath.exists():
-        print(f"[FAIL] Version {tag} not installed at {vpath}", file=sys.stderr)
-        sys.exit(1)
-
-    write_active_version(tag)
-    refresh_active_links(tag)
-    print(f"[ OK ] Active version: {tag}")
-
-
-def refresh_active_links(tag=None):
-    """Rebuild ~/.gobol/bin and ~/.gobol/lib from the active version dir."""
-    if tag is None:
-        tag = read_active_version()
-    if tag is None:
-        return
-    vpath = version_path(tag)
-    if not vpath.exists():
-        return
-
-    # bin/
-    bdir = bin_dir()
-    bdir.mkdir(parents=True, exist_ok=True)
-    vbin = vpath / "bin"
-    if vbin.exists():
-        for entry in vbin.iterdir():
-            dst = bdir / entry.name
-            replace_link_or_copy(entry, dst)
-
-    # lib/ — refresh whole tree
-    ldir = lib_dir()
-    ldir.mkdir(parents=True, exist_ok=True)
-    vlib = vpath / "lib"
-    if vlib.exists():
-        for sub in vlib.iterdir():
-            dst = ldir / sub.name
-            if dst.exists() or dst.is_symlink():
-                if dst.is_symlink() or dst.is_file():
-                    dst.unlink()
-                else:
-                    shutil.rmtree(dst)
-            replace_link_or_copy(sub, dst)
-
-
-def replace_link_or_copy(src, dst):
-    """Symlink on Unix, copy on Windows (symlinks need admin)."""
-    if dst.exists() or dst.is_symlink():
-        if dst.is_symlink() or dst.is_file():
-            dst.unlink()
-        else:
-            shutil.rmtree(dst)
-    if is_windows():
-        if src.is_dir():
-            shutil.copytree(src, dst)
-        else:
-            shutil.copy2(src, dst)
+    dst_std = home / "lib" / "std"
+    if src_std.exists():
+        if dst_std.exists():
+            shutil.rmtree(dst_std)
+        shutil.copytree(src_std, dst_std)
+        print_status(f"std/ -> {dst_std}", "ok")
     else:
-        try:
-            os.symlink(src.resolve(), dst)
-        except OSError:
-            # Fallback to copy if symlinks fail (e.g. no permissions)
-            if src.is_dir():
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy2(src, dst)
+        print_status("std/ directory not found", "warn")
+    
+    # 移除版本active标记、versions目录相关逻辑
+    if not is_windows():
+        shell = os.environ.get("SHELL", "")
+        rc = Path.home() / (".zshrc" if "zsh" in shell else ".bashrc")
+        marker = "# Added by Gobol installer"
+        path_export = f'\nexport PATH="{home}/bin:$PATH"\n'
+        rc_text = rc.read_text() if rc.exists() else ""
+        if marker not in rc_text:
+            with open(rc, "a") as f:
+                f.write(marker + path_export)
+            print_status(f"PATH added to {rc}", "ok")
+    
+    print_status("Installation complete! Gobol is installed globally.", "ok")
+    input("Press Enter to return to main menu...")
 
-
-# ==================== PATH configuration ====================
-
-def configure_path():
-    bdir = bin_dir()
-    target_str = str(bdir.absolute())
-
-    # Detect an explicit GOBOL_HOME override BEFORE we set env vars ourselves.
-    # If overridden (e.g. test/sandbox install), don't pollute the user's real
-    # shell config — only write env files into GOBOL_HOME.
-    home_overridden = bool(os.environ.get("GOBOL_HOME"))
-
-    # Set GOBOL_INSTALL_DIR and GOBOL_HOME for this process
-    set_env_var("GOBOL_HOME", str(gobol_home().absolute()))
-    set_env_var("GOBOL_INSTALL_DIR", str(gobol_home().absolute()))
-
-    if home_overridden:
-        print("[INFO] GOBOL_HOME is overridden; skipping shell-config edits")
-        write_env_files(target_str)
+def task_uninstall():
+    clear_screen()
+    print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.FAIL}{Colors.BOLD}   Uninstall Gobol   {Colors.ENDC}")
+    print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
+    print("\nWarning: This will permanently delete ~/.gobol/")
+    confirm = input(f"{Colors.FAIL}Confirm uninstall? (type 'yes' to confirm): {Colors.ENDC}")
+    if confirm.lower() != "yes":
+        print_status("Uninstall cancelled.", "info")
+        input("Press Enter to return to main menu...")
         return
-
-    if is_windows():
-        add_path_windows(target_str)
-    else:
-        add_path_unix(target_str)
-
-    # Generate env files for sourcing
-    write_env_files(target_str)
-
-
-def set_env_var(key, value):
-    """Best-effort persist an env var. On Unix we can't truly persist for the
-    current shell; we rely on shell config. On Windows we use setx."""
-    os.environ[key] = value
-    if is_windows():
-        try:
-            subprocess.run(["setx", key, value], capture_output=True)
-        except Exception:
-            pass
-
-
-def add_path_unix(target_str):
-    shell = os.environ.get("SHELL", "")
-    home = Path.home()
-
-    if "zsh" in shell:
-        config_file = home / ".zshrc"
-    elif "bash" in shell:
-        config_file = home / ".bashrc"
-    elif "fish" in shell:
-        config_file = home / ".config/fish/config.fish"
-    else:
-        config_file = home / ".profile"
-
-    marker = "# Added by Gobol installer"
-    fish = "fish" in str(config_file)
-    if fish:
-        block = (
-            f"\n{marker}\n"
-            f'set -gx GOBOL_HOME "{gobol_home()}"\n'
-            f'set -gx GOBOL_INSTALL_DIR "{gobol_home()}"\n'
-            f'fish_add_path "{target_str}"\n'
-        )
-    else:
-        block = (
-            f"\n{marker}\n"
-            f'export GOBOL_HOME="{gobol_home()}"\n'
-            f'export GOBOL_INSTALL_DIR="{gobol_home()}"\n'
-            f'export PATH="$GOBOL_INSTALL_DIR/bin:$PATH"\n'
-        )
-
-    if config_file.exists() and marker in config_file.read_text():
-        print(f"[INFO] PATH already configured in {config_file}")
-        return
-
-    try:
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_file, "a") as f:
-            f.write(block)
-        print(f"[ OK ] Added to {config_file}")
-    except Exception as e:
-        print(f"[WARN] Could not write to {config_file}: {e}")
-
-
-def add_path_windows(target_str):
-    """Use PowerShell to set the User PATH persistently."""
-    check = (
-        '$current = [Environment]::GetEnvironmentVariable("PATH", "User"); '
-        f'if ($current -split ";" -contains "{target_str}") {{ Write-Output "EXISTS" }} '
-        'else { Write-Output "NEW" }'
-    )
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", check],
-        capture_output=True, text=True,
-    )
-    if "EXISTS" in result.stdout:
-        print(f"[INFO] {target_str} already in User PATH")
-    else:
-        add_cmd = f'''
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-if ($p -notlike "*{target_str}*") {{
-    $newPath = if ($p) {{ "$p;{target_str}" }} else {{ "{target_str}" }}
-    [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
-    Write-Output "ADDED"
-}}
-'''
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", add_cmd],
-            capture_output=True, text=True,
-        )
-        if "ADDED" in r.stdout:
-            print(f"[ OK ] Added {target_str} to User PATH")
-        else:
-            print(f"[WARN] Could not add to PATH: {r.stderr}")
-
-
-def write_env_files(target_str):
-    """Write env.sh / env.fish / env.ps1 in ~/.gobol/ for manual sourcing."""
+    
     home = gobol_home()
-
-    sh = home / "env.sh"
-    sh.write_text(
-        f'export GOBOL_HOME="{gobol_home()}"\n'
-        f'export GOBOL_INSTALL_DIR="{gobol_home()}"\n'
-        f'export PATH="$GOBOL_INSTALL_DIR/bin:$PATH"\n'
-    )
-
-    fish = home / "env.fish"
-    fish.write_text(
-        f'set -gx GOBOL_HOME "{gobol_home()}"\n'
-        f'set -gx GOBOL_INSTALL_DIR "{gobol_home()}"\n'
-        f'fish_add_path "{target_str}"\n'
-    )
-
-    ps1 = home / "env.ps1"
-    ps1.write_text(
-        f'$env:GOBOL_HOME = "{gobol_home()}"\n'
-        f'$env:GOBOL_INSTALL_DIR = "{gobol_home()}"\n'
-        f'$env:PATH = "{target_str};" + $env:PATH\n'
-    )
-    print(f"[ OK ] Env files written to {home}/env.{{sh,fish,ps1}}")
-
-
-def print_post_install_hint():
-    home_overridden = bool(os.environ.get("GOBOL_HOME")) and (
-        os.environ.get("GOBOL_HOME") != str((Path.home() / ".gobol").absolute())
-    )
-    if home_overridden:
-        print(f"[INFO] GOBOL_HOME is overridden — to use this install in a shell:")
-        print(f'  source {gobol_home()}/env.sh')
-        print(f"  (or set PATH={bin_dir()} manually)")
-        return
-    if is_windows():
-        print("[INFO] Please restart your terminal for PATH changes to take effect.")
-        return
-    shell = os.environ.get("SHELL", "")
-    if "zsh" in shell:
-        rc = "~/.zshrc"
-    elif "bash" in shell:
-        rc = "~/.bashrc"
-    elif "fish" in shell:
-        rc = "~/.config/fish/config.fish"
+    if home.exists():
+        shutil.rmtree(home)
+        print_status("Removed ~/.gobol", "ok")
+        print_status("Please manually clean up your shell PATH in .bashrc/.zshrc", "warn")
     else:
-        rc = "~/.profile"
-    print(f"[INFO] Run: source {rc}   (or open a new terminal)")
-    print("[INFO] Then test:  gobol --version")
+        print_status("No installation found.", "warn")
+    input("Press Enter to return to main menu...")
 
-
-# ==================== List / switch / uninstall ====================
-
-def list_versions():
-    vdir = versions_dir()
-    if not vdir.exists():
-        print("[INFO] No versions installed.")
-        return
-    active = read_active_version()
-    installed = sorted(p.name for p in vdir.iterdir() if p.is_dir())
-    if not installed:
-        print("[INFO] No versions installed.")
-        return
-    print("Installed Gobol versions:")
-    for v in installed:
-        marker = " (active)" if v == active else ""
-        print(f"  {v}{marker}")
-
-
-def switch_version(tag):
-    if not version_path(tag).exists():
-        print(f"[FAIL] Version {tag} not found. Installed versions:", file=sys.stderr)
-        list_versions()
-        sys.exit(1)
-    activate_version(tag)
+def task_install_plugin():
+    clear_screen()
+    print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.OKCYAN}{Colors.BOLD}   Install VS Code Plugin   {Colors.ENDC}")
+    print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print()
-    print(f"[ OK ] Switched to {tag}")
-    print("[INFO] Open a new terminal or run:")
-    print(f'  source {gobol_home()}/env.sh')
 
+    all_vsix = list(Path(".").rglob("*.vsix"))
+    if not all_vsix:
+        print_status("No .vsix plugin files found in project directory.", "fail")
+        input("Press Enter to return to main menu...")
+        return
 
-def uninstall():
-    home = gobol_home()
-    if not home.exists():
-        print(f"[FAIL] No installation found at {home}")
-        sys.exit(1)
-    shutil.rmtree(home)
-    print(f"[ OK ] Removed {home}")
-    print("[INFO] Remove the PATH/GOBOL_* entries from your shell config manually if needed.")
+    gobol_vsix = [f for f in all_vsix if f.name.startswith("vscode-gobol")]
+    target_list = gobol_vsix if gobol_vsix else all_vsix
 
+    selected: Path
+    if len(target_list) == 1:
+        selected = target_list[0]
+        print_status(f"Auto found plugin: {selected.resolve()}", "ok")
+    else:
+        # 多个vsix，列出让用户选择
+        print_status(f"Found {len(target_list)} plugin packages, please select:", "info")
+        for idx, file in enumerate(target_list, 1):
+            print(f"  {idx}. {file.resolve()}")
+        while True:
+            raw = input(f"{Colors.OKBLUE}Input number: {Colors.ENDC}").strip()
+            if raw.isdigit():
+                num = int(raw)
+                if 1 <= num <= len(target_list):
+                    selected = target_list[num - 1]
+                    break
+            print_status("Invalid number, try again", "warn")
 
-# ==================== Helpers ====================
+    vsix_path = selected
 
-def read_cargo_version():
-    """Read the `version` field from Cargo.toml."""
     try:
-        text = Path("Cargo.toml").read_text()
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("version") and "=" in line:
-                # version = "0.1.0"
-                _, _, rhs = line.partition("=")
-                return rhs.strip().strip('"').strip("'")
-    except Exception:
-        pass
-    return None
+        subprocess.run(["code", "--version"], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print_status("VS Code 'code' command not found.", "warn")
+        print_status(f"Manual install file path: {vsix_path.resolve()}", "info")
+        input("Press Enter to return to main menu...")
+        return
 
+    print_status(f"Installing VS Code extension: {vsix_path.name}", "info")
+    result = subprocess.run(
+        ["code", "--install-extension", str(vsix_path)],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print_status("Plugin installed successfully!", "ok")
+        print_status("Please restart VS Code to activate it.", "info")
+    else:
+        print_status("Plugin installation failed.", "fail")
+        print(result.stderr)
+    input("Press Enter to return to main menu...")
 
-# ==================== CLI ====================
+# ==================== Main TUI Loop ====================
 
 def main():
-    p = argparse.ArgumentParser(
-        prog="install.py",
-        description="Gobol installer & version manager (rustup-style).",
-    )
-    p.add_argument("--version", action="store_true", help="Show installer version and exit")
-    p.add_argument("--no-build", action="store_true", help="Skip `cargo build`")
-    p.add_argument("--verbose", "-v", action="store_true")
-    p.add_argument("--version-tag", help="Tag this install with a custom version (e.g. v0.2.0)")
-    p.add_argument("--uninstall", action="store_true", help="Remove ~/.gobol entirely")
-    p.add_argument("--list", action="store_true", help="List installed versions")
-    p.add_argument("--switch", metavar="TAG", help="Switch the active version to TAG")
-    args = p.parse_args()
+    while True:
+        # 删除版本列表选项，仅保留3个核心功能+退出
+        options = [
+            "Build & Install Gobol",
+            "Install VS Code Plugin",
+            "Uninstall Gobol",
+            "Exit"
+        ]
+        print_menu(
+            "Gobol Installer",
+            options,
+            footer=f"GOBOL_HOME: {gobol_home()}"
+        )
+        choice = input(f"{Colors.OKCYAN}❯ {Colors.ENDC}").strip().lower()
 
-    if args.version:
-        print(f"Gobol installer {__version__}")
-        os_name, arch = detect_platform()
-        print(f"Platform: {os_name}/{arch}")
-        print(f"GOBOL_HOME: {gobol_home()}")
-        return
-
-    if args.uninstall:
-        uninstall()
-        return
-
-    if args.list:
-        list_versions()
-        return
-
-    if args.switch:
-        switch_version(args.switch)
-        return
-
-    install_version(args.version_tag, no_build=args.no_build, verbose=args.verbose)
-
+        if choice == "q":
+            break
+        elif choice == "1":
+            task_build_and_install()
+        elif choice == "2":
+            task_install_plugin()
+        elif choice == "3":
+            task_uninstall()
+        elif choice == "4":
+            print(f"{Colors.OKCYAN}Goodbye!{Colors.ENDC}")
+            break
+        else:
+            print_status("Invalid choice.", "warn")
+            time.sleep(1)
 
 if __name__ == "__main__":
     main()

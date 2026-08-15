@@ -56,7 +56,7 @@ pub struct SemanticAnalyzer {
 struct TraitMethodSig {
     name: String,
     param_count: usize,
-    dynamic_args: bool,
+    dynamic: bool,
 }
 
 /// Registered trait definition for `impl Trait for Type` validation
@@ -144,6 +144,7 @@ impl SemanticAnalyzer {
             ("std::cmp::Cmp", &[
                 ("lt", 2), ("le", 2), ("gt", 2), ("ge", 2),
             ]),
+            ("std::mem::Drop", &[("drop", 1)]),     // drop(self)
         ];
         for (name, methods) in std_traits {
             if !self.trait_defs.contains_key(*name) {
@@ -152,7 +153,7 @@ impl SemanticAnalyzer {
                     methods: methods.iter().map(|(n, pc)| TraitMethodSig {
                         name: n.to_string(),
                         param_count: *pc,
-                        dynamic_args: false,
+                        dynamic: false,
                     }).collect(),
                     generic_params: vec!["T".to_string()],
                 });
@@ -207,9 +208,23 @@ impl SemanticAnalyzer {
         // Register compiler-level builtins (panic / exit — handled by codegen).
         self.env.declare_function("panic", &DataType::None_, &self.current_module);
         self.env.declare_function("exit", &DataType::None_, &self.current_module);
+        // Runtime intrinsics used by std library implementations
+        self.env.declare_function("gobol_array_elem_addr", &DataType::Int, &self.current_module);
+        // Array allocation intrinsic used by std library (e.g. Vec::push)
+        self.env.declare_function("__new_array", &DataType::Unknown, &self.current_module);
+        // Register Ref as a built-in struct so Ref<T>::new resolves in std library
+        if !self.struct_fields.contains_key("Ref") {
+            let mut ref_fields = HashMap::new();
+            ref_fields.insert("_ptr".to_string(), DataType::Unknown);
+            self.struct_fields.insert("Ref".to_string(), ref_fields);
+            self.env.declare_module("Ref");
+        }
 
         // Load the builtins module (declares C runtime functions as extern "C").
         self.load_module("builtins");
+
+        // Load mem (New / Drop traits) so std types that impl New resolve.
+        self.load_module("mem");
 
         // Auto-load trait definitions (std::ops::Add, std::cmp::Eq, etc.)
         // so that `impl Trait for Type` validation works even without
@@ -223,6 +238,15 @@ impl SemanticAnalyzer {
         // Validate all `impl Trait for Type` blocks after all modules loaded
         self.validate_trait_impls();
 
+        // Pre-declare top-level signatures of the main program so that forward
+        // references between sibling definitions resolve (e.g. math::trunc
+        // calling math::floor which is declared further down the file). Loaded
+        // modules already get this via load_module's Phase 2; the main program
+        // is analysed directly by program.accept(self), so it needs its own
+        // pre-pass. Re-declaration during the accept pass is idempotent.
+        self.declare_program_signatures(program);
+
+        // Clear impl_methods so that program.accept(self) can freshly register method bodies
         program.accept(self);
 
         if self.has_error {
@@ -234,6 +258,120 @@ impl SemanticAnalyzer {
         }
 
         !self.has_error
+    }
+
+    /// Pre-declare top-level signatures (functions, structs, enums, traits,
+    /// impl methods, extern functions) of a program so that forward references
+    /// between sibling definitions resolve during the subsequent body-analysis
+    /// pass. This mirrors the declaration phase of `load_module` but operates
+    /// on the main program and skips export bookkeeping (the main program is
+    /// not exported as a module).
+    fn declare_program_signatures(&mut self, program: &Program) {
+        for stmt in program.get_statements() {
+            if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
+                if self.build_mode == BuildMode::Release
+                    && Attribute::has_attr(func.get_attributes(), "debug")
+                {
+                    continue;
+                }
+                let prev_generic = self.current_generic_params.clone();
+                let mut combined = prev_generic.clone();
+                for g in func.get_generic_params() {
+                    if !combined.contains(g) {
+                        combined.push(g.clone());
+                    }
+                }
+                self.current_generic_params = combined;
+                let return_type = self.get_data_type_from_ast(func.get_return_type());
+                self.env.declare_function(func.get_name(), &return_type, &self.current_module);
+                self.current_generic_params = prev_generic;
+            } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
+                let prev_generic = self.current_generic_params.clone();
+                self.current_generic_params = struct_def.get_generic_params().clone();
+                let mut fields = HashMap::new();
+                for field in struct_def.get_fields() {
+                    let field_type = self.get_data_type_from_ast(field.field_type.as_deref());
+                    fields.insert(field.name.clone(), field_type);
+                }
+                self.struct_fields.insert(struct_def.get_name().to_string(), fields);
+                self.env.declare_module(struct_def.get_name());
+                self.current_generic_params = prev_generic;
+            } else if let Some(enum_def) = stmt.as_any().downcast_ref::<EnumDefinition>() {
+                self.visit_enum_definition(enum_def);
+            } else if let Some(trait_def) = stmt.as_any().downcast_ref::<TraitDefinition>() {
+                let methods: Vec<TraitMethodSig> = trait_def
+                    .get_methods()
+                    .iter()
+                    .map(|m| TraitMethodSig {
+                        name: m.name.clone(),
+                        param_count: m.parameters.len(),
+                        dynamic: Attribute::has_attr(&m.attributes, "dynamic"),
+                    })
+                    .collect();
+                self.trait_defs.insert(
+                    trait_def.get_name().to_string(),
+                    TraitDefInfo {
+                        name: trait_def.get_name().to_string(),
+                        methods,
+                        generic_params: trait_def.get_generic_params().clone(),
+                    },
+                );
+            } else if let Some(impl_block) = stmt.as_any().downcast_ref::<ImplBlock>() {
+                let prev_impl = self.current_impl_struct.clone();
+                self.current_impl_struct = Some(
+                    impl_block
+                        .get_struct_name()
+                        .split('<')
+                        .next()
+                        .unwrap_or(impl_block.get_struct_name())
+                        .to_string(),
+                );
+                let prev_generic = self.current_generic_params.clone();
+                self.current_generic_params = impl_block.get_generic_params().clone();
+                for item in impl_block.get_items() {
+                    match item {
+                        ImplItem::Method(func) | ImplItem::Convert(func) => {
+                            if self.build_mode == BuildMode::Release
+                                && Attribute::has_attr(func.get_attributes(), "debug")
+                            {
+                                continue;
+                            }
+                            let struct_name = impl_block.get_struct_name().to_string();
+                            let method_name = func.get_name().to_string();
+                            let arity = func.get_parameters().map(|p| p.len()).unwrap_or(0);
+                            if !self
+                                .impl_methods
+                                .insert((struct_name.clone(), method_name.clone(), arity))
+                            {
+                                continue;
+                            }
+                            let prev_fn_generic = self.current_generic_params.clone();
+                            for g in func.get_generic_params() {
+                                if !self.current_generic_params.contains(g) {
+                                    self.current_generic_params.push(g.clone());
+                                }
+                            }
+                            let return_type = self.get_data_type_from_ast(func.get_return_type());
+                            self.env
+                                .declare_function(&method_name, &return_type, &self.current_module);
+                            if let Some(ref struct_name) = self.current_impl_struct {
+                                self.env
+                                    .declare_function(&method_name, &return_type, struct_name);
+                            }
+                            self.current_generic_params = prev_fn_generic;
+                        }
+                    }
+                }
+                self.current_impl_struct = prev_impl;
+                self.current_generic_params = prev_generic;
+            } else if let Some(extern_block) = stmt.as_any().downcast_ref::<ExternBlock>() {
+                for func in extern_block.get_functions() {
+                    let return_type = self.get_data_type_from_ast(func.get_return_type());
+                    self.env
+                        .declare_function(func.get_name(), &return_type, &self.current_module);
+                }
+            }
+        }
     }
 
     pub fn has_errors(&self) -> bool {
@@ -288,15 +426,15 @@ impl SemanticAnalyzer {
             None => return DataType::None_,
         };
 
-        // Check for GenericType: vec<int> → array type, others → struct
+        // Check for GenericType: Vec<int> → Struct(Vec), legacy vec<int> → array alias
         if let Some(gt) = tp.as_type_any().downcast_ref::<GenericType>() {
             let base = gt.get_base_name();
             if base == "vec" && !gt.get_type_args().is_empty() {
-                // vec<int> is an alias for int[]
+                // legacy lowercase vec<int> is an alias for int[]
                 let elem_type = self.get_data_type_from_ast(Some(&*gt.get_type_args()[0]));
                 return elem_type; // treated as element type (array)
             }
-            // Other generic types — treat as struct for now
+            // PascalCase generic types (Vec<T>, Result<T, E>, etc.) — treat as struct
             return DataType::Struct(base.to_string());
         }
 
@@ -304,6 +442,13 @@ impl SemanticAnalyzer {
         if let Some(nullable) = tp.as_type_any().downcast_ref::<NullableType>() {
             let inner = self.get_data_type_from_ast(Some(nullable.get_inner_type()));
             return DataType::Nullable(Box::new(inner));
+        }
+
+        // Check for FunctionType (e.g. `func(T): U` callback parameters).
+        // The analyser does not track precise function signatures — collapse
+        // to Unknown so call sites on the parameter resolve without error.
+        if tp.as_type_any().downcast_ref::<FunctionType>().is_some() {
+            return DataType::Unknown;
         }
 
         // Check for ArrayType via downcast
@@ -361,29 +506,34 @@ impl SemanticAnalyzer {
     /// 1. The path as-is (absolute or relative to CWD)
     /// 2. Relative to the current module's directory
     /// 3. Relative to each configured library path
-    fn read_header_file(&self, path: &str) -> Result<String, std::io::Error> {
+    ///
+    /// Returns the resolved filesystem path together with its raw content so
+    /// callers can resolve relative `#include` directives against the header's
+    /// own directory.
+    fn resolve_header_file(&self, path: &str) -> Result<(std::path::PathBuf, String), std::io::Error> {
         // 1. Try as-is (absolute or CWD-relative)
-        if let Ok(content) = fs::read_to_string(path) {
-            return Ok(content);
+        let p = Path::new(path);
+        if let Ok(content) = fs::read_to_string(p) {
+            return Ok((p.to_path_buf(), content));
         }
         // 2. Relative to the current module directory
         if let Some(ref dir) = self.current_module_dir {
             let p = Path::new(dir).join(path);
             if let Ok(content) = fs::read_to_string(&p) {
-                return Ok(content);
+                return Ok((p, content));
             }
         }
         // 3. Relative to each lib path
         for lp in &self.lib_paths {
             let p = Path::new(lp).join(path);
             if let Ok(content) = fs::read_to_string(&p) {
-                return Ok(content);
+                return Ok((p, content));
             }
             // Also try parent of lib path (e.g. std/../src/runtime.h)
             if let Some(parent) = Path::new(lp).parent() {
                 let p2 = parent.join(path);
                 if let Ok(content) = fs::read_to_string(&p2) {
-                    return Ok(content);
+                    return Ok((p2, content));
                 }
             }
         }
@@ -391,6 +541,68 @@ impl SemanticAnalyzer {
             std::io::ErrorKind::NotFound,
             format!("header file '{}' not found", path),
         ))
+    }
+
+    /// Read a C header and recursively inline `#include "..."` directives so
+    /// that function declarations living in sub-headers (e.g. `runtime/io.h`
+    /// pulled in by `runtime.h`) are visible to signature validation.
+    /// System includes (`#include <...>`) are left untouched.
+    fn read_header_file(&self, path: &str) -> Result<String, std::io::Error> {
+        let mut visited: HashSet<String> = HashSet::new();
+        self.read_header_recursive(path, &mut visited)
+    }
+
+    fn read_header_recursive(
+        &self,
+        path: &str,
+        visited: &mut HashSet<String>,
+    ) -> Result<String, std::io::Error> {
+        let (resolved, content) = self.resolve_header_file(path)?;
+        // Guard against include cycles.
+        let key = match resolved.canonicalize() {
+            Ok(c) => c.to_string_lossy().into_owned(),
+            Err(_) => resolved.to_string_lossy().into_owned(),
+        };
+        if !visited.insert(key) {
+            return Ok(String::new());
+        }
+
+        let base_dir = resolved.parent().map(|p| p.to_path_buf());
+        let mut out = String::new();
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("#include") {
+                let rest = rest.trim_start();
+                if rest.starts_with('"') {
+                    // Local include: extract the path between the quotes and
+                    // recurse relative to this header's directory.
+                    let inner = &rest[1..];
+                    if let Some(end) = inner.find('"') {
+                        let inc_path = &inner[..end];
+                        let resolved_inc = match &base_dir {
+                            Some(dir) => dir.join(inc_path),
+                            None => std::path::PathBuf::from(inc_path),
+                        };
+                        let inc_str = resolved_inc.to_string_lossy();
+                        match self.read_header_recursive(&inc_str, visited) {
+                            Ok(included) => out.push_str(&included),
+                            Err(_) => {
+                                // Fall back to searching lib paths directly.
+                                match self.read_header_recursive(inc_path, visited) {
+                                    Ok(included) => out.push_str(&included),
+                                    Err(_) => out.push_str(line),
+                                }
+                            }
+                        }
+                        out.push('\n');
+                        continue;
+                    }
+                }
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        Ok(out)
     }
 
     /// Lightweight check whether a C header text contains a declaration of
@@ -592,6 +804,20 @@ impl SemanticAnalyzer {
                 if let Some(alias) = import_stmt.get_alias() {
                     self.module_aliases.insert(alias.to_string(), name);
                 }
+            } else if let Some(from_import) = stmt.as_any().downcast_ref::<FromImportStatement>() {
+                // `from module import member, ...` inside a loaded module.
+                // Load the referenced module, then re-export the requested
+                // members as bare names in this module's namespace.
+                let mod_name = from_import.get_module();
+                self.load_module(mod_name);
+                for member in from_import.get_members() {
+                    let qualified = format!("{}::{}", mod_name, member);
+                    if let Some(sym) = self.env.lookup_symbol(&qualified) {
+                        let return_type = sym.data_type.clone();
+                        self.env.declare_function(member, &return_type, &self.current_module);
+                        declared_funcs.push((member.to_string(), return_type));
+                    }
+                }
             } else if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
                 if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
                     continue;
@@ -618,7 +844,7 @@ impl SemanticAnalyzer {
                 self.current_generic_params = prev_generic;
             } else if let Some(impl_block) = stmt.as_any().downcast_ref::<ImplBlock>() {
                 let prev_impl = self.current_impl_struct.clone();
-                self.current_impl_struct = Some(impl_block.get_struct_name().to_string());
+                self.current_impl_struct = Some(impl_block.get_struct_name().split('<').next().unwrap_or(impl_block.get_struct_name()).to_string());
                 let prev_impl_generic = self.current_generic_params.clone();
                 self.current_generic_params = impl_block.get_generic_params().clone();
 
@@ -626,7 +852,7 @@ impl SemanticAnalyzer {
                 if let Some(trait_name) = impl_block.get_trait_name() {
                     let method_names: Vec<String> = impl_block.get_items().iter().filter_map(|item| {
                         match item {
-                            ImplItem::Method(func) | ImplItem::Constructor(func) | ImplItem::Convert(func) => {
+                            ImplItem::Method(func) | ImplItem::Convert(func) => {
                                 if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
                                     None
                                 } else {
@@ -644,7 +870,7 @@ impl SemanticAnalyzer {
 
                 for item in impl_block.get_items() {
                     match item {
-                        ImplItem::Constructor(func) | ImplItem::Method(func) | ImplItem::Convert(func) => {
+                        ImplItem::Method(func) | ImplItem::Convert(func) => {
                             if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
                                 continue;
                             }
@@ -707,7 +933,7 @@ impl SemanticAnalyzer {
                     TraitMethodSig {
                         name: m.name.clone(),
                         param_count: m.parameters.len(),
-                        dynamic_args: Attribute::has_attr(&m.attributes, "dynamic_args"),
+                        dynamic: Attribute::has_attr(&m.attributes, "dynamic"),
                     }
                 }).collect();
                 self.trait_defs.insert(trait_def.get_name().to_string(), TraitDefInfo {
@@ -805,6 +1031,10 @@ impl AstVisitor for SemanticAnalyzer {
         #[cfg(debug_assertions)]
         println!("  Struct definition: {}", struct_name);
 
+
+        // Push generic scope so that type params like T are resolved in field types
+        let prev_generic = self.current_generic_params.clone();
+        self.current_generic_params = node.get_generic_params().clone();
         let mut fields = HashMap::new();
         for field in node.get_fields() {
             let field_type = self.get_data_type_from_ast(field.field_type.as_deref());
@@ -813,6 +1043,7 @@ impl AstVisitor for SemanticAnalyzer {
         self.struct_fields.insert(struct_name.clone(), fields);
 
         self.env.declare_module(&struct_name);
+        self.current_generic_params = prev_generic;
     }
 
     fn visit_enum_definition(&mut self, node: &EnumDefinition) {
@@ -861,70 +1092,118 @@ impl AstVisitor for SemanticAnalyzer {
         #[cfg(debug_assertions)]
         println!("  Impl block for: {}", node.get_struct_name());
 
-        // If this is `impl Trait for Type`, validate that all required methods are present
+        // If this is `impl Trait for Type`, only validate if the trait has
+        // already been loaded. Otherwise defer to validate_trait_impls()
+        // which runs after all modules are loaded (the first pass already
+        // queued this block in pending_trait_impls).
         if let Some(trait_name) = node.get_trait_name() {
             if let Some(trait_info) = self.trait_defs.get(trait_name).cloned() {
-                let impl_methods: HashSet<String> = node.get_items().iter().filter_map(|item| {
-                    match item {
-                        ImplItem::Method(func) | ImplItem::Constructor(func) | ImplItem::Convert(func) => {
-                            if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
-                                None
-                            } else {
-                                Some(func.get_name().to_string())
+                let impl_methods: HashMap<String, Vec<usize>> = node.get_items().iter()
+                    .filter_map(|item| {
+                        match item {
+                            ImplItem::Method(func) | ImplItem::Convert(func) => {
+                                if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                                    None
+                                } else {
+                                    let name = func.get_name().to_string();
+                                    let param_count = func.get_parameters().iter().len();
+                                    Some((name, param_count))
+                                }
                             }
                         }
-                    }
-                }).collect();
+                    })
+                    .fold(HashMap::new(), |mut map, (name, count)| {
+                        map.entry(name).or_insert_with(Vec::new).push(count);
+                        map
+                    });
 
                 for required in &trait_info.methods {
-                    // #[dynamic_args] methods can have any signature — skip name check
-                    if required.dynamic_args {
-                        continue;
-                    }
-                    if !impl_methods.contains(&required.name) {
+                    if !impl_methods.contains_key(&required.name) {
                         self.error(&format!(
                             "Trait '{}' requires method '{}', but it is missing in impl for '{}'",
                             trait_name, required.name, node.get_struct_name()
                         ));
+                        // #[dynamic] methods can have any signature — skip param check
+                        if required.dynamic {
+                            continue;
+                        }
                     }
                 }
-            } else {
-                self.error(&format!(
-                    "Trait '{}' is not defined (impl for '{}')",
-                    trait_name, node.get_struct_name()
-                ));
             }
+            // Trait not loaded yet — validate_trait_impls() will handle it.
         }
 
         let prev_impl = self.current_impl_struct.clone();
-        self.current_impl_struct = Some(node.get_struct_name().to_string());
+        let prev_generic = self.current_generic_params.clone();
+        self.current_impl_struct = Some(node.get_struct_name().split('<').next().unwrap_or(node.get_struct_name()).to_string());
+        self.current_generic_params = node.get_generic_params().clone();
 
+        // === Pass 1: Register all method names (without analyzing bodies) ===
+        // This ensures that methods defined in later impl blocks are available
+        // for lookup when analyzing earlier impl blocks (e.g. Vec::push is needed
+        // by New::new which is in a different impl block).
         for item in node.get_items() {
             match item {
-                ImplItem::Constructor(func) | ImplItem::Method(func) | ImplItem::Convert(func) => {
+                ImplItem::Method(func) | ImplItem::Convert(func) => {
                     if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
                         continue;
                     }
-                    // Dedup: skip if this (struct, method, arity) triple was already
-                    // declared (e.g. by a loaded std module that defines the same
-                    // method). Using arity as part of the key allows overloaded
-                    // methods like `Range::new(start, end)` and
-                    // `Range::new(start, end, step)` to coexist.
                     let struct_name = node.get_struct_name().to_string();
                     let method_name = func.get_name().to_string();
                     let arity = func
                         .get_parameters()
                         .map(|p| p.len())
                         .unwrap_or(0);
-                    if !self.impl_methods.insert((struct_name, method_name, arity)) {
+                    if !self.impl_methods.insert((struct_name.clone(), method_name.clone(), arity)) {
                         continue;
                     }
+                    let prev_fn_generic = self.current_generic_params.clone();
+                    for g in func.get_generic_params() {
+                        if !self.current_generic_params.contains(g) {
+                            self.current_generic_params.push(g.clone());
+                        }
+                    }
+                    let return_type = self.get_data_type_from_ast(func.get_return_type());
+                    self.env.declare_function(&method_name, &return_type, &self.current_module);
+                    if let Some(ref struct_name) = self.current_impl_struct {
+                        self.env.declare_function(&method_name, &return_type, struct_name);
+                    }
+                    self.current_generic_params = prev_fn_generic;
+                }
+            }
+        }
+
+        // === Pass 2: Analyze all method bodies ===
+        for item in node.get_items() {
+            match item {
+                ImplItem::Method(func) | ImplItem::Convert(func) => {
+                    if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                        continue;
+                    }
+                    let struct_name = node.get_struct_name().to_string();
+                    let method_name = func.get_name().to_string();
+                    let arity = func
+                        .get_parameters()
+                        .map(|p| p.len())
+                        .unwrap_or(0);
+                    // Skip if not registered in pass 1 (dedup)
+                    if !self.impl_methods.contains(&(struct_name, method_name, arity)) {
+                        continue;
+                    }
+                    let prev_fn_generic = self.current_generic_params.clone();
+                    for g in func.get_generic_params() {
+                        if !self.current_generic_params.contains(g) {
+                            self.current_generic_params.push(g.clone());
+                        }
+                    }
                     func.accept(self);
+                    self.current_generic_params = prev_fn_generic;
                 }
             }
         }
 
         self.current_impl_struct = prev_impl;
+        self.current_generic_params = prev_generic;
     }
 
     fn visit_trait_definition(&mut self, node: &TraitDefinition) {
@@ -935,7 +1214,7 @@ impl AstVisitor for SemanticAnalyzer {
             TraitMethodSig {
                 name: m.name.clone(),
                 param_count: m.parameters.len(),
-                dynamic_args: Attribute::has_attr(&m.attributes, "dynamic_args"),
+                dynamic: Attribute::has_attr(&m.attributes, "dynamic"),
             }
         }).collect();
         self.trait_defs.insert(node.get_name().to_string(), TraitDefInfo {
@@ -1023,6 +1302,31 @@ impl AstVisitor for SemanticAnalyzer {
         }
     }
 
+    fn visit_from_import_statement(&mut self, node: &FromImportStatement) {
+        let module_name = node.get_module();
+        #[cfg(debug_assertions)]
+        println!("  From-import: module={}, members={:?}", module_name, node.get_members());
+
+        // First, ensure the module is loaded (this registers all its
+        // public symbols under `module::member` keys).
+        self.load_module(module_name);
+
+        // Then, re-declare each requested member as a bare name in the
+        // current module so it can be called without the `module::` qualifier.
+        for member in node.get_members() {
+            let qualified = format!("{}::{}", module_name, member);
+            if let Some(sym) = self.env.lookup_symbol(&qualified) {
+                let return_type = sym.data_type.clone();
+                self.env.declare_function(member, &return_type, &self.current_module);
+            } else {
+                self.error(&format!(
+                    "Cannot import '{}' from module '{}': member not found",
+                    member, module_name
+                ));
+            }
+        }
+    }
+
     fn visit_function(&mut self, node: &Function) {
         if self.build_mode == BuildMode::Release && Attribute::has_attr(node.get_attributes(), "debug") {
             return;
@@ -1031,9 +1335,34 @@ impl AstVisitor for SemanticAnalyzer {
         #[cfg(debug_assertions)]
         println!("  Function: {}", func_name);
 
+        // Save impl context for self parameter handling
+        let prev_impl = self.current_impl_struct.clone();
+        // If this is a top-level function with `self: StructType` parameter,
+        // set current_impl_struct so that field access (_data, _cap, _len) works.
+        if self.current_impl_struct.is_none() {
+            if let Some(params) = node.get_parameters() {
+                if let Some(first_param) = params.first() {
+                    if first_param.get_name() == "self" {
+                        if let Some(tp) = first_param.get_type() {
+                            let type_name = tp.get_name();
+                            if self.struct_fields.contains_key(type_name) {
+                                self.current_impl_struct = Some(type_name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Set generic params BEFORE type resolution
+        // Merge function-level generics with existing (e.g., impl-block-level) generics
         let prev_generic_params = self.current_generic_params.clone();
-        self.current_generic_params = node.get_generic_params().clone();
+        let mut combined = prev_generic_params.clone();
+        for g in node.get_generic_params() {
+            if !combined.contains(g) {
+                combined.push(g.clone());
+            }
+        }
+        self.current_generic_params = combined;
 
         let return_type = self.get_data_type_from_ast(node.get_return_type());
 
@@ -1042,6 +1371,7 @@ impl AstVisitor for SemanticAnalyzer {
                 "Failed to declare function '{}.{}'",
                 self.current_module, func_name
             ));
+            self.current_impl_struct = prev_impl;
             self.current_generic_params = prev_generic_params;
             return;
         }
@@ -1090,12 +1420,14 @@ impl AstVisitor for SemanticAnalyzer {
             }
         }
 
-        if return_type != DataType::None_ && !self.has_return_statement && !has_tail_expr {
-            self.error(&format!(
-                "Function '{}' must return a value of type {}",
-                self.current_function,
-                data_type_to_string(return_type)
-            ));
+        if !Attribute::has_attr(node.get_attributes(), "intrinsic") {
+            if return_type != DataType::None_ && !self.has_return_statement && !has_tail_expr {
+                self.error(&format!(
+                    "Function '{}' must return a value of type {}",
+                    self.current_function,
+                    data_type_to_string(return_type)
+                ));
+            }
         }
 
         self.env.exit_scope();
@@ -1104,6 +1436,52 @@ impl AstVisitor for SemanticAnalyzer {
         self.current_function_return_type = prev_return_type;
         self.has_return_statement = prev_has_return;
         self.current_generic_params = prev_generic_params;
+    }
+
+    fn visit_lambda(&mut self, node: &Lambda) {
+        // Lambda is analyzed in the context of a function call (inline).
+        // Set up generic params, a new scope for parameters, and analyze the body.
+        let prev_generic_params = self.current_generic_params.clone();
+        let mut combined = prev_generic_params.clone();
+        for g in node.get_generic_params() {
+            if !combined.contains(g) {
+                combined.push(g.clone());
+            }
+        }
+        self.current_generic_params = combined;
+
+        let return_type = self.get_data_type_from_ast(node.get_return_type());
+
+        let prev_function = self.current_function.clone();
+        let prev_return_type = self.current_function_return_type.clone();
+        let prev_has_return = self.has_return_statement;
+
+        self.current_function = "__lambda".to_string();
+        self.current_function_return_type = return_type.clone();
+        self.has_return_statement = false;
+
+        self.env.enter_scope();
+
+        // Parameters
+        if let Some(params) = node.get_parameters() {
+            for param in params {
+                param.accept(self);
+            }
+        }
+
+        // Body
+        node.get_body().accept(self);
+
+        self.env.exit_scope();
+
+        self.current_function = prev_function;
+        self.current_function_return_type = prev_return_type;
+        self.has_return_statement = prev_has_return;
+        self.current_generic_params = prev_generic_params;
+
+        // The lambda expression's type is its return type (used when the
+        // lambda is immediately invoked).
+        self.type_stack.push(return_type);
     }
 
     fn visit_parameter(&mut self, node: &Parameter) {
@@ -1228,6 +1606,7 @@ impl AstVisitor for SemanticAnalyzer {
         if let Some(cond) = node.get_condition() {
             cond.accept(self);
             let cond_type = self.get_current_type();
+            self.type_stack.pop();  // Pop condition type after use
 
             if cond_type != DataType::Bool && !Environment::is_numeric_type(&cond_type) {
                 self.error("If condition must be boolean or numeric type");
@@ -1250,6 +1629,7 @@ impl AstVisitor for SemanticAnalyzer {
         if let Some(cond) = node.get_condition() {
             cond.accept(self);
             let cond_type = self.get_current_type();
+            self.type_stack.pop();  // Pop condition type after use
 
             if cond_type != DataType::Bool && !Environment::is_numeric_type(&cond_type) {
                 self.error("While condition must be boolean or numeric type");
@@ -1276,14 +1656,28 @@ impl AstVisitor for SemanticAnalyzer {
         if let Some(iter) = node.get_iterable() {
             iter.accept(self);
             let iter_type = self.get_current_type();
-
-            let is_valid = matches!(iter_type, DataType::Int)
+            self.type_stack.pop();  // Pop iterable type after use
+            // Accept Range, Str, array types, generic type params (like T in T[]),
+            // Unknown, and variables that are arrays
+            let iter_is_valid = matches!(iter_type, DataType::Int)
                 || matches!(&iter_type, DataType::Struct(s) if s == "Range")
                 || matches!(iter_type, DataType::Str)
-                || matches!(iter_type, DataType::Unknown);
-            if !is_valid {
-                // Also accept any array-like type (Struct, or if it's an array variable)
-                self.error("For loop iterable must be range, string, or array");
+                || matches!(iter_type, DataType::Unknown)
+                || matches!(&iter_type, DataType::Struct(s) if self.current_generic_params.contains(&s.to_string()));
+            if !iter_is_valid {
+                // Check if the iterable is a variable that is an array
+                let is_array_var = if let Some(iter_expr) = node.get_iterable() {
+                    if let Some(id) = iter_expr.as_any().downcast_ref::<crate::ast::Identifier>() {
+                        self.env.lookup_symbol(id.get_name()).map_or(false, |s| s.is_array)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !is_array_var {
+                    self.error("For loop iterable must be range, string, or array");
+                }
             }
 
             // Declare value variable (second) with appropriate type
@@ -1382,10 +1776,15 @@ impl AstVisitor for SemanticAnalyzer {
             }
         }
 
-        // Look up in current module, with bare-name fallback for builtins
-        let full_name = format!("{}::{}", self.current_module, name);
-        let sym = self.env.lookup_symbol(&full_name)
-            .or_else(|| self.env.lookup_symbol(name));
+        // Look up: bare name first (local vars/params shadow module-level),
+        // then module-prefixed name (for module-level functions).
+        // This ensures local parameters like `index: int` are found before
+        // module-level methods like `vec::index` (Vec::index).
+        let sym = self.env.lookup_symbol(name)
+            .or_else(|| {
+                let full_name = format!("{}::{}", self.current_module, name);
+                self.env.lookup_symbol(&full_name)
+            });
 
         match sym {
             Some(s) => self.type_stack.push(s.data_type.clone()),
@@ -1514,7 +1913,18 @@ impl AstVisitor for SemanticAnalyzer {
                         }
                     }
 
-                    if let Some(arr_id) = array.as_any().downcast_ref::<Identifier>() {
+                    // Check if the base is a struct field (e.g., _data in impl block)
+                    let is_struct_field_array = if let Some(arr_id) = array.as_any().downcast_ref::<Identifier>() {
+                        self.current_impl_struct.as_ref().map_or(false, |s| {
+                            self.struct_fields.get(s).map_or(false, |f| f.contains_key(arr_id.get_name()))
+                        })
+                    } else {
+                        false
+                    };
+
+                    if is_struct_field_array {
+                        is_assignable = true;
+                    } else if let Some(arr_id) = array.as_any().downcast_ref::<Identifier>() {
                         if let Some(sym) = self.env.lookup_symbol(arr_id.get_name()) {
                             if !sym.is_mut {
                                 self.error(&format!("Cannot assign to constant array '{}'", arr_id.get_name()));
@@ -1532,6 +1942,43 @@ impl AstVisitor for SemanticAnalyzer {
                 self.error("Left side of assignment must be a mutable variable or array element");
                 self.type_stack.push(DataType::Unknown);
                 return;
+            }
+
+            // `__new_array` is a compiler intrinsic produced by the parser for
+            // `new T[size]?` / `new T[size]` array allocations. The element
+            // type is determined at codegen from the allocation site, so the
+            // intrinsic's static type is `Unknown`. Accept the assignment
+            // against any array / nullable-array LHS without flagging a type
+            // mismatch (the actual element type is enforced by the surrounding
+            // `var x: T[] = new T[n]` annotation, which the ArrayType path
+            // already type-checks).
+            let rhs_is_new_array = node.get_right().map_or(false, |r| {
+                r.as_any()
+                    .downcast_ref::<Identifier>()
+                    .map_or(false, |id| id.get_name() == "__new_array")
+            });
+            if rhs_is_new_array {
+                self.type_stack.push(left_type);
+                return;
+            }
+
+            // `null` assigned to a generic element slot (e.g. `_data[i] = null`
+            // inside `Vec<T>::pop`). The slot type is the generic `T`, which
+            // may or may not be nullable — at this point we cannot know. Treat
+            // `null` as compatible with a generic slot to allow optional
+            // post-pop cleanup without forcing every `T` to be nullable.
+            let rhs_is_null = node.get_right().map_or(false, |r| {
+                r.as_any().downcast_ref::<NullLiteral>().is_some()
+            });
+            if rhs_is_null && right_type == DataType::None_ {
+                let slot_is_generic = match &left_type {
+                    DataType::Struct(name) => self.current_generic_params.contains(name),
+                    _ => false,
+                };
+                if slot_is_generic {
+                    self.type_stack.push(left_type);
+                    return;
+                }
             }
 
             if !Environment::is_type_compatible(&left_type, &right_type) {
@@ -1736,11 +2183,24 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_unary_expression(&mut self, node: &UnaryExpression) {
+        let op = node.get_operator();
+
+        // `&name` — address-of operator for function references.
+        // The operand is a function name; yield a function-pointer type.
+        if op == "&" {
+            if let Some(operand) = node.get_operand() {
+                operand.accept(self);
+            }
+            // Consume the operand type and push Unknown (function pointer).
+            let _ = self.get_current_type();
+            self.type_stack.push(DataType::Unknown);
+            return;
+        }
+
         if let Some(operand) = node.get_operand() {
             operand.accept(self);
         }
         let operand_type = self.get_current_type();
-        let op = node.get_operator();
 
         if op == "-" || op == "+" {
             if !Environment::is_numeric_type(&operand_type) {
@@ -1759,6 +2219,26 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_function_call(&mut self, node: &FunctionCall) {
+        // Lambda immediate invocation: lambda(params): ret { body }(args)
+        if let Some(callee) = node.get_callee() {
+            if let Some(lambda) = callee.as_any().downcast_ref::<Lambda>() {
+                // Analyze the lambda (pushes its return type onto type_stack)
+                lambda.accept(self);
+                let return_type = self.type_stack.pop().unwrap_or(DataType::Unknown);
+
+                // Analyze and consume argument types
+                if let Some(args) = node.get_arguments() {
+                    for arg in args {
+                        arg.accept(self);
+                        self.type_stack.pop();
+                    }
+                }
+
+                self.type_stack.push(return_type);
+                return;
+            }
+        }
+
         let mut func_name = String::new();
         let mut module_name = self.current_module.clone();
 
@@ -1786,7 +2266,16 @@ impl AstVisitor for SemanticAnalyzer {
                             ));
                             func_name = member_name;
                         } else {
-                            module_name = obj_name;
+                            // If obj is "self", use current_impl_struct as module for method lookup
+                            if obj_name == "self" {
+                                if let Some(ref struct_name) = self.current_impl_struct {
+                                    module_name = struct_name.clone();
+                                } else {
+                                    module_name = obj_name;
+                                }
+                            } else {
+                                module_name = obj_name;
+                            }
                             func_name = member_name;
                         }
                     } else {
@@ -1809,15 +2298,26 @@ impl AstVisitor for SemanticAnalyzer {
             }
         }
 
-        // Check if it's a struct constructor call (e.g. Point(1, 2))
-        if self.struct_fields.contains_key(&func_name) {
+        // Check if it's a struct constructor call (e.g. Point(1, 2) or vec::VecIterator(...))
+        // Also check bare identifier that matches a struct name (e.g., VecIterator(...))
+        // Strip generic parameters from func_name (e.g., "VecIterator<T>" → "VecIterator")
+        let func_name_bare = func_name.split('<').next().unwrap_or(&func_name).to_string();
+        let constructor_name = func_name_bare.split("::").last().unwrap_or(&func_name_bare).to_string();
+        let is_struct_ctor = self.struct_fields.contains_key(&func_name_bare)
+            || self.struct_fields.contains_key(&constructor_name);
+        if is_struct_ctor {
+            let resolved_ctor = if self.struct_fields.contains_key(&func_name_bare) {
+                func_name_bare.clone()
+            } else {
+                constructor_name
+            };
             if let Some(args) = node.get_arguments() {
                 for arg in args {
                     arg.accept(self);
                     self.type_stack.pop();
                 }
             }
-            self.type_stack.push(DataType::Struct(func_name.clone()));
+            self.type_stack.push(DataType::Struct(resolved_ctor));
             return;
         }
 
@@ -1825,14 +2325,18 @@ impl AstVisitor for SemanticAnalyzer {
         // `TypeName` as the expression type. This enables automatic type
         // inference for declarations such as `var x = Range::new(0, 10);`
         // without requiring a type annotation.
-        if func_name == "new" && self.struct_fields.contains_key(&module_name) {
+        // Also handle `new T[n]` where T is a generic type parameter.
+        let module_name_bare = module_name.split('<').next().unwrap_or(&module_name).to_string();
+        if func_name == "new" && (self.struct_fields.contains_key(&module_name_bare)
+            || self.current_generic_params.contains(&module_name_bare))
+        {
             if let Some(args) = node.get_arguments() {
                 for arg in args {
                     arg.accept(self);
                     self.type_stack.pop();
                 }
             }
-            self.type_stack.push(DataType::Struct(module_name.clone()));
+            self.type_stack.push(DataType::Struct(module_name_bare.clone()));
             return;
         }
 
@@ -1880,20 +2384,26 @@ impl AstVisitor for SemanticAnalyzer {
             .cloned()
             .unwrap_or_else(|| module_name.clone());
 
+        // Strip generic parameter suffixes from the module half of the lookup
+        // name so that `Result<U, E>::Ok` resolves the same way `Result::Ok`
+        // does. Variant constructors and methods are registered under the
+        // bare type name, never the monomorphised form.
+        let resolved_module_bare = resolved_module.split('<').next().unwrap_or(&resolved_module).to_string();
+
         // Build lookup name. For method calls (obj.method), resolve via struct type
-        let full_name = if resolved_module != self.current_module {
+        let full_name = if resolved_module_bare != self.current_module {
             // Check if resolved_module is a variable (not a module) → method dispatch
-            let is_var = self.env.lookup_symbol(&resolved_module)
+            let is_var = self.env.lookup_symbol(&resolved_module_bare)
                 .map_or(false, |s| s.symbol_type != SymbolType::Module);
             if is_var {
                 // For struct types, look up method in current module
                 // For arrays, the method is handled by the executor
                 format!("{}::{}", self.current_module, func_name)
             } else {
-                format!("{}::{}", resolved_module, func_name)
+                format!("{}::{}", resolved_module_bare, func_name)
             }
         } else {
-            format!("{}::{}", resolved_module, func_name)
+            format!("{}::{}", resolved_module_bare, func_name)
         };
 
         // Try qualified lookup, then short-name lookup
@@ -1958,14 +2468,19 @@ impl AstVisitor for SemanticAnalyzer {
         // symbol table. This enables method calls on imported struct types
         // (e.g. Result::take, Channel::send) without requiring the method
         // to be in the current module namespace.
-        if sym_data_type.is_none() && module_name != self.current_module {
-            let struct_name_from_var = self.env.lookup_symbol(&module_name)
-                .and_then(|s| if let DataType::Struct(ref sn) = s.data_type {
-                    Some(sn.clone())
-                } else {
-                    None
-                });
-            if let Some(struct_name) = struct_name_from_var {
+        if sym_data_type.is_none() {
+            // Special case: if module_name is "self", use current_impl_struct directly
+            let dispatch_struct = if module_name == "self" {
+                self.current_impl_struct.clone()
+            } else {
+                self.env.lookup_symbol(&module_name)
+                    .and_then(|s| if let DataType::Struct(ref sn) = s.data_type {
+                        Some(sn.clone())
+                    } else {
+                        None
+                    })
+            };
+            if let Some(struct_name) = dispatch_struct {
                 let struct_method = format!("{}::{}", struct_name, func_name);
                 let method_type = self.env.lookup_symbol(&struct_method)
                     .map(|s| s.data_type.clone());
@@ -1979,10 +2494,38 @@ impl AstVisitor for SemanticAnalyzer {
                     self.type_stack.push(dt);
                     return;
                 }
-                // Also try without arity suffix for generic impls
+                // Also try without struct prefix (bare method name) for generic impls
                 let bare_method_type = self.env.lookup_symbol(&func_name)
                     .map(|s| s.data_type.clone());
                 if let Some(dt) = bare_method_type {
+                    if let Some(args) = node.get_arguments() {
+                        for arg in args {
+                            arg.accept(self);
+                            self.type_stack.pop();
+                        }
+                    }
+                    self.type_stack.push(dt);
+                    return;
+                }
+                // Try looking up in current module with struct name prefix (e.g., vec::push)
+                let current_module_method = format!("{}::{}", self.current_module, func_name);
+                let current_method_type = self.env.lookup_symbol(&current_module_method)
+                    .map(|s| s.data_type.clone());
+                if let Some(dt) = current_method_type {
+                    if let Some(args) = node.get_arguments() {
+                        for arg in args {
+                            arg.accept(self);
+                            self.type_stack.pop();
+                        }
+                    }
+                    self.type_stack.push(dt);
+                    return;
+                }
+                // Also try with bare struct name (e.g., "Vec" instead of "Vec<T>")
+                let bare_struct_method = format!("{}::{}", struct_name.split('<').next().unwrap_or(&struct_name), func_name);
+                let bare_struct_method_type = self.env.lookup_symbol(&bare_struct_method)
+                    .map(|s| s.data_type.clone());
+                if let Some(dt) = bare_struct_method_type {
                     if let Some(args) = node.get_arguments() {
                         for arg in args {
                             arg.accept(self);
@@ -2351,17 +2894,31 @@ impl AstVisitor for SemanticAnalyzer {
 
         if let Some(arr) = node.get_array() {
             if let Some(id) = arr.as_any().downcast_ref::<Identifier>() {
-                if let Some(sym) = self.env.lookup_symbol(id.get_name()) {
+                let id_name = id.get_name();
+                // Check if it's a struct field (e.g., _data in impl block) — type already on stack
+                let is_struct_field = self.current_impl_struct.as_ref().map_or(false, |s| {
+                    self.struct_fields.get(s).map_or(false, |f| f.contains_key(id_name))
+                });
+                if is_struct_field {
+                    // Unwrap Nullable if the struct field is a nullable array (T[]? → T)
+                    let elem_type = match &array_type {
+                        DataType::Nullable(inner) => *inner.clone(),
+                        _ => array_type.clone(),
+                    };
+                    self.type_stack.push(elem_type);
+                    return;
+                }
+                // Otherwise look up in environment (local variables)
+                if let Some(sym) = self.env.lookup_symbol(id_name) {
                     if !sym.is_array {
-                        self.error(&format!("Variable '{}' is not an array", id.get_name()));
+                        self.error(&format!("Variable '{}' is not an array", id_name));
                         self.type_stack.push(DataType::Unknown);
                         return;
                     }
                     self.type_stack.push(sym.data_type.clone());
                     return;
                 }
-
-                self.error(&format!("Array variable '{}' not declared", id.get_name()));
+                self.error(&format!("Array variable '{}' not declared", id_name));
                 self.type_stack.push(DataType::Unknown);
                 return;
             }

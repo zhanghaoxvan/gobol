@@ -1,0 +1,245 @@
+{
+  "Main function": {
+    "prefix": "main",
+    "body": [
+      "func main() {",
+      "    $0",
+      "}"
+    ],
+    "description": "Gobol main function entry point"
+  },
+  "Function declaration": {
+    "prefix": "func",
+    "body": [
+      "func ${1:name}(${2:params}): ${3:ReturnType} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Function with return type"
+  },
+  "Void function": {
+    "prefix": "funcv",
+    "body": [
+      "func ${1:name}(${2:params}) {",
+      "    $0",
+      "}"
+    ],
+    "description": "Void function (no return type)"
+  },
+  "Struct declaration": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "    ${2:field}: ${3:Type},",
+      "}"
+    ],
+    "description": "Struct declaration with field"
+  },
+  "Generic struct": {
+    "prefix": "structg",
+    "body": [
+      "struct ${1:Name}<${2:T}> {",
+      "    ${3:field}: ${2:T},",
+      "}"
+    ],
+    "description": "Generic struct declaration"
+  },
+  "Enum declaration": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "    ${2:Variant},",
+      "}"
+    ],
+    "description": "Enum declaration with variant"
+  },
+  "Impl block": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Type} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Impl block for a type"
+  },
+  "Impl trait for type": {
+    "prefix": "implt",
+    "body": [
+      "impl ${1:Trait} for ${2:Type} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Implement trait for a type"
+  },
+  "Trait declaration": {
+    "prefix": "trait",
+    "body": [
+      "trait ${1:Name} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Trait declaration"
+  },
+  "If statement": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "    $0",
+      "}"
+    ],
+    "description": "If statement"
+  },
+  "If-else statement": {
+    "prefix": "ife",
+    "body": [
+      "if ${1:condition} {",
+      "    $2",
+      "} else {",
+      "    $0",
+      "}"
+    ],
+    "description": "If-else statement"
+  },
+  "For loop (range)": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} in ${2:start}..${3:end} {",
+      "    $0",
+      "}"
+    ],
+    "description": "For-in range loop"
+  },
+  "For loop (iter)": {
+    "prefix": "fori",
+    "body": [
+      "for ${1:item} in ${2:iterable}.iter() {",
+      "    $0",
+      "}"
+    ],
+    "description": "For-in iterator loop"
+  },
+  "While loop": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition} {",
+      "    $0",
+      "}"
+    ],
+    "description": "While loop"
+  },
+  "Match expression": {
+    "prefix": "match",
+    "body": [
+      "match ${1:expr} {",
+      "    ${2:pattern} => $0,",
+      "}"
+    ],
+    "description": "Match expression"
+  },
+  "Import module": {
+    "prefix": "import",
+    "body": "import ${1:module};",
+    "description": "Import module"
+  },
+  "Import with alias": {
+    "prefix": "importa",
+    "body": "import ${1:module} as ${2:alias};",
+    "description": "Import module with alias"
+  },
+  "Variable declaration": {
+    "prefix": "var",
+    "body": "var ${1:name}: ${2:Type} = $0;",
+    "description": "Mutable variable declaration with type"
+  },
+  "Immutable variable": {
+    "prefix": "val",
+    "body": "val ${1:name}: ${2:Type} = $0;",
+    "description": "Immutable variable declaration"
+  },
+  "Vec new": {
+    "prefix": "vec",
+    "body": "Vec<${1:T}>::new()",
+    "description": "Create new empty vector"
+  },
+  "Option Some": {
+    "prefix": "some",
+    "body": "Some($0)",
+    "description": "Option::Some variant"
+  },
+  "Option None": {
+    "prefix": "none",
+    "body": "None",
+    "description": "Option::None variant"
+  },
+  "Result Ok": {
+    "prefix": "ok",
+    "body": "Ok($0)",
+    "description": "Result::Ok variant"
+  },
+  "Result Err": {
+    "prefix": "err",
+    "body": "Err($0)",
+    "description": "Result::Err variant"
+  },
+  "Println": {
+    "prefix": "println",
+    "body": "io::println($0);",
+    "description": "Print line (via io module)"
+  },
+  "Print (format)": {
+    "prefix": "printf",
+    "body": "io::println(@\"$0\");",
+    "description": "Print formatted line"
+  },
+  "Assert": {
+    "prefix": "assert",
+    "body": "assert::assert(${1:condition});",
+    "description": "Assert condition is true"
+  },
+  "Extern C block": {
+    "prefix": "externc",
+    "body": [
+      "extern \"C\" {",
+      "    $0",
+      "}"
+    ],
+    "description": "Extern C FFI block"
+  },
+  "Constructor": {
+    "prefix": "constructor",
+    "body": [
+      "constructor ${1:TypeName}(${2:params}) {",
+      "    $0",
+      "}"
+    ],
+    "description": "Constructor for a struct"
+  },
+  "Include C header": {
+    "prefix": "include",
+    "body": "#include \"$0\"",
+    "description": "C header include for FFI"
+  },
+  "Attribute / Annotation": {
+    "prefix": "#[",
+    "body": "#[${1:attribute}]",
+    "description": "Compiler attribute (e.g., #[inline])"
+  },
+  "Method (self)": {
+    "prefix": "method",
+    "body": [
+      "func ${1:name}(self${2:, params}): ${3:ReturnType} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Instance method with self"
+  },
+  "Static method": {
+    "prefix": "smethod",
+    "body": [
+      "static func ${1:name}(${2:params}): ${3:ReturnType} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Static (associated) function"
+  }
+}

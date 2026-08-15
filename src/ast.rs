@@ -1,3 +1,4 @@
+
 #![allow(dead_code)]
 
 use std::any::Any;
@@ -41,8 +42,8 @@ impl Attribute {
 
     pub fn get_attr_named<'a>(attrs: &'a [Attribute], name: &str, key: &str) -> Option<&'a str> {
         attrs.iter()
-            .find(|a| a.name == name)
-            .and_then(|a| a.named.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()))
+        .find(|a| a.name == name)
+        .and_then(|a| a.named.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()))
     }
 }
 
@@ -63,6 +64,8 @@ pub trait AstVisitor {
     #[allow(dead_code)]
     fn visit_type(&mut self, _node: &dyn Type) {}
     fn visit_array_type(&mut self, _node: &ArrayType) {}
+    #[allow(dead_code)]
+    fn visit_function_type(&mut self, _node: &FunctionType) {}
     fn visit_if_statement(&mut self, _node: &IfStatement) {}
     fn visit_while_statement(&mut self, _node: &WhileStatement) {}
     fn visit_for_statement(&mut self, _node: &ForStatement) {}
@@ -72,6 +75,7 @@ pub trait AstVisitor {
     fn visit_declaration(&mut self, _node: &Declaration) {}
     fn visit_expression_statement(&mut self, _node: &ExpressionStatement) {}
     fn visit_import_statement(&mut self, _node: &ImportStatement) {}
+    fn visit_from_import_statement(&mut self, _node: &FromImportStatement) {}
     fn visit_export_statement(&mut self, _node: &ExportStatement) {}
     fn visit_struct_definition(&mut self, _node: &StructDefinition) {}
     fn visit_impl_block(&mut self, _node: &ImplBlock) {}
@@ -98,6 +102,7 @@ pub trait AstVisitor {
     fn visit_struct_literal(&mut self, _node: &StructLiteral) {}
     fn visit_match_expression(&mut self, _node: &MatchExpression) {}
     fn visit_try_operator(&mut self, _node: &TryOperator) {}
+    fn visit_lambda(&mut self, _node: &Lambda) {}
 }
 
 // ==================== Node ====================
@@ -287,6 +292,54 @@ impl AstNode for NullableType {
 impl Type for NullableType {
     fn get_name(&self) -> &str {
         self.inner_type.get_name()
+    }
+    fn as_type(&self) -> &dyn Type {
+        self
+    }
+    fn as_type_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ==================== FunctionType ====================
+//
+// A first-class function type, written `func(T1, T2): R`. Used as the type
+// of callback parameters (e.g. `f: func(T): U` in Option::map). The semantic
+// analyser collapses FunctionType to DataType::Unknown — it only needs to
+// know the value is callable, not its precise signature.
+
+pub struct FunctionType {
+    param_types: Vec<Box<dyn Type>>,
+    return_type: Option<Box<dyn Type>>,
+}
+
+impl FunctionType {
+    pub fn new(param_types: Vec<Box<dyn Type>>, return_type: Option<Box<dyn Type>>) -> Self {
+        FunctionType {
+            param_types,
+            return_type,
+        }
+    }
+    pub fn get_param_types(&self) -> Vec<&dyn Type> {
+        self.param_types.iter().map(|t| t.as_type()).collect()
+    }
+    pub fn get_return_type(&self) -> Option<&dyn Type> {
+        self.return_type.as_deref().map(|t| t.as_type())
+    }
+}
+
+impl AstNode for FunctionType {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_function_type(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Type for FunctionType {
+    fn get_name(&self) -> &str {
+        "func"
     }
     fn as_type(&self) -> &dyn Type {
         self
@@ -669,6 +722,46 @@ impl Statement for ImportStatement {
     }
 }
 
+// ==================== FromImportStatement ====================
+
+/// `from module import member1, member2, ...;`
+///
+/// Imports specific members from a module into the current scope as bare
+/// names, so they can be called without the `module::` qualifier.
+pub struct FromImportStatement {
+    module: String,
+    members: Vec<String>,
+}
+
+impl FromImportStatement {
+    pub fn new(module: String, members: Vec<String>) -> Self {
+        FromImportStatement { module, members }
+    }
+
+    pub fn get_module(&self) -> &str {
+        &self.module
+    }
+
+    pub fn get_members(&self) -> &[String] {
+        &self.members
+    }
+}
+
+impl AstNode for FromImportStatement {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_from_import_statement(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Statement for FromImportStatement {
+    fn as_statement(&self) -> &dyn Statement {
+        self
+    }
+}
+
 // ==================== ExportStatement ====================
 
 pub struct ExportStatement {
@@ -749,7 +842,6 @@ impl Statement for StructDefinition {
 // ==================== ImplBlock ====================
 
 pub enum ImplItem {
-    Constructor(Box<Function>),
     Method(Box<Function>),
     Convert(Box<Function>),
 }
@@ -1403,6 +1495,69 @@ impl Expression for FunctionCall {
     }
 }
 
+// ==================== Lambda ====================
+
+/// A lambda (anonymous function) expression.
+/// Syntax: `lambda<GenericParams>(params): ReturnType { body }`
+/// Lambdas can capture `var` variables from the enclosing scope.
+pub struct Lambda {
+    parameters: Option<Vec<Box<Parameter>>>,
+    return_type: Option<Box<dyn Type>>,
+    body: Box<Block>,
+    generic_params: Vec<String>,
+}
+
+impl Lambda {
+    pub fn new(
+        parameters: Option<Vec<Box<Parameter>>>,
+        return_type: Option<Box<dyn Type>>,
+        body: Box<Block>,
+    ) -> Self {
+        Lambda {
+            parameters,
+            return_type,
+            body,
+            generic_params: Vec::new(),
+        }
+    }
+
+    pub fn with_generic_params(mut self, params: Vec<String>) -> Self {
+        self.generic_params = params;
+        self
+    }
+
+    pub fn get_parameters(&self) -> Option<&Vec<Box<Parameter>>> {
+        self.parameters.as_ref()
+    }
+
+    pub fn get_return_type(&self) -> Option<&dyn Type> {
+        self.return_type.as_deref()
+    }
+
+    pub fn get_body(&self) -> &Block {
+        &self.body
+    }
+
+    pub fn get_generic_params(&self) -> &Vec<String> {
+        &self.generic_params
+    }
+}
+
+impl AstNode for Lambda {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_lambda(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Expression for Lambda {
+    fn as_expression(&self) -> &dyn Expression {
+        self
+    }
+}
+
 // ==================== PathAccess ====================
 
 /// Namespace path access using `::` separator (e.g. `std::io::println`).
@@ -1959,8 +2114,8 @@ impl FormatString {
             let object_part = &expr[..last_dot];
             let member_part = &expr[last_dot + 1..];
             let valid_member = member_part
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_');
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_');
             if valid_member {
                 let object = Self::parse_expression(object_part);
                 if let Some(o) = object {
@@ -1975,17 +2130,17 @@ impl FormatString {
             let type_name = expr[as_pos + 4..].trim();
             if !type_name.is_empty()
                 && type_name.chars().all(|c| c.is_alphanumeric() || c == '_')
-            {
-                if let Some(lhs_expr) = Self::parse_expression(lhs) {
-                    let tp: Box<dyn Type> = Box::new(BasicType::new(type_name));
-                    return Some(Box::new(CastExpression::new(Some(lhs_expr), tp)));
+                {
+                    if let Some(lhs_expr) = Self::parse_expression(lhs) {
+                        let tp: Box<dyn Type> = Box::new(BasicType::new(type_name));
+                        return Some(Box::new(CastExpression::new(Some(lhs_expr), tp)));
+                    }
                 }
-            }
         }
         // 标识符
         let valid_identifier = !expr.is_empty()
-            && (expr.chars().next().unwrap().is_alphabetic() || expr.starts_with('_'))
-            && expr.chars().all(|c| c.is_alphanumeric() || c == '_');
+        && (expr.chars().next().unwrap().is_alphabetic() || expr.starts_with('_'))
+        && expr.chars().all(|c| c.is_alphanumeric() || c == '_');
         if valid_identifier {
             return Some(Box::new(Identifier::new(expr)));
         }
@@ -2050,27 +2205,27 @@ impl FormatString {
                 let type_name = rest[..open_idx].trim();
                 if type_name.is_empty()
                     || !type_name
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_')
-                {
-                    return None;
-                }
-                let args_str = &rest[open_idx + 1..close_idx];
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        return None;
+                    }
+                    let args_str = &rest[open_idx + 1..close_idx];
                 let args = Self::parse_arg_list(args_str);
                 return Some(Box::new(FunctionCall::new(
                     Some(Box::new(Identifier::new(type_name))),
-                    args,
+                                                       args,
                 )));
             }
         }
         // new Type (no args)
         let valid_identifier = !rest.is_empty()
-            && (rest.chars().next().unwrap().is_alphabetic() || rest.starts_with('_'))
-            && rest.chars().all(|c| c.is_alphanumeric() || c == '_');
+        && (rest.chars().next().unwrap().is_alphabetic() || rest.starts_with('_'))
+        && rest.chars().all(|c| c.is_alphanumeric() || c == '_');
         if valid_identifier {
             return Some(Box::new(FunctionCall::new(
                 Some(Box::new(Identifier::new(rest))),
-                Some(Vec::new()),
+                                                   Some(Vec::new()),
             )));
         }
         None

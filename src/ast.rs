@@ -47,6 +47,34 @@ impl Attribute {
     }
 }
 
+// ==================== Attributable Trait ====================
+
+pub trait Attributable {
+    fn get_attributes(&self) -> &Vec<Attribute>;
+    fn set_attributes(&mut self, attrs: Vec<Attribute>);
+
+    fn has_attr(&self, name: &str) -> bool {
+        self.get_attributes().iter().any(|a| a.name == name)
+    }
+
+    fn get_attr_value(&self, name: &str) -> Option<&str> {
+        self.get_attributes().iter().find(|a| a.name == name).and_then(|a| a.value.as_deref())
+    }
+}
+
+macro_rules! impl_attributable {
+    ($struct_name:ident) => {
+        impl Attributable for $struct_name {
+            fn get_attributes(&self) -> &Vec<Attribute> {
+                &self.attributes
+            }
+            fn set_attributes(&mut self, attrs: Vec<Attribute>) {
+                self.attributes = attrs;
+            }
+        }
+    };
+}
+
 // ==================== Visitor ====================
 
 pub trait AstVisitor {
@@ -138,13 +166,19 @@ pub trait Type: AstNode {
 #[derive(Debug, Clone)]
 pub struct BasicType {
     pub name: String,
+    pub attributes: Vec<Attribute>,
 }
 
 impl BasicType {
     pub fn new(name: impl Into<String>) -> Self {
-        BasicType { name: name.into() }
+        BasicType {
+            name: name.into(),
+            attributes: Vec::new(),
+        }
     }
 }
+
+impl_attributable!(BasicType);
 
 impl AstNode for BasicType {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -172,6 +206,7 @@ impl Type for BasicType {
 pub struct ArrayType {
     element_type: Box<dyn Type>,      // 元素类型（可以是基本类型或嵌套数组）
     size: Option<Box<dyn Expression>>,  // 当前维度的大小
+    pub attributes: Vec<Attribute>,
 }
 
 impl ArrayType {
@@ -180,6 +215,7 @@ impl ArrayType {
         ArrayType {
             element_type: Box::new(BasicType::new(element_name)),
             size: Some(size),
+            attributes: Vec::new(),
         }
     }
 
@@ -188,6 +224,7 @@ impl ArrayType {
         ArrayType {
             element_type,
             size: Some(size),
+            attributes: Vec::new(),
         }
     }
 
@@ -262,21 +299,29 @@ impl Type for ArrayType {
     }
 }
 
+impl_attributable!(ArrayType);
+
 // ==================== NullableType ====================
 
 pub struct NullableType {
     pub inner_type: Box<dyn Type>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl NullableType {
     pub fn new(inner_type: Box<dyn Type>) -> Self {
-        NullableType { inner_type }
+        NullableType {
+            inner_type,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_inner_type(&self) -> &dyn Type {
         &*self.inner_type
     }
 }
+
+impl_attributable!(NullableType);
 
 impl AstNode for NullableType {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -311,6 +356,7 @@ impl Type for NullableType {
 pub struct FunctionType {
     param_types: Vec<Box<dyn Type>>,
     return_type: Option<Box<dyn Type>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl FunctionType {
@@ -318,6 +364,7 @@ impl FunctionType {
         FunctionType {
             param_types,
             return_type,
+            attributes: Vec::new(),
         }
     }
     pub fn get_param_types(&self) -> Vec<&dyn Type> {
@@ -327,6 +374,8 @@ impl FunctionType {
         self.return_type.as_deref().map(|t| t.as_type())
     }
 }
+
+impl_attributable!(FunctionType);
 
 impl AstNode for FunctionType {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -354,6 +403,7 @@ impl Type for FunctionType {
 pub struct GenericType {
     pub base_name: String,
     pub type_args: Vec<Box<dyn Type>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl GenericType {
@@ -361,11 +411,14 @@ impl GenericType {
         GenericType {
             base_name: base_name.into(),
             type_args,
+            attributes: Vec::new(),
         }
     }
     pub fn get_base_name(&self) -> &str { &self.base_name }
     pub fn get_type_args(&self) -> &Vec<Box<dyn Type>> { &self.type_args }
 }
+
+impl_attributable!(GenericType);
 
 impl AstNode for GenericType {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -415,12 +468,14 @@ impl AstNode for Program {
 
 pub struct Block {
     statements: Vec<Box<dyn Statement>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl Block {
     pub fn new() -> Self {
         Block {
             statements: Vec::new(),
+            attributes: Vec::new(),
         }
     }
 
@@ -432,6 +487,8 @@ impl Block {
         &self.statements
     }
 }
+
+impl_attributable!(Block);
 
 impl AstNode for Block {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -459,6 +516,7 @@ impl Expression for Block {
 pub struct Parameter {
     name: String,
     r#type: Option<Box<dyn Type>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl Parameter {
@@ -466,6 +524,7 @@ impl Parameter {
         Parameter {
             name: name.into(),
             r#type,
+            attributes: Vec::new(),
         }
     }
 
@@ -477,6 +536,8 @@ impl Parameter {
         self.r#type.as_deref()
     }
 }
+
+impl_attributable!(Parameter);
 
 impl AstNode for Parameter {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -565,6 +626,8 @@ impl Statement for Function {
     }
 }
 
+impl_attributable!(Function);
+
 // ==================== ExternFunc ====================
 
 pub struct ExternFunc {
@@ -632,6 +695,8 @@ impl Statement for ExternFunc {
     }
 }
 
+impl_attributable!(ExternFunc);
+
 // ==================== ExternBlock ====================
 
 pub struct ExternBlock {
@@ -682,16 +747,23 @@ impl Statement for ExternBlock {
     }
 }
 
+impl_attributable!(ExternBlock);
+
 // ==================== ImportStatement ====================
 
 pub struct ImportStatement {
     path: Vec<String>,
     alias: Option<String>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl ImportStatement {
     pub fn new(path: Vec<String>, alias: Option<String>) -> Self {
-        ImportStatement { path, alias }
+        ImportStatement {
+            path,
+            alias,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_path(&self) -> &Vec<String> {
@@ -706,6 +778,8 @@ impl ImportStatement {
         self.path.join("::")
     }
 }
+
+impl_attributable!(ImportStatement);
 
 impl AstNode for ImportStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -730,22 +804,35 @@ impl Statement for ImportStatement {
 /// names, so they can be called without the `module::` qualifier.
 pub struct FromImportStatement {
     module: String,
-    members: Vec<String>,
+    members: Vec<(String, Option<String>)>,
+    wildcard: bool,
+    pub attributes: Vec<Attribute>,
 }
 
 impl FromImportStatement {
-    pub fn new(module: String, members: Vec<String>) -> Self {
-        FromImportStatement { module, members }
+    pub fn new(module: String, members: Vec<(String, Option<String>)>, wildcard: bool) -> Self {
+        FromImportStatement {
+            module,
+            members,
+            wildcard,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_module(&self) -> &str {
         &self.module
     }
 
-    pub fn get_members(&self) -> &[String] {
+    pub fn get_members(&self) -> &[(String, Option<String>)] {
         &self.members
     }
+
+    pub fn is_wildcard(&self) -> bool {
+        self.wildcard
+    }
 }
+
+impl_attributable!(FromImportStatement);
 
 impl AstNode for FromImportStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -766,17 +853,23 @@ impl Statement for FromImportStatement {
 
 pub struct ExportStatement {
     names: Vec<String>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl ExportStatement {
     pub fn new(names: Vec<String>) -> Self {
-        ExportStatement { names }
+        ExportStatement {
+            names,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_names(&self) -> &Vec<String> {
         &self.names
     }
 }
+
+impl_attributable!(ExportStatement);
 
 impl AstNode for ExportStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -798,7 +891,20 @@ impl Statement for ExportStatement {
 pub struct StructField {
     pub name: String,
     pub field_type: Option<Box<dyn Type>>,
+    pub attributes: Vec<Attribute>,
 }
+
+impl StructField {
+    pub fn new(name: impl Into<String>, field_type: Option<Box<dyn Type>>) -> Self {
+        StructField {
+            name: name.into(),
+            field_type,
+            attributes: Vec::new(),
+        }
+    }
+}
+
+impl_attributable!(StructField);
 
 pub struct StructDefinition {
     name: String,
@@ -838,6 +944,8 @@ impl AstNode for StructDefinition {
 impl Statement for StructDefinition {
     fn as_statement(&self) -> &dyn Statement { self }
 }
+
+impl_attributable!(StructDefinition);
 
 // ==================== ImplBlock ====================
 
@@ -892,6 +1000,8 @@ impl Statement for ImplBlock {
     fn as_statement(&self) -> &dyn Statement { self }
 }
 
+impl_attributable!(ImplBlock);
+
 // ==================== TraitDefinition ====================
 
 pub struct TraitMethod {
@@ -900,6 +1010,19 @@ pub struct TraitMethod {
     pub return_type: Option<Box<dyn Type>>,
     pub attributes: Vec<Attribute>,
 }
+
+impl TraitMethod {
+    pub fn new(name: impl Into<String>, parameters: Vec<Box<Parameter>>, return_type: Option<Box<dyn Type>>) -> Self {
+        TraitMethod {
+            name: name.into(),
+            parameters,
+            return_type,
+            attributes: Vec::new(),
+        }
+    }
+}
+
+impl_attributable!(TraitMethod);
 
 pub struct TraitDefinition {
     name: String,
@@ -940,6 +1063,8 @@ impl Statement for TraitDefinition {
     fn as_statement(&self) -> &dyn Statement { self }
 }
 
+impl_attributable!(TraitDefinition);
+
 // ==================== EnumDefinition ====================
 
 /// A single variant of an enum, e.g. `Some(T)` or `None`.
@@ -947,13 +1072,20 @@ pub struct EnumVariant {
     pub name: String,
     /// Optional payload type. `None` means a unit variant like `None`.
     pub payload_type: Option<Box<dyn Type>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl EnumVariant {
     pub fn new(name: impl Into<String>, payload_type: Option<Box<dyn Type>>) -> Self {
-        EnumVariant { name: name.into(), payload_type }
+        EnumVariant {
+            name: name.into(),
+            payload_type,
+            attributes: Vec::new(),
+        }
     }
 }
+
+impl_attributable!(EnumVariant);
 
 /// An enum definition, lowered to a tagged struct by the semantic analyzer.
 ///
@@ -1000,12 +1132,15 @@ impl Statement for EnumDefinition {
     fn as_statement(&self) -> &dyn Statement { self }
 }
 
+impl_attributable!(EnumDefinition);
+
 // ==================== IfStatement ====================
 
 pub struct IfStatement {
     condition: Option<Box<dyn Expression>>,
     then_branch: Option<Box<dyn Statement>>,
     else_branch: Option<Box<dyn Statement>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl IfStatement {
@@ -1018,6 +1153,7 @@ impl IfStatement {
             condition,
             then_branch,
             else_branch,
+            attributes: Vec::new(),
         }
     }
 
@@ -1033,6 +1169,8 @@ impl IfStatement {
         self.else_branch.as_deref().map(|s| s.as_statement())
     }
 }
+
+impl_attributable!(IfStatement);
 
 impl AstNode for IfStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1060,11 +1198,16 @@ impl Expression for IfStatement {
 pub struct WhileStatement {
     condition: Option<Box<dyn Expression>>,
     body: Option<Box<dyn Statement>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl WhileStatement {
     pub fn new(condition: Option<Box<dyn Expression>>, body: Option<Box<dyn Statement>>) -> Self {
-        WhileStatement { condition, body }
+        WhileStatement {
+            condition,
+            body,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_condition(&self) -> Option<&dyn Expression> {
@@ -1075,6 +1218,8 @@ impl WhileStatement {
         self.body.as_deref().map(|s| s.as_statement())
     }
 }
+
+impl_attributable!(WhileStatement);
 
 impl AstNode for WhileStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1097,6 +1242,7 @@ pub struct ForStatement {
     loop_variables: Vec<String>,
     iterable: Option<Box<dyn Expression>>,
     body: Option<Box<Block>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl ForStatement {
@@ -1109,6 +1255,7 @@ impl ForStatement {
             loop_variables: vec![loop_variable.into()],
             iterable,
             body,
+            attributes: Vec::new(),
         }
     }
 
@@ -1121,6 +1268,7 @@ impl ForStatement {
             loop_variables,
             iterable,
             body,
+            attributes: Vec::new(),
         }
     }
 
@@ -1141,6 +1289,8 @@ impl ForStatement {
     }
 }
 
+impl_attributable!(ForStatement);
+
 impl AstNode for ForStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
         visitor.visit_for_statement(self);
@@ -1160,17 +1310,23 @@ impl Statement for ForStatement {
 
 pub struct ReturnStatement {
     value: Option<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl ReturnStatement {
     pub fn new(value: Option<Box<dyn Expression>>) -> Self {
-        ReturnStatement { value }
+        ReturnStatement {
+            value,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_value(&self) -> Option<&dyn Expression> {
         self.value.as_deref().map(|e| e.as_expression())
     }
 }
+
+impl_attributable!(ReturnStatement);
 
 impl AstNode for ReturnStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1189,13 +1345,19 @@ impl Statement for ReturnStatement {
 
 // ==================== BreakStatement ====================
 
-pub struct BreakStatement;
+pub struct BreakStatement {
+    pub attributes: Vec<Attribute>,
+}
 
 impl BreakStatement {
     pub fn new() -> Self {
-        BreakStatement
+        BreakStatement {
+            attributes: Vec::new(),
+        }
     }
 }
+
+impl_attributable!(BreakStatement);
 
 impl AstNode for BreakStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1214,13 +1376,19 @@ impl Statement for BreakStatement {
 
 // ==================== ContinueStatement ====================
 
-pub struct ContinueStatement;
+pub struct ContinueStatement {
+    pub attributes: Vec<Attribute>,
+}
 
 impl ContinueStatement {
     pub fn new() -> Self {
-        ContinueStatement
+        ContinueStatement {
+            attributes: Vec::new(),
+        }
     }
 }
+
+impl_attributable!(ContinueStatement);
 
 impl AstNode for ContinueStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1244,6 +1412,7 @@ pub struct Declaration {
     name: String,
     r#type: Option<Box<dyn Type>>,
     initializer: Option<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl Declaration {
@@ -1258,6 +1427,7 @@ impl Declaration {
             name: name.into(),
             r#type,
             initializer,
+            attributes: Vec::new(),
         }
     }
 
@@ -1277,6 +1447,8 @@ impl Declaration {
         self.initializer.as_deref().map(|e| e.as_expression())
     }
 }
+
+impl_attributable!(Declaration);
 
 impl AstNode for Declaration {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1298,21 +1470,32 @@ impl Statement for Declaration {
 pub struct ExpressionStatement {
     expression: Option<Box<dyn Expression>>,
     pub tail: bool, // true if no semicolon follows (block return value)
+    pub attributes: Vec<Attribute>,
 }
 
 impl ExpressionStatement {
     pub fn new(expression: Option<Box<dyn Expression>>) -> Self {
-        ExpressionStatement { expression, tail: false }
+        ExpressionStatement {
+            expression,
+            tail: false,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn new_tail(expression: Option<Box<dyn Expression>>) -> Self {
-        ExpressionStatement { expression, tail: true }
+        ExpressionStatement {
+            expression,
+            tail: true,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_expression(&self) -> Option<&dyn Expression> {
         self.expression.as_deref().map(|e| e.as_expression())
     }
 }
+
+impl_attributable!(ExpressionStatement);
 
 impl AstNode for ExpressionStatement {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1335,6 +1518,7 @@ pub struct BinaryExpression {
     left: Option<Box<dyn Expression>>,
     op: String,
     right: Option<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl BinaryExpression {
@@ -1347,6 +1531,7 @@ impl BinaryExpression {
             left,
             op: op.into(),
             right,
+            attributes: Vec::new(),
         }
     }
 
@@ -1362,6 +1547,8 @@ impl BinaryExpression {
         self.right.as_deref().map(|e| e.as_expression())
     }
 }
+
+impl_attributable!(BinaryExpression);
 
 impl AstNode for BinaryExpression {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1383,6 +1570,7 @@ impl Expression for BinaryExpression {
 pub struct UnaryExpression {
     op: String,
     operand: Option<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl UnaryExpression {
@@ -1390,6 +1578,7 @@ impl UnaryExpression {
         UnaryExpression {
             op: op.into(),
             operand,
+            attributes: Vec::new(),
         }
     }
 
@@ -1401,6 +1590,8 @@ impl UnaryExpression {
         self.operand.as_deref().map(|e| e.as_expression())
     }
 }
+
+impl_attributable!(UnaryExpression);
 
 impl AstNode for UnaryExpression {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1422,6 +1613,7 @@ impl Expression for UnaryExpression {
 pub struct CastExpression {
     expression: Option<Box<dyn Expression>>,
     target_type: Box<dyn Type>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl CastExpression {
@@ -1429,6 +1621,7 @@ impl CastExpression {
         CastExpression {
             expression,
             target_type,
+            attributes: Vec::new(),
         }
     }
 
@@ -1440,6 +1633,8 @@ impl CastExpression {
         &*self.target_type
     }
 }
+
+impl_attributable!(CastExpression);
 
 impl AstNode for CastExpression {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1461,6 +1656,7 @@ impl Expression for CastExpression {
 pub struct FunctionCall {
     callee: Option<Box<dyn Expression>>,
     arguments: Option<Vec<Box<dyn Expression>>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl FunctionCall {
@@ -1468,7 +1664,11 @@ impl FunctionCall {
         callee: Option<Box<dyn Expression>>,
         arguments: Option<Vec<Box<dyn Expression>>>,
     ) -> Self {
-        FunctionCall { callee, arguments }
+        FunctionCall {
+            callee,
+            arguments,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_callee(&self) -> Option<&dyn Expression> {
@@ -1479,6 +1679,8 @@ impl FunctionCall {
         self.arguments.as_ref()
     }
 }
+
+impl_attributable!(FunctionCall);
 
 impl AstNode for FunctionCall {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1505,6 +1707,7 @@ pub struct Lambda {
     return_type: Option<Box<dyn Type>>,
     body: Box<Block>,
     generic_params: Vec<String>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl Lambda {
@@ -1518,6 +1721,7 @@ impl Lambda {
             return_type,
             body,
             generic_params: Vec::new(),
+            attributes: Vec::new(),
         }
     }
 
@@ -1558,6 +1762,8 @@ impl Expression for Lambda {
     }
 }
 
+impl_attributable!(Lambda);
+
 // ==================== PathAccess ====================
 
 /// Namespace path access using `::` separator (e.g. `std::io::println`).
@@ -1565,6 +1771,7 @@ impl Expression for Lambda {
 pub struct PathAccess {
     pub path: Vec<String>,
     pub member: String,
+    pub attributes: Vec<Attribute>,
 }
 
 impl PathAccess {
@@ -1572,6 +1779,7 @@ impl PathAccess {
         PathAccess {
             path,
             member: member.into(),
+            attributes: Vec::new(),
         }
     }
 
@@ -1585,6 +1793,8 @@ impl PathAccess {
     pub fn get_path(&self) -> &Vec<String> { &self.path }
     pub fn get_member(&self) -> &str { &self.member }
 }
+
+impl_attributable!(PathAccess);
 
 impl AstNode for PathAccess {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1602,6 +1812,7 @@ impl Expression for PathAccess {
 pub struct MemberAccess {
     object: Option<Box<dyn Expression>>,
     member: String,
+    pub attributes: Vec<Attribute>,
 }
 
 impl MemberAccess {
@@ -1609,6 +1820,7 @@ impl MemberAccess {
         MemberAccess {
             object,
             member: member.into(),
+            attributes: Vec::new(),
         }
     }
 
@@ -1620,6 +1832,8 @@ impl MemberAccess {
         &self.member
     }
 }
+
+impl_attributable!(MemberAccess);
 
 impl AstNode for MemberAccess {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1641,11 +1855,16 @@ impl Expression for MemberAccess {
 pub struct ArrayIndex {
     array: Option<Box<dyn Expression>>,
     index: Option<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl ArrayIndex {
     pub fn new(array: Option<Box<dyn Expression>>, index: Option<Box<dyn Expression>>) -> Self {
-        ArrayIndex { array, index }
+        ArrayIndex {
+            array,
+            index,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_array(&self) -> Option<&dyn Expression> {
@@ -1672,21 +1891,29 @@ impl Expression for ArrayIndex {
     }
 }
 
+impl_attributable!(ArrayIndex);
+
 // ==================== GroupedExpression ====================
 
 pub struct GroupedExpression {
     expression: Option<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl GroupedExpression {
     pub fn new(expression: Option<Box<dyn Expression>>) -> Self {
-        GroupedExpression { expression }
+        GroupedExpression {
+            expression,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_expression(&self) -> Option<&dyn Expression> {
         self.expression.as_deref().map(|e| e.as_expression())
     }
 }
+
+impl_attributable!(GroupedExpression);
 
 impl AstNode for GroupedExpression {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1707,17 +1934,23 @@ impl Expression for GroupedExpression {
 
 pub struct Identifier {
     name: String,
+    pub attributes: Vec<Attribute>,
 }
 
 impl Identifier {
     pub fn new(name: impl Into<String>) -> Self {
-        Identifier { name: name.into() }
+        Identifier {
+            name: name.into(),
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_name(&self) -> &str {
         &self.name
     }
 }
+
+impl_attributable!(Identifier);
 
 impl AstNode for Identifier {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1739,15 +1972,24 @@ impl Expression for Identifier {
 pub struct NumberLiteral {
     value: f64,
     is_float: bool,
+    pub attributes: Vec<Attribute>,
 }
 
 impl NumberLiteral {
     pub fn new(value: f64) -> Self {
-        NumberLiteral { value, is_float: false }
+        NumberLiteral {
+            value,
+            is_float: false,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn new_float(value: f64) -> Self {
-        NumberLiteral { value, is_float: true }
+        NumberLiteral {
+            value,
+            is_float: true,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_value(&self) -> f64 {
@@ -1758,6 +2000,8 @@ impl NumberLiteral {
         self.is_float
     }
 }
+
+impl_attributable!(NumberLiteral);
 
 impl AstNode for NumberLiteral {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1778,6 +2022,7 @@ impl Expression for NumberLiteral {
 
 pub struct StringLiteral {
     value: String,
+    pub attributes: Vec<Attribute>,
 }
 
 impl StringLiteral {
@@ -1812,13 +2057,18 @@ impl StringLiteral {
             }
             i += 1;
         }
-        StringLiteral { value: res }
+        StringLiteral {
+            value: res,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_value(&self) -> &str {
         &self.value
     }
 }
+
+impl_attributable!(StringLiteral);
 
 impl AstNode for StringLiteral {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1839,17 +2089,23 @@ impl Expression for StringLiteral {
 
 pub struct BooleanLiteral {
     value: bool,
+    pub attributes: Vec<Attribute>,
 }
 
 impl BooleanLiteral {
     pub fn new(value: bool) -> Self {
-        BooleanLiteral { value }
+        BooleanLiteral {
+            value,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_value(&self) -> bool {
         self.value
     }
 }
+
+impl_attributable!(BooleanLiteral);
 
 impl AstNode for BooleanLiteral {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1868,13 +2124,19 @@ impl Expression for BooleanLiteral {
 
 // ==================== NullLiteral ====================
 
-pub struct NullLiteral;
+pub struct NullLiteral {
+    pub attributes: Vec<Attribute>,
+}
 
 impl NullLiteral {
     pub fn new() -> Self {
-        NullLiteral
+        NullLiteral {
+            attributes: Vec::new(),
+        }
     }
 }
+
+impl_attributable!(NullLiteral);
 
 impl AstNode for NullLiteral {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -1896,6 +2158,7 @@ impl Expression for NullLiteral {
 pub struct VariablePosition {
     pub pos_in_value: i32,
     pub value: Option<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl Clone for VariablePosition {
@@ -1903,13 +2166,17 @@ impl Clone for VariablePosition {
         VariablePosition {
             pos_in_value: self.pos_in_value,
             value: None, // Can't clone dyn Expression
+            attributes: Vec::new(),
         }
     }
 }
 
+impl_attributable!(VariablePosition);
+
 pub struct FormatString {
     value: String,
     variables: Vec<VariablePosition>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl FormatString {
@@ -1946,6 +2213,7 @@ impl FormatString {
                         variables.push(VariablePosition {
                             pos_in_value: start_pos,
                             value: Some(e),
+                            attributes: Vec::new(),
                         });
                     }
                 }
@@ -2001,6 +2269,7 @@ impl FormatString {
         FormatString {
             value: res,
             variables,
+            attributes: Vec::new(),
         }
     }
 
@@ -2247,21 +2516,29 @@ impl Expression for FormatString {
     }
 }
 
+impl_attributable!(FormatString);
+
 // ==================== RangeExpression ====================
 
 pub struct RangeExpression {
     arguments: Vec<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl RangeExpression {
     pub fn new(arguments: Vec<Box<dyn Expression>>) -> Self {
-        RangeExpression { arguments }
+        RangeExpression {
+            arguments,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_arguments(&self) -> &Vec<Box<dyn Expression>> {
         &self.arguments
     }
 }
+
+impl_attributable!(RangeExpression);
 
 impl AstNode for RangeExpression {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -2282,17 +2559,23 @@ impl Expression for RangeExpression {
 
 pub struct ArrayLiteral {
     elements: Vec<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl ArrayLiteral {
     pub fn new(elements: Vec<Box<dyn Expression>>) -> Self {
-        ArrayLiteral { elements }
+        ArrayLiteral {
+            elements,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_elements(&self) -> &Vec<Box<dyn Expression>> {
         &self.elements
     }
 }
+
+impl_attributable!(ArrayLiteral);
 
 impl AstNode for ArrayLiteral {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
@@ -2323,6 +2606,7 @@ pub enum StructFieldInit {
 pub struct StructLiteral {
     type_name: String,
     fields: Vec<StructFieldInit>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl StructLiteral {
@@ -2330,6 +2614,7 @@ impl StructLiteral {
         StructLiteral {
             type_name: type_name.into(),
             fields,
+            attributes: Vec::new(),
         }
     }
 
@@ -2357,6 +2642,8 @@ impl Expression for StructLiteral {
     }
 }
 
+impl_attributable!(StructLiteral);
+
 // ==================== MatchPattern ====================
 
 pub enum MatchPattern {
@@ -2378,18 +2665,36 @@ pub enum RtValueSimple {
 pub struct MatchArm {
     pub pattern: MatchPattern,
     pub body: Option<Box<dyn Statement>>,
+    pub attributes: Vec<Attribute>,
 }
+
+impl MatchArm {
+    pub fn new(pattern: MatchPattern, body: Option<Box<dyn Statement>>) -> Self {
+        MatchArm {
+            pattern,
+            body,
+            attributes: Vec::new(),
+        }
+    }
+}
+
+impl_attributable!(MatchArm);
 
 // ==================== MatchExpression ====================
 
 pub struct MatchExpression {
     scrutinee: Option<Box<dyn Expression>>,
     arms: Vec<MatchArm>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl MatchExpression {
     pub fn new(scrutinee: Option<Box<dyn Expression>>, arms: Vec<MatchArm>) -> Self {
-        MatchExpression { scrutinee, arms }
+        MatchExpression {
+            scrutinee,
+            arms,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_scrutinee(&self) -> Option<&dyn Expression> {
@@ -2422,6 +2727,8 @@ impl Expression for MatchExpression {
     }
 }
 
+impl_attributable!(MatchExpression);
+
 // ==================== TryOperator ====================
 
 /// The `?` postfix operator: `expr?`.
@@ -2431,11 +2738,15 @@ impl Expression for MatchExpression {
 /// inner `T` value.
 pub struct TryOperator {
     inner: Option<Box<dyn Expression>>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl TryOperator {
     pub fn new(inner: Option<Box<dyn Expression>>) -> Self {
-        TryOperator { inner }
+        TryOperator {
+            inner,
+            attributes: Vec::new(),
+        }
     }
 
     pub fn get_inner(&self) -> Option<&dyn Expression> {
@@ -2457,3 +2768,5 @@ impl Expression for TryOperator {
         self
     }
 }
+
+impl_attributable!(TryOperator);

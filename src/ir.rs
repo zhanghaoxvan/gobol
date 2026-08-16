@@ -306,9 +306,10 @@ impl IRBuilder {
             return binding;
         }
 
-        // 检查数组类型 → return Unknown to mark as array
-        if ty.as_type_any().downcast_ref::<ArrayType>().is_some() {
-            return DataType::Unknown;
+        // 检查数组类型 → return Array with element type
+        if let Some(arr) = ty.as_type_any().downcast_ref::<ArrayType>() {
+            let elem = self.ast_type_to_data_type(Some(arr.get_element_type()));
+            return DataType::Array(Box::new(elem));
         }
 
         // Function type `func(T1, T2): R` → function pointer (i64).
@@ -752,7 +753,7 @@ impl IRBuilder {
             IRExpr::Cast { target, .. } => target.clone(),
             IRExpr::ArrayIndex { .. } => DataType::Int,
             IRExpr::Assignment { target, .. } => self.infer_expr_type(target),
-            IRExpr::ArrayLiteral(_) => DataType::Unknown,
+            IRExpr::ArrayLiteral(_) => DataType::Array(Box::new(DataType::Unknown)),
             IRExpr::MemberAccess { .. } => DataType::Int,
             IRExpr::FuncRef(name) => {
                 // Look up the referenced function's return type.
@@ -1041,7 +1042,31 @@ impl AstVisitor for IRBuilder {
         let struct_name = node.get_struct_name().to_string();
         let generic_params = node.get_generic_params().clone();
 
-        self.current_struct = Some(struct_name.clone());
+        // Build the full struct name with generic parameters for consistent
+        // lookup.  The parser may already include generic parameters in
+        // struct_name (e.g. "Vec<T>"), so we must not double-append them.
+        //
+        // Case A — parser already included generics:
+        //   struct_name = "Vec<T>", generic_params = ["T"]
+        //     → full_struct_name = "Vec<T>"  (already correct)
+        //
+        // Case B — parser did not include generics:
+        //   struct_name = "Vec",   generic_params = ["T"]
+        //     → full_struct_name = "Vec<T>"  (build it here)
+        //
+        // Case C — no generics:
+        //   struct_name = "Point", generic_params = []
+        //     → full_struct_name = "Point"
+        let full_struct_name = if struct_name.contains('<') {
+            // Already has generics embedded, use as-is
+            struct_name.clone()
+        } else if generic_params.is_empty() {
+            struct_name.clone()
+        } else {
+            format!("{}<{}>", struct_name, generic_params.join(", "))
+        };
+
+        self.current_struct = Some(full_struct_name.clone());
         self.in_impl = true;
         self.push_generic_scope(&generic_params);
 
@@ -1066,14 +1091,14 @@ impl AstVisitor for IRBuilder {
                         ir_func.body = Some(IRBlock {
                             statements: std::mem::take(&mut self.current_block),
                         });
-                        ir_func.struct_name = Some(struct_name.clone());
+                        ir_func.struct_name = Some(full_struct_name.clone());
                         ir_func.is_method = true;
                         
                         // 保存方法名供后续查找
                         let _method_name = ir_func.name.clone();
                         methods.push(ir_func.clone());
                         self.methods
-                            .entry(struct_name.clone())
+                            .entry(full_struct_name.clone())
                             .or_insert_with(Vec::new)
                             .push(ir_func);
                     }
@@ -1221,7 +1246,44 @@ impl AstVisitor for IRBuilder {
 
     fn visit_declaration(&mut self, node: &Declaration) {
         let name = node.get_name().to_string();
-        let ty = self.ast_type_to_data_type(node.get_type());
+        let orig_type = node.get_type();
+        let ty = self.ast_type_to_data_type(orig_type);
+
+        // Extract fixed-size array size if applicable
+        // Extract fixed-size array sizes for multi-dimensional arrays
+        let (arr_size, inner_size): (Option<i64>, Option<i64>) = if let Some(tp) = orig_type {
+            if let Some(arr) = tp.as_type_any().downcast_ref::<ArrayType>() {
+                let outer_size = if let Some(size_expr) = arr.get_size() {
+                    if let Some(num) = size_expr.as_any().downcast_ref::<NumberLiteral>() {
+                        Some(num.get_value() as i64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                // Check if element type is also an array (for 2D)
+                let inner_arr = arr.get_element_type();
+                let inner_size = if let Some(inner) = inner_arr.as_type_any().downcast_ref::<ArrayType>() {
+                    if let Some(size_expr) = inner.get_size() {
+                        if let Some(num) = size_expr.as_any().downcast_ref::<NumberLiteral>() {
+                            Some(num.get_value() as i64)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                (outer_size, inner_size)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
 
         let init = if let Some(init_expr) = node.get_initializer() {
             // The initializer may be a control-flow expression (if/match/block)
@@ -1268,6 +1330,10 @@ impl AstVisitor for IRBuilder {
                 }
                 // Copy sub-builder's statements to the parent block
                 self.current_block.extend(sub.current_block);
+                // Copy sub-builder's variable types to parent so type resolution works
+                for (name, ty) in sub.var_types {
+                    self.var_types.insert(name, ty);
+                }
                 Some(expr)
             } else {
                 init_expr.accept(self);
@@ -1275,7 +1341,30 @@ impl AstVisitor for IRBuilder {
                 Some(expr)
             }
         } else {
-            None
+            // For fixed-size arrays without an initializer, generate a call
+            // to gobol_array_new_with_size(size) or gobol_array_new_2d(rows, cols)
+            if let Some(size) = arr_size {
+                if let Some(inner) = inner_size {
+                    // 2D array: gobol_array_new_2d(rows, cols)
+                    Some(IRExpr::Call {
+                        func: "gobol_array_new_2d".to_string(),
+                        args: vec![
+                            IRExpr::Literal(LitValue::Int(size)),
+                            IRExpr::Literal(LitValue::Int(inner)),
+                        ],
+                        generic_args: vec![],
+                    })
+                } else {
+                    // 1D array: gobol_array_new_with_size(size)
+                    Some(IRExpr::Call {
+                        func: "gobol_array_new_with_size".to_string(),
+                        args: vec![IRExpr::Literal(LitValue::Int(size))],
+                        generic_args: vec![],
+                    })
+                }
+            } else {
+                None
+            }
         };
 
         // If the declaration omitted an explicit type, infer it from the
@@ -1292,6 +1381,10 @@ impl AstVisitor for IRBuilder {
             } else {
                 DataType::Int
             }
+        } else if matches!(ty, DataType::Array(_)) {
+            // Preserve array type (fixed-size arrays lose size info here,
+            // but the Cranelift backend will handle initialization separately)
+            ty
         } else {
             ty
         };
@@ -1395,8 +1488,6 @@ impl AstVisitor for IRBuilder {
 
         // 检查是否是泛型参数
         if let Some(_ty) = self.lookup_generic(&name) {
-            // 泛型参数作为类型使用，不是变量
-            // 在这种情况下，它应该在类型上下文中处理
             self.push_expr(IRExpr::Variable(name));
             return;
         }
@@ -1411,8 +1502,22 @@ impl AstVisitor for IRBuilder {
         // `self._start` accesses. Resolve them to MemberAccess so the backend
         // loads from the struct pointer instead of treating them as undefined
         // local variables (which would silently return 0).
+        // BUT: don't override if there's already a local variable (parameter) with this name.
         if let Some(ref sname) = self.current_struct {
-            if let Some(ir_struct) = self.structs.get(sname) {
+            if self.var_types.contains_key(&name) {
+                // There's a local variable/parameter with this name — use it
+                self.push_expr(IRExpr::Variable(name));
+                return;
+            }
+            // Try looking up the struct by its name. The current_struct may
+            // include generic parameters (e.g. "Vec<T>"), but the structs map
+            // stores them without generics (e.g. "Vec"). Try both forms.
+            let lookup_name = if let Some(angle_pos) = sname.find('<') {
+                &sname[..angle_pos]
+            } else {
+                sname.as_str()
+            };
+            if let Some(ir_struct) = self.structs.get(lookup_name) {
                 if ir_struct.fields.iter().any(|f| f.name == name) {
                     self.push_expr(IRExpr::MemberAccess {
                         object: Box::new(IRExpr::Variable("self".to_string())),
@@ -1756,7 +1861,7 @@ impl AstVisitor for IRBuilder {
     }
 
     fn visit_match_expression(&mut self, node: &MatchExpression) {
-        // 1. 求值 scrutinee
+        // 1. Evaluate scrutinee
         let scrutinee = if let Some(scrut) = node.get_scrutinee() {
             scrut.accept(self);
             self.pop_expr()
@@ -1770,65 +1875,91 @@ impl AstVisitor for IRBuilder {
             return;
         }
 
-        // 2. 构建 match 的 if-else 链
-        // 使用递归构建：从最后一个 arm 开始反向构建
+        // 2. Create temp variable for match result
+        let tmp_name = format!("__match_result_{}", self.tmp_counter);
+        self.tmp_counter += 1;
+
+        // Determine result type from the arms
+        let result_type = DataType::Str; // Default for string results
+
+        // Initialize temp variable with default value
+        self.current_block.push(IRStmt::Declaration {
+            name: tmp_name.clone(),
+            ty: result_type.clone(),
+            init: Some(IRExpr::Literal(LitValue::Str("".to_string()))),
+        });
+        self.var_types.insert(tmp_name.clone(), result_type.clone());
+
+        // 3. Build if-else chain (iterating arms from back to front)
         let mut else_block = None;
         
-        // 从后往前遍历 arms
         for arm in arms.iter().rev() {
-            // 构建条件表达式
+            // Build condition
             let cond = self.build_match_condition(&scrutinee, &arm.pattern);
             
-            // 构建 arm body
-            let then_block = self.build_arm_body(arm);
-            
-            // 创建 if 语句
+            // Build arm body with assignment to temp variable
+            let mut then_block = IRBlock { statements: Vec::new() };
+
+            if let Some(body) = &arm.body {
+                let mut sub_builder = IRBuilder::new();
+                sub_builder.generic_stack = self.generic_stack.clone();
+                sub_builder.block_depth = 2;
+
+                if let Some(block_node) = body.as_any().downcast_ref::<Block>() {
+                    for stmt in block_node.get_statements() {
+                        stmt.accept(&mut sub_builder);
+                    }
+                } else {
+                    body.accept(&mut sub_builder);
+                }
+
+                // Extract the result value from the last statement in the
+                // sub-builder's current_block.  ExpressionStatements store
+                // values in current_block (not on expr_stack), so we need to
+                // look at the last statement to get the arm's result.
+                if let Some(last_stmt) = sub_builder.current_block.last_mut() {
+                    match last_stmt {
+                        IRStmt::Expression(expr) => {
+                            // Replace the Expression with an Assignment to the
+                            // temp variable so the result is captured.
+                            *last_stmt = IRStmt::Assignment {
+                                target: IRExpr::Variable(tmp_name.clone()),
+                                value: expr.clone(),
+                            };
+                        }
+                        IRStmt::Return(Some(expr)) => {
+                            *last_stmt = IRStmt::Assignment {
+                                target: IRExpr::Variable(tmp_name.clone()),
+                                value: expr.clone(),
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+
+                then_block.statements.extend(sub_builder.current_block);
+            }
+
+            // Create if statement
             let if_stmt = IRStmt::If {
                 cond,
                 then_block,
                 else_block: else_block.take(),
             };
             
-            // 将 if 语句包装成 Block
+            // Wrap in a Block
             let mut block = IRBlock { statements: Vec::new() };
             block.statements.push(if_stmt);
             else_block = Some(block);
         }
 
-        // 3. 将生成的 if-else 链插入当前块
+        // 4. Insert the if-else chain
         if let Some(final_block) = else_block {
             self.current_block.extend(final_block.statements);
         }
 
-        // 4. match 表达式的结果
-        // Try to find a wildcard/default arm value to use as the match result
-        let match_result = arms.last()
-            .and_then(|arm| {
-                if matches!(arm.pattern, MatchPattern::Wildcard) {
-                    arm.body.as_ref().and_then(|body| {
-                        if let Some(block) = body.as_any().downcast_ref::<Block>() {
-                            block.get_statements().last().and_then(|last_stmt| {
-                                if let Some(es) = last_stmt.as_any().downcast_ref::<ExpressionStatement>() {
-                                    es.get_expression().map(|e| {
-                                        let mut sub = IRBuilder::new();
-                                        e.accept(&mut sub);
-                                        sub.pop_expr()
-                                    })
-                                } else {
-                                    None
-                                }
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(IRExpr::Literal(LitValue::Int(0)));
-
-        self.push_expr(match_result);
+        // 5. Generate a Return statement so the sub-builder logic can extract the result
+        self.current_block.push(IRStmt::Return(Some(IRExpr::Variable(tmp_name))));
     }
 
     fn visit_try_operator(&mut self, node: &TryOperator) {
@@ -2366,6 +2497,9 @@ impl Monomorphizer {
             }
             DataType::Nullable(inner) => {
                 DataType::Nullable(Box::new(self.substitute_type(inner, type_map)))
+            }
+            DataType::Array(inner) => {
+                DataType::Array(Box::new(self.substitute_type(inner, type_map)))
             }
             _ => dt.clone(),
         }

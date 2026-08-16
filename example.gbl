@@ -1,14 +1,15 @@
-import io;
+import std;
 
 struct Point {
     x: int,
     y: int,
 };
 
-impl Point {
+impl New for Point {
     func new(x: int, y: int): Point {
         self.x = x;
         self.y = y;
+        self
     }
 };
 

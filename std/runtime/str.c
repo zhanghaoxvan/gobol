@@ -52,6 +52,13 @@ long long gobol_str_get(const char *s, long long i) {
     return (long long)(unsigned char)s[i];
 }
 
+char *gobol_str_char(long long code) {
+    char buf[2];
+    buf[0] = (char)(unsigned char)code;
+    buf[1] = '\0';
+    return gobol_strdup(buf);
+}
+
 long long gobol_str_contains(const char *s, const char *sub) {
     if (!s) s = "";
     if (!sub) sub = "";

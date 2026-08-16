@@ -321,11 +321,25 @@ impl AstVisitor for AstPrinter {
 
     fn visit_from_import_statement(&mut self, node: &FromImportStatement) {
         self.print_indent();
-        print!(
-            "FromImport(module = {}, members = {})",
-            node.get_module(),
-            node.get_members().join(", ")
-        );
+        if node.is_wildcard() {
+            print!(
+                "FromImport(module = {}, wildcard = true)",
+                node.get_module()
+            );
+        } else {
+            let members_str: Vec<String> = node.get_members().iter().map(|(name, alias)| {
+                if let Some(alias_name) = alias {
+                    format!("{} as {}", name, alias_name)
+                } else {
+                    name.clone()
+                }
+            }).collect();
+            print!(
+                "FromImport(module = {}, members = {})",
+                node.get_module(),
+                members_str.join(", ")
+            );
+        }
         println!();
     }
 

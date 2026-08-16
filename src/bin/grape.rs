@@ -605,7 +605,15 @@ fn build_project(
     let mut resolved: HashSet<String> = HashSet::new();
     resolve_dependencies(&config, &mut resolved, is_verbose)?;
 
-    let lib_paths = build_lib_paths(&config);
+    let mut lib_paths = build_lib_paths(&config);
+
+    // Always include the std library path so that `import std` resolves
+    // correctly regardless of where the project lives.
+    if let Some(std_path) = find_std_path() {
+        if !lib_paths.contains(&std_path) {
+            lib_paths.push(std_path);
+        }
+    }
 
     if is_verbose {
         println!("Project: {}", config.project.name);
@@ -975,6 +983,53 @@ fn compare_tags(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 // ============ 库路径构建 ============
+
+/// Find a library search path that allows `import std` to resolve.
+/// Returns the *parent* directory of the `std/` folder so that
+/// `resolve_module_file("std")` can find `<path>/std/mod.gbl`.
+fn find_std_path() -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = (|| {
+        let mut v = Vec::new();
+
+        // 1. GOBOL_INSTALL_DIR env var
+        if let Ok(dir) = std::env::var("GOBOL_INSTALL_DIR") {
+            let p = PathBuf::from(&dir);
+            if p.join("std").exists() { v.push(p); }
+            let p = PathBuf::from(&dir).join("lib");
+            if p.join("std").exists() { v.push(p); }
+        }
+
+        // 2. Relative to the grape executable
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                // ~/.gobol/bin/ → ~/.gobol/  (std/ lives next to bin/)
+                if let Some(parent) = dir.parent() {
+                    if parent.join("std").exists() { v.push(parent.to_path_buf()); }
+                }
+
+                // target/debug/ → project_root/  (std/ is at project root)
+                let p = dir.parent()
+                    .and_then(|d| d.parent())
+                    .filter(|d| d.join("std").exists())
+                    .map(|d| d.to_path_buf());
+                if let Some(p) = p { v.push(p); }
+            }
+        }
+
+        // 3. Relative to current working directory
+        if let Ok(cwd) = std::env::current_dir() {
+            if cwd.join("std").exists() { v.push(cwd.clone()); }
+            if cwd.join("lib").join("std").exists() { v.push(cwd.join("lib")); }
+            if let Some(parent) = cwd.parent() {
+                if parent.join("std").exists() { v.push(parent.to_path_buf()); }
+            }
+        }
+
+        v
+    })();
+
+    candidates.into_iter().next()
+}
 
 fn build_lib_paths(config: &GrapeToml) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();

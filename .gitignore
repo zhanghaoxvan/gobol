@@ -10,6 +10,7 @@ grape.toml
 *.out.c
 *.exe
 tmp.*
+test_*
 
 vscode-gobol/node_modules/
 vscode-gobol/.marscode/

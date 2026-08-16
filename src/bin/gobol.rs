@@ -38,12 +38,20 @@ fn resolve_module_file(path_parts: &[String], lib_paths: &[String], main_file: &
     None
 }
 
-fn find_runtime_c() -> Option<PathBuf> {
+fn find_runtime_c(lib_paths: &[String]) -> Option<PathBuf> {
     if let Ok(p) = env::var("GOBOL_RUNTIME") {
         let p = PathBuf::from(p);
         if p.exists() {
             return Some(p);
         }
+    }
+    // Also check lib_paths for a runtime.c (e.g. when --lib-path points to
+    // the project root that contains std/runtime.c).
+    for lp in lib_paths {
+        let p = PathBuf::from(lp).join("std").join("runtime.c");
+        if p.exists() { return Some(p); }
+        let p = PathBuf::from(lp).join("runtime.c");
+        if p.exists() { return Some(p); }
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -541,7 +549,7 @@ fn main() {
         println!("======= Step 4: AOT Codegen (Cranelift ObjectModule) =======");
     }
 
-    let runtime_c = match find_runtime_c() {
+    let runtime_c = match find_runtime_c(&lib_paths) {
         Some(p) => p,
         None => {
             eprintln!(

@@ -7,7 +7,7 @@
 // (via a small runtime), string concatenation, and casts.
 use crate::environment::DataType;
 use crate::ir::*;
-use cranelift_codegen::ir::{self, types, AbiParam, Inst, InstBuilder, MemFlagsData};
+use cranelift_codegen::ir::{self, types, AbiParam, Inst, InstBuilder};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Linkage, Module};
@@ -76,6 +76,7 @@ impl TypeResolver {
             ("gobol_str_eq", DataType::Bool),
             ("gobol_str_len", DataType::Int),
             ("gobol_str_get", DataType::Int),
+            ("gobol_str_char", DataType::Str),
             ("gobol_str_contains", DataType::Bool),
             ("gobol_str_trim", DataType::Str),
             ("gobol_str_replace", DataType::Str),
@@ -95,6 +96,8 @@ impl TypeResolver {
             ("gobol_tcp_accept", DataType::Int),
             ("gobol_alloc", DataType::Int),
             ("gobol_array_new", DataType::Unknown),
+            ("gobol_array_new_with_size", DataType::Unknown),
+            ("gobol_array_new_2d", DataType::Unknown),
             ("gobol_array_add", DataType::None_),
             ("gobol_array_len", DataType::Int),
             ("gobol_array_get", DataType::Int),
@@ -102,12 +105,13 @@ impl TypeResolver {
             ("gobol_mem_load", DataType::Int),
             ("gobol_mem_store", DataType::None_),
             ("gobol_array_elem_addr", DataType::Int),
-            // GC / manual heap dispatch used by the compiler when a
-            // `new` allocation is respectively gc-managed (default) or
-            // opted out via a `#[no_gc]` annotation.
+            // GC — mark-sweep collector runtime
             ("gobol_gc_alloc", DataType::Int),
             ("gobol_gc_mark", DataType::None_),
             ("gobol_gc_sweep", DataType::None_),
+            ("gobol_gc_collect", DataType::None_),
+            ("gobol_gc_collect_now", DataType::None_),
+            ("gobol_gc_alloc_count", DataType::Int),
             ("gobol_malloc", DataType::Int),
             ("gobol_free", DataType::None_),
         ];
@@ -151,6 +155,7 @@ impl TypeResolver {
             | DataType::Unknown
             | DataType::Struct(_) => 8,
             DataType::Nullable(inner) => self.type_size(inner),
+            DataType::Array(_) => 8, // array pointer
         }
     }
 
@@ -383,7 +388,8 @@ impl VariadicStub {
             | DataType::Str
             | DataType::Unknown
             | DataType::Struct(_)
-            | DataType::Nullable(_) => "long",
+            | DataType::Nullable(_)
+            | DataType::Array(_) => "long",
         }
     }
 
@@ -635,6 +641,12 @@ impl CraneliftBackend {
         sig.returns.push(AbiParam::new(types::I64));
         self.declare_import("gobol_str_get", sig);
 
+        // char* gobol_str_char(i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_str_char", sig);
+
         // ptr gobol_alloc(i64)
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
@@ -656,11 +668,37 @@ impl CraneliftBackend {
         let sig = self.module.make_signature();
         self.declare_import("gobol_gc_sweep", sig);
 
+        // void gobol_gc_collect()
+        let sig = self.module.make_signature();
+        self.declare_import("gobol_gc_collect", sig);
+
+        // void gobol_gc_collect_now()
+        let sig = self.module.make_signature();
+        self.declare_import("gobol_gc_collect_now", sig);
+
+        // i64 gobol_gc_alloc_count()
+        let mut sig = self.module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_gc_alloc_count", sig);
+
         // ptr gobol_array_new()
         let sig = self.module.make_signature();
         let mut sig = sig;
         sig.returns.push(AbiParam::new(types::I64));
         self.declare_import("gobol_array_new", sig);
+
+        // ptr gobol_array_new_with_size(i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_array_new_with_size", sig);
+
+        // ptr gobol_array_new_2d(i64, i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_array_new_2d", sig);
 
         // void gobol_array_add(ptr, i64)
         let mut sig = self.module.make_signature();
@@ -1506,10 +1544,11 @@ impl CraneliftBackend {
     ) -> Result<(), String> {
         let str_ptr = self.intern_string(bcx, s);
         let ch_name = &vars[0];
-        let ch_var = self.declare_variable(bcx, ch_name, types::I64, &DataType::Int);
+        let ch_var = self.declare_variable(bcx, ch_name, types::I64, &DataType::Str);
         let idx_var = self.declare_variable(bcx, &format!("__idx_{}", ch_name), types::I64, &DataType::Int);
         let zero = bcx.ins().iconst(types::I64, 0);
-        bcx.def_var(ch_var, zero);
+        let empty_str = self.intern_string(bcx, "");
+        bcx.def_var(ch_var, empty_str);
         bcx.def_var(idx_var, zero);
 
         let cond_b = bcx.create_block();
@@ -1532,7 +1571,8 @@ impl CraneliftBackend {
         bcx.switch_to_block(body_b);
         self.diverged = false;
         let i = bcx.use_var(idx_var);
-        let ch = self.call_runtime(bcx, "gobol_str_get", &[str_ptr, i]);
+        let ch_code = self.call_runtime(bcx, "gobol_str_get", &[str_ptr, i]);
+        let ch = self.call_runtime(bcx, "gobol_str_char", &[ch_code]);
         bcx.def_var(ch_var, ch);
         self.loop_stack.push((end_b, incr_b));
         self.translate_block(bcx, body)?;
@@ -1570,9 +1610,7 @@ impl CraneliftBackend {
                 let val = self.translate_expr(bcx, value)?;
                 if let Some(off) = self.type_resolver.field_offset(sname, member) {
                     let addr = self.field_addr(bcx, obj_val, off);
-                    let val_ty = self.data_type_to_clif(&self.type_resolver.infer_type(value)).unwrap_or(types::I64);
-                    bcx.ins().store(MemFlagsData::trusted(), val, addr, 0);
-                    let _ = val_ty;
+                    self.call_runtime(bcx, "gobol_mem_store", &[addr, val]);
                     return Ok(());
                 }
             }
@@ -1583,6 +1621,19 @@ impl CraneliftBackend {
         // For structs with index_mut: call the method, then call write on the Ref.
         if let IRExpr::ArrayIndex { array, index } = target {
             let arr_ty = self.type_resolver.infer_type(array);
+
+            // Check if this is a nested array assignment (e.g., arr[2][2] = value)
+            if let IRExpr::ArrayIndex { array: inner_array, index: inner_idx } = array.as_ref() {
+                // 2D array assignment: get inner array, then store element
+                let base = self.translate_expr(bcx, inner_array)?;
+                let i1 = self.translate_expr(bcx, inner_idx)?;
+                let inner_arr = self.call_runtime(bcx, "gobol_array_get", &[base, i1]);
+                let i2 = self.translate_expr(bcx, index)?;
+                let val = self.translate_expr(bcx, value)?;
+                let addr = self.call_runtime(bcx, "gobol_array_elem_addr", &[inner_arr, i2]);
+                self.call_runtime(bcx, "gobol_mem_store", &[addr, val]);
+                return Ok(());
+            }
 
             // Struct type with an index_mut method (e.g. vec<T>): use method dispatch.
             if let DataType::Struct(ref sname) = arr_ty {
@@ -1607,7 +1658,7 @@ impl CraneliftBackend {
                 }
             }
 
-            // Raw array (DataType::Unknown): use the Ref path via runtime functions.
+            // Raw array (DataType::Unknown or DataType::Array): use the runtime functions.
             let arr = self.translate_expr(bcx, array)?;
             let idx = self.translate_expr(bcx, index)?;
             let val = self.translate_expr(bcx, value)?;
@@ -1619,7 +1670,8 @@ impl CraneliftBackend {
         if let IRExpr::Variable(name) = target {
             let val = self.translate_expr(bcx, value)?;
             if let Some(var) = self.variables.get(name) {
-                let v = self.coerce(bcx, val, &self.type_resolver.infer_type(value), &self.type_resolver.var_type(name))?;
+                let var_ty = self.type_resolver.var_type(name);
+                let v = self.coerce(bcx, val, &self.type_resolver.infer_type(value), &var_ty)?;
                 bcx.def_var(*var, v);
                 return Ok(());
             }
@@ -1646,10 +1698,9 @@ impl CraneliftBackend {
             IRExpr::Literal(lit) => Ok(self.translate_literal(bcx, lit)),
             IRExpr::Variable(name) => {
                 if let Some(var) = self.variables.get(name) {
-                    Ok(bcx.use_var(*var))
+                    let v = bcx.use_var(*var);
+                    Ok(v)
                 } else {
-                    // Unknown variable — return 0. This keeps code generation
-                    // robust against unresolved names (e.g. forward references).
                     Ok(bcx.ins().iconst(types::I64, 0))
                 }
             }
@@ -1665,9 +1716,19 @@ impl CraneliftBackend {
                 self.translate_member_access(bcx, object, member)
             }
             IRExpr::ArrayIndex { array, index } => {
-                let arr = self.translate_expr(bcx, array)?;
-                let idx = self.translate_expr(bcx, index)?;
-                Ok(self.call_runtime(bcx, "gobol_array_get", &[arr, idx]))
+                // Check if this is a nested array access (e.g., arr[2][2])
+                if let IRExpr::ArrayIndex { array: inner_array, index: inner_idx } = array.as_ref() {
+                    // 2D array access: first get the inner array, then get the element
+                    let base = self.translate_expr(bcx, inner_array)?;
+                    let i1 = self.translate_expr(bcx, inner_idx)?;
+                    let inner_arr = self.call_runtime(bcx, "gobol_array_get", &[base, i1]);
+                    let i2 = self.translate_expr(bcx, index)?;
+                    Ok(self.call_runtime(bcx, "gobol_array_get", &[inner_arr, i2]))
+                } else {
+                    let arr = self.translate_expr(bcx, array)?;
+                    let idx = self.translate_expr(bcx, index)?;
+                    Ok(self.call_runtime(bcx, "gobol_array_get", &[arr, idx]))
+                }
             }
             IRExpr::ArrayLiteral(elems) => {
                 let arr = self.call_runtime(bcx, "gobol_array_new", &[]);
@@ -2328,11 +2389,7 @@ impl CraneliftBackend {
             let obj_val = self.translate_expr(bcx, object)?;
             if let Some(off) = self.type_resolver.field_offset(sname, member) {
                 let addr = self.field_addr(bcx, obj_val, off);
-                let field_ty = self.type_resolver.field_type(sname, member);
-                let clif_ty = self.data_type_to_clif(&field_ty).unwrap_or(types::I64);
-                let loaded = bcx.ins().load(clif_ty, MemFlagsData::trusted(), addr, 0);
-                let _ = loaded;
-                return Ok(self.bitcast_to(bcx, loaded, types::I64));
+                return Ok(self.call_runtime(bcx, "gobol_mem_load", &[addr]));
             }
         }
         Ok(self.translate_expr(bcx, object)?)
@@ -2371,13 +2428,12 @@ impl CraneliftBackend {
         };
         let ptr = self.call_runtime(bcx, alloc_fn, &[size_val]);
         if let Some(off) = self.type_resolver.struct_fields(name) {
-            for (field_name, field_ty) in &off {
+            for (field_name, _field_ty) in &off {
                 if let Some((_, e)) = fields.iter().find(|(n, _)| n == field_name) {
                     let v = self.translate_expr(bcx, e)?;
                     let offset = self.type_resolver.field_offset(name, field_name).unwrap_or(0);
                     let addr = self.field_addr(bcx, ptr, offset);
-                    let _ = field_ty;
-                    bcx.ins().store(MemFlagsData::trusted(), v, addr, 0);
+                    self.call_runtime(bcx, "gobol_mem_store", &[addr, v]);
                 }
             }
         }
@@ -2606,6 +2662,13 @@ impl CraneliftBackend {
                 let call = bcx.ins().call(fref, &[]);
                 bcx.inst_results(call)[0]
             }
+            DataType::Array(_) => {
+                // array: allocate an empty one (size info lost, caller should set init)
+                let fid = self.func_ids["gobol_array_new"];
+                let fref = self.module.declare_func_in_func(fid, &mut bcx.func);
+                let call = bcx.ins().call(fref, &[]);
+                bcx.inst_results(call)[0]
+            }
             _ => bcx.ins().iconst(types::I64, 0),
         }
     }
@@ -2660,6 +2723,7 @@ impl CraneliftBackend {
             DataType::Unknown => types::I64, // array pointer
             DataType::Struct(_) => types::I64, // struct pointer
             DataType::Nullable(inner) => self.data_type_to_clif(inner)?,
+            DataType::Array(_) => types::I64, // array pointer
         })
     }
 
@@ -2800,6 +2864,17 @@ fn builtin_runtime(name: &str) -> Option<&'static str> {
         "pow" => Some("gobol_math_pow"),
         // fs intrinsics (standalone functions)
         "exists" => Some("gobol_fs_exists"),
+        // array intrinsics
+        "gobol_array_new" => Some("gobol_array_new"),
+        "gobol_array_new_with_size" => Some("gobol_array_new_with_size"),
+        "gobol_array_new_2d" => Some("gobol_array_new_2d"),
+        // GC intrinsics
+        "gobol_gc_alloc" => Some("gobol_gc_alloc"),
+        "gobol_gc_mark" => Some("gobol_gc_mark"),
+        "gobol_gc_sweep" => Some("gobol_gc_sweep"),
+        "gobol_gc_collect" => Some("gobol_gc_collect"),
+        "gobol_gc_collect_now" => Some("gobol_gc_collect_now"),
+        "gobol_gc_alloc_count" => Some("gobol_gc_alloc_count"),
         // thread / channel runtime
         "gobol_thread_spawn" => Some("gobol_thread_spawn"),
         "gobol_thread_join" => Some("gobol_thread_join"),

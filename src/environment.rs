@@ -14,6 +14,7 @@ pub enum DataType {
     Unknown,
     Struct(String),
     Nullable(Box<DataType>),
+    Array(Box<DataType>),
 }
 
 impl fmt::Display for DataType {
@@ -27,6 +28,7 @@ impl fmt::Display for DataType {
             DataType::Unknown => "unknown",
             DataType::Struct(name) => return write!(f, "{}", name),
             DataType::Nullable(inner) => return write!(f, "{}?", inner),
+            DataType::Array(elem) => return write!(f, "{}[]", elem),
         };
         write!(f, "{}", s)
     }
@@ -399,6 +401,21 @@ impl Environment {
         if *target == DataType::Float && *source == DataType::Int {
             return true;
         }
+        // Array(T) is compatible with Struct("Vec") — Vec can be constructed from array
+        if let DataType::Struct(name) = target {
+            if name == "Vec" {
+                if let DataType::Array(_) = source {
+                    return true;
+                }
+            }
+        }
+        if let DataType::Struct(name) = source {
+            if name == "Vec" {
+                if let DataType::Array(_) = target {
+                    return true;
+                }
+            }
+        }
         false
     }
 
@@ -492,5 +509,20 @@ impl Environment {
                 }
             }
         }
+    }
+
+    /// Get all symbols from a specific module (for wildcard `from module import *`)
+    pub fn get_module_symbols(&self, module_name: &str) -> Vec<(String, Symbol)> {
+        let mut symbols = Vec::new();
+        if let Some(global_scope) = self.scopes.first() {
+            let prefix = format!("{}::", module_name);
+            for (name, sym) in global_scope {
+                if name.starts_with(&prefix) {
+                    let short_name = name[prefix.len()..].to_string();
+                    symbols.push((short_name, sym.clone()));
+                }
+            }
+        }
+        symbols
     }
 }

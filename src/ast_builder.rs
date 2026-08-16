@@ -531,15 +531,38 @@ impl AstBuilder {
         }
         self.advance(); // consume 'import'
 
-        // Parse comma-separated member list
-        let mut members = Vec::new();
+        // Check for wildcard import: `from module import *`
+        if self.match_value("*") {
+            self.advance(); // consume '*'
+            self.consume_end_of_line();
+            return Some(Box::new(FromImportStatement::new(module, Vec::new(), true)));
+        }
+
+        // Parse comma-separated member list with optional `as` aliases
+        let mut members: Vec<(String, Option<String>)> = Vec::new();
         loop {
             if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
                 self.log_error("Expected member name after 'import' in 'from' statement");
                 return None;
             }
-            members.push(self.current_token().value.clone());
+            let member_name = self.current_token().value.clone();
             self.advance();
+
+            // Check for `as alias`
+            let alias = if self.match_type(&TokenType::Keyword) && self.current_token().value == "as" {
+                self.advance(); // consume 'as'
+                if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+                    self.log_error("Expected alias name after 'as'");
+                    return None;
+                }
+                let alias_name = self.current_token().value.clone();
+                self.advance();
+                Some(alias_name)
+            } else {
+                None
+            };
+
+            members.push((member_name, alias));
 
             if self.match_value(",") {
                 self.advance(); // consume ','
@@ -555,7 +578,7 @@ impl AstBuilder {
 
         self.consume_end_of_line();
 
-        Some(Box::new(FromImportStatement::new(module, members)))
+        Some(Box::new(FromImportStatement::new(module, members, false)))
     }
 
     fn parse_export_statement(&mut self) -> Option<Box<dyn Statement>> {
@@ -689,7 +712,7 @@ impl AstBuilder {
                 None
             };
 
-            fields.push(StructField { name: field_name, field_type });
+            fields.push(StructField::new(field_name, field_type));
             self.consume_end_of_line();
 
             if self.match_value(",") { self.advance(); }
@@ -2339,7 +2362,11 @@ impl AstBuilder {
                 Some(Box::new(block))
             };
 
-            arms.push(MatchArm { pattern, body });
+            arms.push(MatchArm {
+                pattern,
+                body,
+                attributes: Vec::new(),
+            });
 
             // Optional comma between arms
             self.consume_end_of_line();

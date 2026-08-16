@@ -1,0 +1,14 @@
+// Test alias import: `from module import ident as alias`
+import std;
+from alias_mod import calculate as calc, display as show;
+
+func main() {
+    // Functions should be accessible by their aliases
+    val result = calc(100, 200);
+    val message = show("Aliases work!");
+    
+    io::println(@"Result: {result}");
+    io::println(message);
+}
+
+main();

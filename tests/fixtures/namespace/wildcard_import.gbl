@@ -1,0 +1,16 @@
+// Test wildcard import: `from module import *`
+import std;
+from wildcard_mod import *;
+
+func main() {
+    // All functions from wildcard_mod should be directly accessible
+    val greeting = greet("World");
+    val sum = add(10, 20);
+    val product = multiply(5, 6);
+    
+    io::println(greeting);
+    io::println(@"Sum: {sum}");
+    io::println(@"Product: {product}");
+}
+
+main();

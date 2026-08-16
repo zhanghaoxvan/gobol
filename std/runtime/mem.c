@@ -10,14 +10,14 @@ void *gobol_alloc(long long size) {
     return calloc(1, (size_t)size);
 }
 
-long long gobol_mem_load(long long addr) {
-    if (!addr) return 0;
-    return *(long long *)addr;
-}
-
 void gobol_mem_store(long long addr, long long val) {
     if (!addr) return;
     *(long long *)addr = val;
+}
+
+long long gobol_mem_load(long long addr) {
+    if (!addr) return 0;
+    return *(long long *)addr;
 }
 
 long long gobol_array_elem_addr(void *arr, long long i) {

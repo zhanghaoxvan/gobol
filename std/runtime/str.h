@@ -11,6 +11,7 @@ char *gobol_str_cat(const char *a, const char *b);
 long long gobol_str_eq(const char *a, const char *b);
 long long gobol_str_len(const char *s);
 long long gobol_str_get(const char *s, long long i);
+char *gobol_str_char(long long code);
 long long gobol_str_contains(const char *s, const char *sub);
 char *gobol_str_trim(const char *s);
 char *gobol_str_replace(const char *s, const char *from, const char *to);

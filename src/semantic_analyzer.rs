@@ -454,10 +454,8 @@ impl SemanticAnalyzer {
         // Check for ArrayType via downcast
         if let Some(arr) = tp.as_type_any().downcast_ref::<ArrayType>() {
             let elem = arr.get_element_type();
-            if elem.as_type_any().downcast_ref::<ArrayType>().is_some() {
-                return self.get_data_type_from_ast(Some(elem));
-            }
-            return self.get_data_type_from_ast(Some(elem));
+            let inner = self.get_data_type_from_ast(Some(elem));
+            return DataType::Array(Box::new(inner));
         }
 
         match tp.get_name() {
@@ -810,12 +808,25 @@ impl SemanticAnalyzer {
                 // members as bare names in this module's namespace.
                 let mod_name = from_import.get_module();
                 self.load_module(mod_name);
-                for member in from_import.get_members() {
-                    let qualified = format!("{}::{}", mod_name, member);
-                    if let Some(sym) = self.env.lookup_symbol(&qualified) {
+
+                // Handle wildcard import: `from module import *`
+                if from_import.is_wildcard() {
+                    let module_symbols = self.env.get_module_symbols(mod_name);
+                    for (name, sym) in module_symbols {
                         let return_type = sym.data_type.clone();
-                        self.env.declare_function(member, &return_type, &self.current_module);
-                        declared_funcs.push((member.to_string(), return_type));
+                        self.env.declare_function(&name, &return_type, &self.current_module);
+                        declared_funcs.push((name, return_type));
+                    }
+                } else {
+                    // Handle specific members with optional aliases
+                    for (member_name, alias) in from_import.get_members() {
+                        let qualified = format!("{}::{}", mod_name, member_name);
+                        if let Some(sym) = self.env.lookup_symbol(&qualified) {
+                            let return_type = sym.data_type.clone();
+                            let effective_name = alias.as_ref().unwrap_or(member_name);
+                            self.env.declare_function(effective_name, &return_type, &self.current_module);
+                            declared_funcs.push((effective_name.to_string(), return_type));
+                        }
                     }
                 }
             } else if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
@@ -1305,23 +1316,35 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_from_import_statement(&mut self, node: &FromImportStatement) {
         let module_name = node.get_module();
         #[cfg(debug_assertions)]
-        println!("  From-import: module={}, members={:?}", module_name, node.get_members());
+        println!("  From-import: module={}, wildcard={}, members={:?}", module_name, node.is_wildcard(), node.get_members());
 
         // First, ensure the module is loaded (this registers all its
         // public symbols under `module::member` keys).
         self.load_module(module_name);
 
+        // Handle wildcard import: `from module import *`
+        if node.is_wildcard() {
+            let module_symbols = self.env.get_module_symbols(module_name);
+            for (name, sym) in module_symbols {
+                let return_type = sym.data_type.clone();
+                self.env.declare_function(&name, &return_type, &self.current_module);
+            }
+            return;
+        }
+
         // Then, re-declare each requested member as a bare name in the
         // current module so it can be called without the `module::` qualifier.
-        for member in node.get_members() {
-            let qualified = format!("{}::{}", module_name, member);
+        for (member_name, alias) in node.get_members() {
+            let qualified = format!("{}::{}", module_name, member_name);
             if let Some(sym) = self.env.lookup_symbol(&qualified) {
                 let return_type = sym.data_type.clone();
-                self.env.declare_function(member, &return_type, &self.current_module);
+                // Use alias if provided, otherwise use original name
+                let effective_name = alias.as_ref().unwrap_or(member_name);
+                self.env.declare_function(effective_name, &return_type, &self.current_module);
             } else {
                 self.error(&format!(
                     "Cannot import '{}' from module '{}': member not found",
-                    member, module_name
+                    member_name, module_name
                 ));
             }
         }
@@ -1490,7 +1513,17 @@ impl AstVisitor for SemanticAnalyzer {
 
         // Array parameters are always mutable (reference type)
         let is_array = node.get_type().map_or(false, |t| t.as_type_any().downcast_ref::<ArrayType>().is_some());
-        self.env.declare_variable(param_name, &param_type, is_array);
+        // For array parameters, store the element type (unwrap Array wrapper)
+        let stored_type = if is_array {
+            if let DataType::Array(elem) = &param_type {
+                (**elem).clone()
+            } else {
+                param_type.clone()
+            }
+        } else {
+            param_type.clone()
+        };
+        self.env.declare_variable(param_name, &stored_type, is_array);
         // Mark as array if the parameter type is an array
         if is_array {
             if let Some(sym) = self.env.lookup_symbol_mut(param_name) {
@@ -1663,7 +1696,9 @@ impl AstVisitor for SemanticAnalyzer {
                 || matches!(&iter_type, DataType::Struct(s) if s == "Range")
                 || matches!(iter_type, DataType::Str)
                 || matches!(iter_type, DataType::Unknown)
-                || matches!(&iter_type, DataType::Struct(s) if self.current_generic_params.contains(&s.to_string()));
+                || matches!(&iter_type, DataType::Struct(s) if self.current_generic_params.contains(&s.to_string()))
+                || matches!(iter_type, DataType::Array(_))
+                || matches!(&iter_type, DataType::Struct(s) if s == "Vec");
             if !iter_is_valid {
                 // Check if the iterable is a variable that is an array
                 let is_array_var = if let Some(iter_expr) = node.get_iterable() {
@@ -1685,6 +1720,7 @@ impl AstVisitor for SemanticAnalyzer {
                 let val_type = match &iter_type {
                     DataType::Struct(s) if s == "Range" => DataType::Int,
                     DataType::Str => DataType::Str,
+                    DataType::Array(elem) => (**elem).clone(),
                     _ => DataType::Int, // default for arrays
                 };
                 self.env.declare_variable(&loop_vars[1], &val_type, false);
@@ -1830,7 +1866,7 @@ impl AstVisitor for SemanticAnalyzer {
                 ));
             }
         }
-        self.type_stack.push(elem_type);
+        self.type_stack.push(DataType::Array(Box::new(elem_type)));
     }
 
     fn visit_boolean_literal(&mut self, _node: &BooleanLiteral) {

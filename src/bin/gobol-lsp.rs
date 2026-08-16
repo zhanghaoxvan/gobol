@@ -11,11 +11,12 @@
 // SemanticAnalyzer) and builds a token-based symbol index for position
 // queries, since AST nodes don't currently carry source positions.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use tokio::io::{stdin, stdout};
+use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -40,7 +41,6 @@ enum SymKind {
     Trait,
     Import,
     ExternFn,
-    Constructor,
     StaticFunc,
     TypeAlias,
 }
@@ -58,7 +58,6 @@ impl SymKind {
             SymKind::Trait => "trait",
             SymKind::Import => "module",
             SymKind::ExternFn => "extern fn",
-            SymKind::Constructor => "constructor",
             SymKind::StaticFunc => "static function",
             SymKind::TypeAlias => "type alias",
         }
@@ -76,7 +75,6 @@ impl SymKind {
             SymKind::Trait => CompletionItemKind::INTERFACE,
             SymKind::Import => CompletionItemKind::MODULE,
             SymKind::ExternFn => CompletionItemKind::FUNCTION,
-            SymKind::Constructor => CompletionItemKind::CONSTRUCTOR,
             SymKind::StaticFunc => CompletionItemKind::FUNCTION,
             SymKind::TypeAlias => CompletionItemKind::TYPE_PARAMETER,
         }
@@ -94,7 +92,6 @@ impl SymKind {
             SymKind::Trait => SymbolKind::INTERFACE,
             SymKind::Import => SymbolKind::MODULE,
             SymKind::ExternFn => SymbolKind::FUNCTION,
-            SymKind::Constructor => SymbolKind::CONSTRUCTOR,
             SymKind::StaticFunc => SymbolKind::FUNCTION,
             SymKind::TypeAlias => SymbolKind::TYPE_PARAMETER,
         }
@@ -151,7 +148,6 @@ impl DocState {
                         | SymKind::Trait
                         | SymKind::TypeAlias
                         | SymKind::ExternFn
-                        | SymKind::Constructor
                         | SymKind::StaticFunc
                 )
         })
@@ -375,24 +371,6 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 doc_comment: None,
                             });
                             extract_parameters(tokens, j, &mut symbols);
-                        }
-                    }
-                }
-                "constructor" => {
-                    if let Some(name_tok) = tokens.get(i + 1) {
-                        if name_tok.r#type == TokenType::Identifier {
-                            let type_info = find_return_type(tokens, i);
-                            symbols.push(SymbolEntry {
-                                name: name_tok.value.clone(),
-                                kind: SymKind::Constructor,
-                                line: name_tok.line,
-                                col: name_tok.col,
-                                len: name_tok.value.len() as i32,
-                                type_info,
-                                parent: Some(name_tok.value.clone()),
-                                doc_comment: None,
-                            });
-                            extract_parameters(tokens, i, &mut symbols);
                         }
                     }
                 }
@@ -1230,7 +1208,7 @@ fn keyword_snippets() -> Vec<CompletionItem> {
 
 struct GobolLsp {
     client: Client,
-    documents: Arc<DashMap<String, DocState>>,
+    documents: Arc<RwLock<HashMap<String, DocState>>>,
     workspace_roots: Arc<std::sync::RwLock<Vec<PathBuf>>>,
 }
 
@@ -1315,10 +1293,13 @@ impl LanguageServer for GobolLsp {
         let uri = params.text_document.uri.to_string();
         if let Some(text) = params.text {
             self.reanalyze(&uri, &text).await;
-        } else if let Some(state) = self.documents.get(&uri) {
-            let text = state.source.clone();
-            drop(state);
-            self.reanalyze(&uri, &text).await;
+        } else {
+            let state = self.documents.read().await;
+            if let Some(doc_state) = state.get(&uri) {
+                let text = doc_state.source.clone();
+                drop(state);
+                self.reanalyze(&uri, &text).await;
+            }
         }
     }
 
@@ -1328,14 +1309,16 @@ impl LanguageServer for GobolLsp {
             .client
             .publish_diagnostics(params.text_document.uri, Vec::new(), None)
             .await;
-        self.documents.remove(&uri);
+        let mut documents = self.documents.write().await;
+        documents.remove(&uri);
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let pos = params.text_document_position_params;
         let uri = pos.text_document.uri.to_string();
 
-        let state = match self.documents.get(&uri) {
+        let state_guard = self.documents.read().await;
+        let state = match state_guard.get(&uri) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -1364,9 +1347,6 @@ impl LanguageServer for GobolLsp {
                         } else {
                             format!("func {}()", sym.name)
                         }
-                    }
-                    SymKind::Constructor => {
-                        format!("constructor {}()", sym.name)
                     }
                     SymKind::Struct => format!("struct {}", sym.name),
                     SymKind::Enum => format!("enum {}", sym.name),
@@ -1425,7 +1405,8 @@ impl LanguageServer for GobolLsp {
         let pos = params.text_document_position_params;
         let uri = pos.text_document.uri.to_string();
 
-        let state = match self.documents.get(&uri) {
+        let state_guard = self.documents.read().await;
+        let state = match state_guard.get(&uri) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -1458,7 +1439,8 @@ impl LanguageServer for GobolLsp {
     ) -> Result<Option<Vec<Location>>> {
         let pos = params.text_document_position;
         let uri = pos.text_document.uri.to_string();
-        let state = match self.documents.get(&uri) {
+        let state_guard = self.documents.read().await;
+        let state = match state_guard.get(&uri) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -1541,28 +1523,31 @@ impl LanguageServer for GobolLsp {
         }
 
         // Add symbols from the document
-        if let Some(state) = self.documents.get(&uri) {
-            for sym in &state.symbols {
-                let mut detail = sym.type_info.clone().unwrap_or_else(|| sym.kind.label().to_string());
-                if let Some(ref parent) = sym.parent {
-                    detail = format!("{}::{} → {}", parent, sym.name, detail);
-                } else {
-                    detail = format!("{}: {}", sym.kind.label(), detail);
+        {
+            let state_guard = self.documents.read().await;
+            if let Some(state) = state_guard.get(&uri) {
+                for sym in &state.symbols {
+                    let mut detail = sym.type_info.clone().unwrap_or_else(|| sym.kind.label().to_string());
+                    if let Some(ref parent) = sym.parent {
+                        detail = format!("{}::{} → {}", parent, sym.name, detail);
+                    } else {
+                        detail = format!("{}: {}", sym.kind.label(), detail);
+                    }
+                    items.push(CompletionItem {
+                        label: sym.name.clone(),
+                        kind: Some(sym.kind.completion_kind()),
+                        detail: Some(detail),
+                        documentation: sym.doc_comment.as_ref().map(|doc| {
+                            tower_lsp::lsp_types::Documentation::MarkupContent(
+                                tower_lsp::lsp_types::MarkupContent {
+                                    kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                    value: doc.clone(),
+                                },
+                            )
+                        }),
+                        ..Default::default()
+                    });
                 }
-                items.push(CompletionItem {
-                    label: sym.name.clone(),
-                    kind: Some(sym.kind.completion_kind()),
-                    detail: Some(detail),
-                    documentation: sym.doc_comment.as_ref().map(|doc| {
-                        tower_lsp::lsp_types::Documentation::MarkupContent(
-                            tower_lsp::lsp_types::MarkupContent {
-                                kind: tower_lsp::lsp_types::MarkupKind::Markdown,
-                                value: doc.clone(),
-                            },
-                        )
-                    }),
-                    ..Default::default()
-                });
             }
         }
 
@@ -1574,7 +1559,8 @@ impl LanguageServer for GobolLsp {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = params.text_document.uri.to_string();
-        let state = match self.documents.get(&uri) {
+        let state_guard = self.documents.read().await;
+        let state = match state_guard.get(&uri) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -1609,7 +1595,6 @@ impl LanguageServer for GobolLsp {
                 }
                 SymKind::Function
                 | SymKind::StaticFunc
-                | SymKind::Constructor
                 | SymKind::TypeAlias
                 | SymKind::ExternFn => {
                     if sym.parent.is_none() {
@@ -1681,7 +1666,8 @@ impl GobolLsp {
         uri: &str,
         pos: Position,
     ) -> Option<String> {
-        let state = self.documents.get(uri)?;
+        let state_guard = self.documents.read().await;
+        let state = state_guard.get(uri)?;
         let target_line = (pos.line as i32) + 1;
         let target_col = pos.character as i32;
         // Find the `:` token at or just before cursor that pairs with the next `:`
@@ -1727,7 +1713,8 @@ impl GobolLsp {
     /// Returns true if the cursor appears inside an `import ____;` or
     /// `from ____ import ...;` statement (module name position).
     async fn is_import_context(&self, uri: &str, pos: Position) -> bool {
-        let state = match self.documents.get(uri) {
+        let state_guard = self.documents.read().await;
+        let state = match state_guard.get(uri) {
             Some(s) => s,
             None => return false,
         };
@@ -1791,21 +1778,24 @@ impl GobolLsp {
         }
 
         // Local methods / enum variants / static funcs of the qualifier
-        if let Some(state) = self.documents.get(uri) {
-            for sym in &state.symbols {
-                if let Some(ref parent) = sym.parent {
-                    if parent == qualifier {
-                        let detail = if let Some(ref ty) = sym.type_info {
-                            format!("{}::{} → {}", parent, sym.name, ty)
-                        } else {
-                            format!("{}::{} ({})", parent, sym.name, sym.kind.label())
-                        };
-                        items.push(CompletionItem {
-                            label: sym.name.clone(),
-                            kind: Some(sym.kind.completion_kind()),
-                            detail: Some(detail),
-                            ..Default::default()
-                        });
+        {
+            let state_guard = self.documents.read().await;
+            if let Some(state) = state_guard.get(uri) {
+                for sym in &state.symbols {
+                    if let Some(ref parent) = sym.parent {
+                        if parent == qualifier {
+                            let detail = if let Some(ref ty) = sym.type_info {
+                                format!("{}::{} → {}", parent, sym.name, ty)
+                            } else {
+                                format!("{}::{} ({})", parent, sym.name, sym.kind.label())
+                            };
+                            items.push(CompletionItem {
+                                label: sym.name.clone(),
+                                kind: Some(sym.kind.completion_kind()),
+                                detail: Some(detail),
+                                ..Default::default()
+                            });
+                        }
                     }
                 }
             }
@@ -1889,7 +1879,6 @@ impl GobolLsp {
                                 | SymKind::ExternFn
                                 | SymKind::StaticFunc
                                 | SymKind::EnumVariant
-                                | SymKind::Constructor
                                 | SymKind::Struct
                                 | SymKind::Enum
                                 | SymKind::Trait
@@ -1917,8 +1906,9 @@ impl GobolLsp {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
+        let uri_for_clone = uri_owned.clone();
         let state = tokio::task::spawn_blocking(move || {
-            analyze_document(&uri_owned, &text_owned, &roots)
+            analyze_document(&uri_for_clone, &text_owned, &roots)
         })
         .await
         .unwrap_or_else(|_| DocState {
@@ -1934,7 +1924,10 @@ impl GobolLsp {
             .map(|(line, col, msg)| error_to_diagnostic(&state.source, &state.tokens, *line, *col, msg))
             .collect();
 
-        self.documents.insert(uri.to_string(), state);
+        // Atomically replace the document state — use write lock to ensure
+        // exclusive access and proper replacement of old symbols.
+        let mut documents = self.documents.write().await;
+        documents.insert(uri_owned.clone(), state);
 
         if let Ok(url) = url::Url::parse(uri) {
             self.client
@@ -1952,7 +1945,7 @@ fn main() {
 
     let (service, socket) = LspService::new(|client| GobolLsp {
         client,
-        documents: Arc::new(DashMap::new()),
+        documents: Arc::new(RwLock::new(HashMap::new())),
         workspace_roots: Arc::new(std::sync::RwLock::new(Vec::new())),
     });
 

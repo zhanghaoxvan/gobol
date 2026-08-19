@@ -1,0 +1,26 @@
+import std;
+
+// File-level attribute: disables GC for the whole module.
+#![no_gc]
+
+// Node-level attribute on a function. With file-level no_gc also applied,
+// the merged attributes on this function are [no_gc, naked].
+#[naked]
+func early_return(n: int): int {
+    return n
+}
+
+func main() {
+    var x = early_return(42);
+    io::println(@"file-level #![no_gc] propagated, x = {x}");
+
+    // Local attribute overrides file-level: this function is NOT no_gc
+    // because it re-declares... actually no_gc has no opposite, so it stays.
+    // The closest-wins rule is about *same-named* attributes.
+    var y = add(3, 4);
+    io::println(@"y = {y}");
+}
+
+func add(a: int, b: int): int {
+    a + b
+}

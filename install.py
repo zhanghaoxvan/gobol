@@ -12,7 +12,7 @@ import platform
 import subprocess
 from pathlib import Path
 
-# ==================== Terminal Colors (pure Python, no dependencies) ====================
+# ==================== Terminal Colors ====================
 
 class Colors:
     HEADER = '\033[95m'
@@ -71,6 +71,8 @@ def is_windows():
     return sys.platform == "win32"
 
 def gobol_home():
+    if override := os.environ.get("GOBOL_INSTALL_DIR"):
+        return Path(override)
     if override := os.environ.get("GOBOL_HOME"):
         return Path(override)
     return Path.home() / ".gobol"
@@ -78,7 +80,7 @@ def gobol_home():
 # ==================== TUI Task Functions ====================
 
 def task_build_and_install(no_build=False):
-    """Build and install the Gobol toolchain (single global install, no version manager)."""
+    """Build and install the Gobol toolchain with user-defined installation directory."""
     clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.OKCYAN}{Colors.BOLD}   Build & Install Gobol Toolchain   {Colors.ENDC}")
@@ -87,6 +89,23 @@ def task_build_and_install(no_build=False):
     os_name, arch = detect_platform()
     print_status(f"Platform: {os_name}/{arch}", "info")
     
+    # ----- 用户选择安装目录 -----
+    default_install_dir = Path.home() / ".gobol"
+    current_env = os.environ.get("GOBOL_INSTALL_DIR") or os.environ.get("GOBOL_HOME")
+    if current_env:
+        default_install_dir = Path(current_env)
+    
+    print(f"\n{Colors.OKCYAN}Current installation directory: {Colors.ENDC}{default_install_dir}")
+    user_input = input(f"{Colors.OKCYAN}Enter new installation directory (or press Enter to keep current): {Colors.ENDC}").strip()
+    
+    if user_input:
+        install_dir = Path(user_input).expanduser().resolve()
+    else:
+        install_dir = default_install_dir
+    
+    print_status(f"Installation directory set to: {install_dir}", "ok")
+    
+    # ----- 构建 -----
     if not no_build:
         print_status("Building (cargo build --release)...", "info")
         cmd = ["cargo", "build", "--release", "--bins"]
@@ -100,10 +119,10 @@ def task_build_and_install(no_build=False):
     else:
         print_status("Skipping build (--no-build)", "warn")
     
-    home = gobol_home()
-    home.mkdir(parents=True, exist_ok=True)
-    (home / "bin").mkdir(parents=True, exist_ok=True)
-    (home / "lib").mkdir(parents=True, exist_ok=True)
+    # ----- 安装 -----
+    install_dir.mkdir(parents=True, exist_ok=True)
+    (install_dir / "bin").mkdir(parents=True, exist_ok=True)
+    (install_dir / "lib").mkdir(parents=True, exist_ok=True)
     
     suffix = ".exe" if is_windows() else ""
     binaries = [f"gobol{suffix}", f"grape{suffix}", f"gobol-lsp{suffix}"]
@@ -112,8 +131,7 @@ def task_build_and_install(no_build=False):
         if not src.exists():
             print_status(f"{name} not found, skipping", "warn")
             continue
-        dst = home / "bin" / name
-        # 直接覆盖全局bin，无版本隔离
+        dst = install_dir / "bin" / name
         if dst.exists():
             print_status(f"Overwriting existing {name}", "warn")
             dst.unlink()
@@ -124,7 +142,7 @@ def task_build_and_install(no_build=False):
     
     print_status("Installing standard library...", "info")
     src_std = Path("std")
-    dst_std = home / "lib" / "std"
+    dst_std = install_dir / "lib" / "std"
     if src_std.exists():
         if dst_std.exists():
             shutil.rmtree(dst_std)
@@ -133,17 +151,51 @@ def task_build_and_install(no_build=False):
     else:
         print_status("std/ directory not found", "warn")
     
-    # 移除版本active标记、versions目录相关逻辑
+    # ----- 写入环境变量到shell配置文件 -----
     if not is_windows():
         shell = os.environ.get("SHELL", "")
         rc = Path.home() / (".zshrc" if "zsh" in shell else ".bashrc")
         marker = "# Added by Gobol installer"
-        path_export = f'\nexport PATH="{home}/bin:$PATH"\n'
+        
         rc_text = rc.read_text() if rc.exists() else ""
-        if marker not in rc_text:
-            with open(rc, "a") as f:
-                f.write(marker + path_export)
-            print_status(f"PATH added to {rc}", "ok")
+        lines = rc_text.splitlines()
+        new_lines = []
+        skip = False
+        for line in lines:
+            if line.strip() == marker:
+                skip = True
+                continue
+            if skip and line.strip().startswith("export GOBOL_HOME="):
+                continue
+            if skip and line.strip().startswith("export GOBOL_INSTALL_DIR="):
+                continue
+            if skip and line.strip().startswith("export PATH=") and "GOBOL_HOME" in line:
+                continue
+            if skip and line == "":
+                continue
+            if skip and line.strip() == "":
+                continue
+            if skip and line.strip() and not line.strip().startswith("#"):
+                skip = False
+                new_lines.append(line)
+            elif not skip:
+                new_lines.append(line)
+        
+        with open(rc, "w") as f:
+            f.write("\n".join(new_lines))
+            f.write(f"\n\n{marker}")
+            f.write(f'\nexport GOBOL_HOME="{install_dir}"')
+            f.write(f'\nexport GOBOL_INSTALL_DIR="{install_dir}"')
+            f.write(f'\nexport PATH="$GOBOL_HOME/bin:$PATH"\n')
+        
+        print_status(f"Environment variables added to {rc}", "ok")
+        print_status(f"Please run: source {rc}  OR restart your terminal", "info")
+    else:
+        print_status("Setting system environment variables...", "info")
+        os.system(f'setx GOBOL_HOME "{install_dir}"')
+        os.system(f'setx GOBOL_INSTALL_DIR "{install_dir}"')
+        os.system(f'setx PATH "%PATH%;{install_dir}\\bin"')
+        print_status("Environment variables set. Please restart your terminal.", "info")
     
     print_status("Installation complete! Gobol is installed globally.", "ok")
     input("Press Enter to return to main menu...")
@@ -153,94 +205,104 @@ def task_uninstall():
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.FAIL}{Colors.BOLD}   Uninstall Gobol   {Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
-    print("\nWarning: This will permanently delete ~/.gobol/")
+    print("\nWarning: This will permanently delete the Gobol installation directory.")
+    install_dir = gobol_home()
+    print(f"Installation directory: {install_dir}")
     confirm = input(f"{Colors.FAIL}Confirm uninstall? (type 'yes' to confirm): {Colors.ENDC}")
     if confirm.lower() != "yes":
         print_status("Uninstall cancelled.", "info")
         input("Press Enter to return to main menu...")
         return
     
-    home = gobol_home()
-    if home.exists():
-        shutil.rmtree(home)
-        print_status("Removed ~/.gobol", "ok")
+    if install_dir.exists():
+        shutil.rmtree(install_dir)
+        print_status(f"Removed {install_dir}", "ok")
         print_status("Please manually clean up your shell PATH in .bashrc/.zshrc", "warn")
     else:
         print_status("No installation found.", "warn")
     input("Press Enter to return to main menu...")
 
-def task_install_plugin():
+def task_extension_guide():
+    """显示 VS Code 和 Neovim 扩展安装指南"""
     clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
-    print(f"{Colors.OKCYAN}{Colors.BOLD}   Install VS Code Plugin   {Colors.ENDC}")
+    print(f"{Colors.OKCYAN}{Colors.BOLD}   VS Code & Neovim Extension Guide   {Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print()
-
-    all_vsix = list(Path(".").rglob("*.vsix"))
-    if not all_vsix:
-        print_status("No .vsix plugin files found in project directory.", "fail")
-        input("Press Enter to return to main menu...")
-        return
-
-    gobol_vsix = [f for f in all_vsix if f.name.startswith("vscode-gobol")]
-    target_list = gobol_vsix if gobol_vsix else all_vsix
-
-    selected: Path
-    if len(target_list) == 1:
-        selected = target_list[0]
-        print_status(f"Auto found plugin: {selected.resolve()}", "ok")
+    
+    # 检测项目中的扩展路径
+    project_root = Path(__file__).resolve().parent
+    vscode_ext_path = project_root / "vscode-gobol"
+    nvim_ext_path = project_root / "nvim-gobol"
+    vsix_files = list(vscode_ext_path.glob("*.vsix")) if vscode_ext_path.exists() else []
+    
+    print(f"{Colors.BOLD}{Colors.OKGREEN}┌─ VS Code Extension{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│  VS Code extension location:{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│  {Colors.OKCYAN}{vscode_ext_path}{Colors.ENDC}")
+    if vsix_files:
+        print(f"{Colors.OKGREEN}│  {Colors.OKGREEN}Found: {vsix_files[0].name}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│  {Colors.BOLD}Installation steps:{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    1. Open VS Code (code .){Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    2. Press Ctrl+Shift+X to open Extensions{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    3. Click the '...' menu → 'Install from VSIX...'{Colors.ENDC}")
+    if vsix_files:
+        print(f"{Colors.OKGREEN}│    4. Select: {Colors.OKCYAN}{vsix_files[0].resolve()}{Colors.ENDC}")
     else:
-        # 多个vsix，列出让用户选择
-        print_status(f"Found {len(target_list)} plugin packages, please select:", "info")
-        for idx, file in enumerate(target_list, 1):
-            print(f"  {idx}. {file.resolve()}")
-        while True:
-            raw = input(f"{Colors.OKBLUE}Input number: {Colors.ENDC}").strip()
-            if raw.isdigit():
-                num = int(raw)
-                if 1 <= num <= len(target_list):
-                    selected = target_list[num - 1]
-                    break
-            print_status("Invalid number, try again", "warn")
-
-    vsix_path = selected
-
-    try:
-        subprocess.run(["code", "--version"], capture_output=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print_status("VS Code 'code' command not found.", "warn")
-        print_status(f"Manual install file path: {vsix_path.resolve()}", "info")
-        input("Press Enter to return to main menu...")
-        return
-
-    print_status(f"Installing VS Code extension: {vsix_path.name}", "info")
-    result = subprocess.run(
-        ["code", "--install-extension", str(vsix_path)],
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        print_status("Plugin installed successfully!", "ok")
-        print_status("Please restart VS Code to activate it.", "info")
+        print(f"{Colors.OKGREEN}│    4. Select the .vsix file from the vscode-gobol/ directory{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│  {Colors.BOLD}Or via command line:{Colors.ENDC}")
+    if vsix_files:
+        print(f"{Colors.OKGREEN}│    code --install-extension {vsix_files[0].resolve()}{Colors.ENDC}")
     else:
-        print_status("Plugin installation failed.", "fail")
-        print(result.stderr)
-    input("Press Enter to return to main menu...")
+        print(f"{Colors.OKGREEN}│    code --install-extension ./vscode-gobol/*.vsix{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}└─{Colors.ENDC}")
+    
+    print()
+    print(f"{Colors.BOLD}{Colors.OKBLUE}┌─ Neovim Extension{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│  Neovim extension location:{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│  {Colors.OKCYAN}{nvim_ext_path}{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Installation steps:{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│    1. Copy the nvim-gobol/ directory to your Neovim config:{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.OKCYAN}cp -r nvim-gobol ~/.config/nvim/pack/plugins/start/gobol{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│    2. Or use a plugin manager (lazy.nvim example):{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.OKCYAN}~/.config/nvim/lua/plugins/gobol.lua{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.GREY}return {{{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.GREY}  dir = \"~/gobol/nvim-gobol\",{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.GREY}  ft = \"gobol\",{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.GREY}  config = function(){Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.GREY}    vim.cmd(\"packadd gobol\"){Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.GREY}  end,{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│       {Colors.GREY}}}{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Notes:{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│    - Ensure Gobol LSP is in PATH: {Colors.OKCYAN}~/.gobol/bin{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│    - LSP config is auto-detected if lsp.lua is sourced{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}└─{Colors.ENDC}")
+
+    # Pause so the user can actually read the guide before the main loop
+    # clears the screen. Without this, print_menu()'s clear_screen() wipes
+    # the output the instant task_extension_guide() returns.
+    input(f"{Colors.GREY}Press Enter to return to main menu...{Colors.ENDC}")
 
 # ==================== Main TUI Loop ====================
 
 def main():
     while True:
-        # 删除版本列表选项，仅保留3个核心功能+退出
         options = [
             "Build & Install Gobol",
-            "Install VS Code Plugin",
+            "Extension Guide (VS Code & Neovim)",
             "Uninstall Gobol",
             "Exit"
         ]
         print_menu(
             "Gobol Installer",
             options,
-            footer=f"GOBOL_HOME: {gobol_home()}"
+            footer=f"GOBOL_INSTALL_DIR: {gobol_home()}"
         )
         choice = input(f"{Colors.OKCYAN}❯ {Colors.ENDC}").strip().lower()
 
@@ -249,7 +311,7 @@ def main():
         elif choice == "1":
             task_build_and_install()
         elif choice == "2":
-            task_install_plugin()
+            task_extension_guide()
         elif choice == "3":
             task_uninstall()
         elif choice == "4":

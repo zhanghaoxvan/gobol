@@ -1,13 +1,23 @@
 use std::process::Command;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once};
-use std::time::Instant;
 
 static INIT: Once = Once::new();
 // Serialize gobol build invocations so parallel tests don't fight over the
 // cargo target dir lock / linker.
 static BUILD_LOCK: Mutex<()> = Mutex::new(());
+
+// Monotonic counter used to derive unique temp-file names. `Instant::now()
+// .elapsed()` is ~0, so pid+nanos collisions were guaranteed under parallel
+// test execution, leading to "Cannot open file" races. A process-wide counter
+// removes the collision.
+static UNIQUIFIER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_id() -> u64 {
+    UNIQUIFIER.fetch_add(1, Ordering::Relaxed)
+}
 
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -80,9 +90,8 @@ pub fn run_gobol(file_path: &str, _verbose: bool) -> TestResult {
     init_test_env();
 
     let temp_dir = std::env::temp_dir();
-    let nanos = Instant::now().elapsed().as_nanos();
-    let pid = std::process::id();
-    let temp_bin = temp_dir.join(format!("gobol_test_bin_{}_{}.out", pid, nanos));
+    let uid = unique_id();
+    let temp_bin = temp_dir.join(format!("gobol_test_bin_{}.out", uid));
 
     // Run the prebuilt gobol binary directly (avoid `cargo run` which
     // contends on the target dir lock when tests run in parallel).
@@ -153,9 +162,8 @@ pub fn run_fixture_test(relative_path: &str) -> TestResult {
 #[allow(dead_code)]
 pub fn run_inline_test(content: &str) -> TestResult {
     let temp_dir = std::env::temp_dir();
-    let nanos = Instant::now().elapsed().as_nanos();
-    let pid = std::process::id();
-    let file_path = temp_dir.join(format!("test_{}_{}.gbl", pid, nanos));
+    let uid = unique_id();
+    let file_path = temp_dir.join(format!("gobol_inline_{}.gbl", uid));
     fs::write(&file_path, content).unwrap();
     let res = run_gobol(file_path.to_str().unwrap(), false);
     let _ = fs::remove_file(file_path);

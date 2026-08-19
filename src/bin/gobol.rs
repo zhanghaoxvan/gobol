@@ -1,6 +1,6 @@
 use gobol::ast_builder::AstBuilder;
 use gobol::ast_printer::AstPrinter;
-use gobol::cranelift::CraneliftBackend;
+use gobol::cranelift::{CraneliftBackend, LinkOptions, host_target_string, target_is_bare_metal};
 use gobol::error::ErrorFormatter;
 use gobol::lexer::Lexer;
 use gobol::semantic_analyzer::{SemanticAnalyzer, BuildMode};
@@ -107,11 +107,43 @@ fn print_help() {
     println!("  -o <name>                Output binary name");
     println!("  --verbose, -v            Enable verbose output");
     println!("  --lib-path <path>        Add a library search path (can be used multiple times)");
+    println!("  --target <triple>        Cross-compile for a target triple (e.g. x86_64-pc-windows-msvc)");
+    println!("  --entry-point <name>     Custom entry symbol (default: main). When set to");
+    println!("                           anything else, a main() function is not required.");
+    println!("  --link-script <path>     Custom linker script (bare-metal / kernel builds)");
+    println!("  --no-std                 Don't link the C runtime (no_std / bare-metal)");
+    println!("  --no-main                Don't require a main() function (kernel entry)");
     println!();
     println!("Examples:");
     println!("  gobol main.gbl                         Debug build (alias for 'gobol build main.gbl --debug')");
     println!("  gobol build main.gbl                   Debug build");
     println!("  gobol build main.gbl --release -o myapp  Release build, output ./myapp");
+    println!("  gobol build boot.gbl --target x86_64-pc-windows-msvc -o myapp");
+    println!("  gobol build boot.gbl --target aarch64-unknown-none --entry-point _start --link-script kernel.ld");
+}
+
+/// Parsed cross-compilation / linking options gathered from CLI flags.
+#[derive(Clone)]
+struct LinkCli {
+    target: Option<String>,
+    entry_point: Option<String>,
+    link_script: Option<String>,
+    no_std: bool,
+    no_main: bool,
+    no_gc: bool,
+}
+
+impl Default for LinkCli {
+    fn default() -> Self {
+        Self {
+            target: None,
+            entry_point: None,
+            link_script: None,
+            no_std: false,
+            no_main: false,
+            no_gc: false,
+        }
+    }
 }
 
 fn main() {
@@ -135,6 +167,7 @@ fn main() {
     let mut build_mode = BuildMode::Debug;
     let mut out_name: Option<String> = None;
     let mut lib_paths_from_cli: Vec<String> = Vec::new();
+    let mut link_cli = LinkCli::default();
 
     let mut i = 1;
     let mut filename: Option<String> = None;
@@ -152,6 +185,24 @@ fn main() {
         } else if args[i] == "-o" && i + 1 < args.len() {
             out_name = Some(args[i + 1].clone());
             i += 2;
+        } else if args[i] == "--target" && i + 1 < args.len() {
+            link_cli.target = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--entry-point" && i + 1 < args.len() {
+            link_cli.entry_point = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--link-script" && i + 1 < args.len() {
+            link_cli.link_script = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--no-std" {
+            link_cli.no_std = true;
+            i += 1;
+        } else if args[i] == "--no-main" {
+            link_cli.no_main = true;
+            i += 1;
+        } else if args[i] == "--no-gc" {
+            link_cli.no_gc = true;
+            i += 1;
         } else if args[i] == "--release" {
             build_mode = BuildMode::Release;
             i += 1;
@@ -177,6 +228,32 @@ fn main() {
         }
     }
 
+    // Effective target: CLI --target, else host. no_std is implied for
+    // bare-metal triples unless explicitly overridden.
+    let target = link_cli.target.clone().unwrap_or_else(host_target_string);
+    if target_is_bare_metal(&target) {
+        link_cli.no_std = true;
+        // A non-main entry point implies "don't require main()".
+        if link_cli
+            .entry_point
+            .as_deref()
+            .map(|e| e != "main")
+            .unwrap_or(false)
+        {
+            link_cli.no_main = true;
+        }
+    }
+    // Any explicit non-main entry point implies no_main regardless of target.
+    if link_cli
+        .entry_point
+        .as_deref()
+        .map(|e| e != "main")
+        .unwrap_or(false)
+        || link_cli.no_main
+    {
+        link_cli.no_main = true;
+    }
+
     if !has_build_subcommand && filename.is_some() {
         build_mode = BuildMode::Debug;
     }
@@ -190,6 +267,15 @@ fn main() {
     };
 
     let source = get_source(&filename);
+    // A global `--no-gc` (from `grape.toml`'s `build.no_gc` or CLI) injects
+    // a synthetic file-level `#![no_gc]` attribute, which the attribute
+    // system then propagates to every function — routing allocations to the
+    // non-GC allocator. This reuses the Task-1 file-attribute machinery.
+    let source = if link_cli.no_gc {
+        format!("#![no_gc]\n{}", source)
+    } else {
+        source
+    };
     let source_for_errors = source.clone();
 
     if is_verbose {
@@ -549,25 +635,48 @@ fn main() {
         println!("======= Step 4: AOT Codegen (Cranelift ObjectModule) =======");
     }
 
-    let runtime_c = match find_runtime_c(&lib_paths) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "{}",
-                "Error: cannot locate runtime.c for AOT linking. \
-                 Set GOBOL_RUNTIME or run from the project / install tree."
-                    .red()
-            );
-            process::exit(2);
+    // For no_std / bare-metal targets there is no C runtime to link.
+    let runtime_c = if link_cli.no_std {
+        None
+    } else {
+        match find_runtime_c(&lib_paths) {
+            Some(p) => Some(p),
+            None => {
+                eprintln!(
+                    "{}",
+                    "Error: cannot locate runtime.c for AOT linking. \
+                     Set GOBOL_RUNTIME or run from the project / install tree."
+                        .red()
+                );
+                process::exit(2);
+            }
         }
     };
     if is_verbose {
-        println!("Using runtime: {}", runtime_c.display());
+        if let Some(p) = &runtime_c {
+            println!("Using runtime: {}", p.display());
+        } else {
+            println!("no_std build: skipping C runtime");
+        }
+        println!("Target: {}", target);
     }
 
-    let backend = CraneliftBackend::new();
+    let backend = match CraneliftBackend::new_for_target(&target) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{}", format!("Target setup failed: {}", e).red());
+            process::exit(2);
+        }
+    };
     let extern_libs = semantic_analyzer.get_extern_libs().clone();
-    if let Err(e) = backend.compile_to_binary(&concrete_ir, &out, runtime_c.to_str().unwrap(), &extern_libs) {
+    let link_opts = LinkOptions {
+        target: target.clone(),
+        runtime_c_path: runtime_c.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        link_libs: extern_libs.clone(),
+        link_script: link_cli.link_script.clone(),
+        entry_point: link_cli.entry_point.clone(),
+    };
+    if let Err(e) = backend.compile_to_binary(&concrete_ir, &out, &link_opts) {
         eprintln!("{}", format!("AOT compilation failed: {}", e).red());
         process::exit(2);
     }

@@ -1,0 +1,34 @@
+import std;
+
+// AST-level #[expand] macro: substitutes argument expressions into the body.
+#[expand]
+func add(a: int, b: int): int {
+    return a + b
+}
+
+// A macro that calls another macro (recursive expansion).
+#[expand]
+func dbl(a: int): int {
+    return add(a, a)
+}
+
+func main() {
+    var x = 5
+    var y = 10
+
+    // add(x, y) expands to (x) + (y), evaluated at runtime → 15.
+    var z = add(x, y)
+    io::println(@"z = {z}")
+
+    // add(x + 1, y * 2) expands to (x + 1) + (y * 2) → 6 + 20 = 26.
+    var w = add(x + 1, y * 2)
+    io::println(@"w = {w}")
+
+    // dbl(x) expands to add(x, x) which recursively expands to (x) + (x) → 10.
+    var d = dbl(x)
+    io::println(@"d = {d}")
+
+    // Literal args still constant-fold: add(3, 4) → 7 at compile time.
+    var lit = add(3, 4)
+    io::println(@"lit = {lit}")
+}

@@ -447,6 +447,7 @@ impl IRBuilder {
         }
     }
 
+    #[allow(dead_code)]
     fn build_arm_body(&mut self, arm: &MatchArm) -> IRBlock {
         let mut block = IRBlock { statements: Vec::new() };
 
@@ -518,6 +519,245 @@ impl IRBuilder {
         }
 
         self.eval_ir_block(body, &mut bindings)
+    }
+
+    /// AST-level `#[expand]` macro expansion: substitute the call arguments
+    /// (which may be arbitrary expressions, not just literals) directly into
+    /// the macro body's result expression, returning the substituted
+    /// `IRExpr`. This is the "macro_rules!"-style expansion — the call site
+    /// is replaced by the macro body with parameters bound to the argument
+    /// expressions.
+    ///
+    /// Example: `#[expand] func add(a, b) { a + b }` called as `add(x, y+1)`
+    /// expands to `(x) + (y + 1)` (as an IR tree — precedence is preserved
+    /// structurally because each operand is its own sub-tree).
+    ///
+    /// Falls back to the existing literal constant-folding path (which
+    /// produces a single `IRExpr::Literal`) when all arguments are literals,
+    /// so `square(7)` still folds to `49` at compile time.
+    fn try_expand_call_ast(&self, name: &str, args: &[IRExpr]) -> Option<IRExpr> {
+        const MAX_DEPTH: usize = 32;
+        self.try_expand_call_ast_depth(name, args, 0, MAX_DEPTH)
+    }
+
+    fn try_expand_call_ast_depth(
+        &self,
+        name: &str,
+        args: &[IRExpr],
+        depth: usize,
+        max_depth: usize,
+    ) -> Option<IRExpr> {
+        if depth >= max_depth {
+            return None; // recursion guard
+        }
+        let (params, body) = self.expand_functions.get(name)?;
+        if params.len() != args.len() {
+            return None;
+        }
+        // The result expression is the body's `return expr;`, or — when there
+        // is no explicit return — the trailing expression statement (the
+        // implicit return). `return expr;` is converted to `expr` per the
+        // design decision in the prompt.
+        let result_expr = self.expand_result_expr(body)?;
+        // Bind parameter names to the call argument expressions, then walk
+        // the result tree replacing each `Variable(param)` with its argument.
+        let env: HashMap<&str, &IRExpr> = params
+            .iter()
+            .zip(args.iter())
+            .map(|(p, a)| (p.as_str(), a))
+            .collect();
+        let mut expanded = self.subst_expr(&result_expr, &env);
+        // Recursively expand any `#[expand]` macro calls that appeared inside
+        // the body (递归展开).
+        expanded = self.expand_nested_macros(&mut expanded, depth + 1, max_depth);
+        Some(expanded)
+    }
+
+    /// Extract the result expression of a macro body: the operand of the
+    /// first `return expr;`, or the trailing `Expression` statement when the
+    /// body uses an implicit return.
+    fn expand_result_expr(&self, block: &IRBlock) -> Option<IRExpr> {
+        // Explicit `return expr;` wins.
+        for stmt in &block.statements {
+            if let IRStmt::Return(Some(e)) = stmt {
+                return Some(e.clone());
+            }
+        }
+        // Otherwise the last bare expression statement is the implicit return.
+        let mut last: Option<IRExpr> = None;
+        for stmt in &block.statements {
+            if let IRStmt::Expression(e) = stmt {
+                last = Some(e.clone());
+            }
+        }
+        last
+    }
+
+    /// Substitute `Variable(name)` nodes inside `expr` with the bound
+    /// argument expressions from `env`. Other expression forms are
+    /// reconstructed recursively, preserving their tree shape so operator
+    /// precedence is encoded structurally (no re-parenthesization needed).
+    fn subst_expr(&self, expr: &IRExpr, env: &HashMap<&str, &IRExpr>) -> IRExpr {
+        match expr {
+            IRExpr::Variable(name) => env
+                .get(name.as_str())
+                .map(|e| (**e).clone())
+                .unwrap_or_else(|| expr.clone()),
+            IRExpr::Binary { op, left, right } => IRExpr::Binary {
+                op: op.clone(),
+                left: Box::new(self.subst_expr(left, env)),
+                right: Box::new(self.subst_expr(right, env)),
+            },
+            IRExpr::Unary { op, operand } => IRExpr::Unary {
+                op: op.clone(),
+                operand: Box::new(self.subst_expr(operand, env)),
+            },
+            IRExpr::Call { func, args, generic_args } => IRExpr::Call {
+                func: func.clone(),
+                args: args.iter().map(|a| self.subst_expr(a, env)).collect(),
+                generic_args: generic_args.clone(),
+            },
+            IRExpr::MethodCall { object, method, args, generic_args } => IRExpr::MethodCall {
+                object: Box::new(self.subst_expr(object, env)),
+                method: method.clone(),
+                args: args.iter().map(|a| self.subst_expr(a, env)).collect(),
+                generic_args: generic_args.clone(),
+            },
+            IRExpr::MemberAccess { object, member } => IRExpr::MemberAccess {
+                object: Box::new(self.subst_expr(object, env)),
+                member: member.clone(),
+            },
+            IRExpr::ArrayIndex { array, index } => IRExpr::ArrayIndex {
+                array: Box::new(self.subst_expr(array, env)),
+                index: Box::new(self.subst_expr(index, env)),
+            },
+            IRExpr::ArrayLiteral(elems) => {
+                IRExpr::ArrayLiteral(elems.iter().map(|a| self.subst_expr(a, env)).collect())
+            }
+            IRExpr::StructLiteral { name, fields } => IRExpr::StructLiteral {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, e)| (n.clone(), self.subst_expr(e, env)))
+                    .collect(),
+            },
+            IRExpr::Cast { expr, target } => IRExpr::Cast {
+                expr: Box::new(self.subst_expr(expr, env)),
+                target: target.clone(),
+            },
+            IRExpr::Assignment { target, value } => IRExpr::Assignment {
+                target: Box::new(self.subst_expr(target, env)),
+                value: Box::new(self.subst_expr(value, env)),
+            },
+            IRExpr::IndirectCall { callee, args } => IRExpr::IndirectCall {
+                callee: Box::new(self.subst_expr(callee, env)),
+                args: args.iter().map(|a| self.subst_expr(a, env)).collect(),
+            },
+            // Leaves: literals, function refs, None — copied as-is.
+            _ => expr.clone(),
+        }
+    }
+
+    /// Walk `expr` and expand any call to a known `#[expand]` macro, so a
+    /// macro body that calls another macro is fully inlined (递归展开). This
+    /// runs after parameter substitution so nested calls have their argument
+    /// expressions already in place.
+    fn expand_nested_macros(&self, expr: &mut IRExpr, depth: usize, max_depth: usize) -> IRExpr {
+        if depth >= max_depth {
+            return expr.clone();
+        }
+        match expr {
+            IRExpr::Call { func, args, generic_args } => {
+                // First recurse into the arguments.
+                let new_args: Vec<IRExpr> = args
+                    .iter()
+                    .map(|a| {
+                        let mut a = a.clone();
+                        self.expand_nested_macros(&mut a, depth, max_depth)
+                    })
+                    .collect();
+                // Then, if this call targets an #[expand] macro, expand it.
+                if let Some(expanded) =
+                    self.try_expand_call_ast_depth(func, &new_args, depth, max_depth)
+                {
+                    let mut e = expanded;
+                    return self.expand_nested_macros(&mut e, depth, max_depth);
+                }
+                IRExpr::Call {
+                    func: func.clone(),
+                    args: new_args,
+                    generic_args: generic_args.clone(),
+                }
+            }
+            IRExpr::Binary { op, left, right } => {
+                let l = self.expand_nested_macros(left, depth, max_depth);
+                let r = self.expand_nested_macros(right, depth, max_depth);
+                IRExpr::Binary { op: op.clone(), left: Box::new(l), right: Box::new(r) }
+            }
+            IRExpr::Unary { op, operand } => IRExpr::Unary {
+                op: op.clone(),
+                operand: Box::new(self.expand_nested_macros(operand, depth, max_depth)),
+            },
+            IRExpr::MethodCall { object, method, args, generic_args } => {
+                let o = self.expand_nested_macros(object, depth, max_depth);
+                let new_args: Vec<IRExpr> = args
+                    .iter()
+                    .map(|a| {
+                        let mut a = a.clone();
+                        self.expand_nested_macros(&mut a, depth, max_depth)
+                    })
+                    .collect();
+                IRExpr::MethodCall { object: Box::new(o), method: method.clone(), args: new_args, generic_args: generic_args.clone() }
+            }
+            IRExpr::MemberAccess { object, member } => IRExpr::MemberAccess {
+                object: Box::new(self.expand_nested_macros(object, depth, max_depth)),
+                member: member.clone(),
+            },
+            IRExpr::ArrayIndex { array, index } => IRExpr::ArrayIndex {
+                array: Box::new(self.expand_nested_macros(array, depth, max_depth)),
+                index: Box::new(self.expand_nested_macros(index, depth, max_depth)),
+            },
+            IRExpr::ArrayLiteral(elems) => IRExpr::ArrayLiteral(
+                elems
+                    .iter()
+                    .map(|a| {
+                        let mut a = a.clone();
+                        self.expand_nested_macros(&mut a, depth, max_depth)
+                    })
+                    .collect(),
+            ),
+            IRExpr::StructLiteral { name, fields } => IRExpr::StructLiteral {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, e)| {
+                        let mut e = e.clone();
+                        (n.clone(), self.expand_nested_macros(&mut e, depth, max_depth))
+                    })
+                    .collect(),
+            },
+            IRExpr::Cast { expr, target } => IRExpr::Cast {
+                expr: Box::new(self.expand_nested_macros(expr, depth, max_depth)),
+                target: target.clone(),
+            },
+            IRExpr::Assignment { target, value } => IRExpr::Assignment {
+                target: Box::new(self.expand_nested_macros(target, depth, max_depth)),
+                value: Box::new(self.expand_nested_macros(value, depth, max_depth)),
+            },
+            IRExpr::IndirectCall { callee, args } => {
+                let c = self.expand_nested_macros(callee, depth, max_depth);
+                let new_args: Vec<IRExpr> = args
+                    .iter()
+                    .map(|a| {
+                        let mut a = a.clone();
+                        self.expand_nested_macros(&mut a, depth, max_depth)
+                    })
+                    .collect();
+                IRExpr::IndirectCall { callee: Box::new(c), args: new_args }
+            }
+            // Leaves — no nested calls to expand.
+            _ => expr.clone(),
+        }
     }
 
     /// Evaluate an IR block at compile time. Returns the value of the
@@ -1736,7 +1976,16 @@ impl AstVisitor for IRBuilder {
                 if let Some(val) = self.try_expand_call(&func_name, &args)
                     .or_else(|| self.try_expand_call(member_name, &args))
                 {
+                    // Literal constant folding (all-args-literal path).
                     self.push_expr(IRExpr::Literal(val));
+                    return;
+                }
+                // AST-level macro expansion: substitute argument expressions
+                // into the macro body (works for non-literal arguments too).
+                if let Some(expanded) = self.try_expand_call_ast(&func_name, &args)
+                    .or_else(|| self.try_expand_call_ast(member_name, &args))
+                {
+                    self.push_expr(expanded);
                     return;
                 }
 
@@ -1752,9 +2001,15 @@ impl AstVisitor for IRBuilder {
             if let Some(id) = callee_expr.as_any().downcast_ref::<Identifier>() {
                 let func_name = id.get_name().to_string();
 
-                // Try #[expand] compile-time evaluation.
+                // Try #[expand] compile-time evaluation (literal fold).
                 if let Some(val) = self.try_expand_call(&func_name, &args) {
                     self.push_expr(IRExpr::Literal(val));
+                    return;
+                }
+                // AST-level macro expansion — substitutes the argument
+                // expressions into the macro body. `add(x, y)` → `x + y`.
+                if let Some(expanded) = self.try_expand_call_ast(&func_name, &args) {
+                    self.push_expr(expanded);
                     return;
                 }
 
@@ -2073,12 +2328,13 @@ impl AstVisitor for IRBuilder {
             }
             // 添加变量部分
             if let Some(ref value) = var.value {
-                // 需要克隆或重新构建表达式
-                // 由于表达式是 trait 对象，我们只能重新访问
-                // 这里简化处理
-                let mut temp_builder = IRBuilder::new();
-                value.accept(&mut temp_builder);
-                let var_expr = temp_builder.pop_expr();
+                // Visit the embedded expression with the *current* builder so
+                // that `#[expand]` macros (stored in `self.expand_functions`)
+                // are inlined here too. A fresh `IRBuilder::new()` would have
+                // an empty macro table, so `@"{add(x, y)}"` inside a format
+                // string would emit a runtime call instead of the inlined body.
+                value.accept(self);
+                let var_expr = self.pop_expr();
                 expr = IRExpr::Binary {
                     op: "+".to_string(),
                     left: Box::new(expr),

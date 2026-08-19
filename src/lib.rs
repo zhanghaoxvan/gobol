@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod ast_builder;
 pub mod ast_printer;
+pub mod config;
 pub mod cranelift;
 pub mod ir;
 pub mod environment;

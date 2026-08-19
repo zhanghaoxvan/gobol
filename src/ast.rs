@@ -437,12 +437,17 @@ impl Type for GenericType {
 
 pub struct Program {
     statements: Vec<Box<dyn Statement>>,
+    /// File-level attributes (`#![attr]`). These propagate to every
+    /// top-level statement in the program unless a statement overrides
+    /// them with its own `#[attr]`.
+    pub attributes: Vec<Attribute>,
 }
 
 impl Program {
     pub fn new() -> Self {
         Program {
             statements: Vec::new(),
+            attributes: Vec::new(),
         }
     }
 
@@ -452,6 +457,15 @@ impl Program {
 
     pub fn get_statements(&self) -> &Vec<Box<dyn Statement>> {
         &self.statements
+    }
+}
+
+impl Attributable for Program {
+    fn get_attributes(&self) -> &Vec<Attribute> {
+        &self.attributes
+    }
+    fn set_attributes(&mut self, attrs: Vec<Attribute>) {
+        self.attributes = attrs;
     }
 }
 
@@ -2351,14 +2365,30 @@ impl FormatString {
                 let callee_str = expr[..open_idx].trim();
                 let args_str = &expr[open_idx + 1..close_idx];
 
-                let callee = if callee_str.is_empty() {
-                    return None;
-                } else {
-                    Self::parse_expression(callee_str)?
-                };
+                // Empty callee with parens spanning the whole expression is a
+                // pure grouping `(expr)`, not a call — recurse into the inner
+                // content so `@"{(x + 1) + (y * 2)}"` parses correctly.
+                if callee_str.is_empty() {
+                    return Self::parse_expression(args_str);
+                }
 
+                let callee = Self::parse_expression(callee_str)?;
                 let args = Self::parse_arg_list(args_str);
                 return Some(Box::new(FunctionCall::new(Some(callee), args)));
+            }
+        }
+
+        // 二元运算符: 找到深度 0 处优先级最低、最靠右的运算符并在此切分
+        // (左结合)。让 `@"{x + 1}"`、`@"{add(x + 1, y * 2)}"` 里的插值
+        // 能解析算术/比较表达式。此前只支持标识符/字面量/调用/成员访问，
+        // 二元表达式会被静默丢弃，导致 `@"{a + b}"` 输出空值。
+        if let Some((op_start, op_end, op)) = Self::find_binary_split(expr) {
+            let left = expr[..op_start].trim();
+            let right = expr[op_end..].trim();
+            if !left.is_empty() && !right.is_empty() {
+                if let (Some(l), Some(r)) = (Self::parse_expression(left), Self::parse_value(right)) {
+                    return Some(Box::new(BinaryExpression::new(Some(l), &op, Some(r))));
+                }
             }
         }
 
@@ -2429,6 +2459,102 @@ impl FormatString {
             }
         }
         None
+    }
+
+    /// Precedence of binary operators used inside format-string
+    /// interpolations. Lower number = lower precedence = binds looser.
+    /// Returns None for non-operators.
+    fn fmt_op_prec(op: &str) -> Option<u8> {
+        match op {
+            "==" | "!=" | "<" | ">" | "<=" | ">=" => Some(1),
+            "+" | "-" => Some(2),
+            "*" | "/" | "%" => Some(3),
+            _ => None,
+        }
+    }
+
+    /// True if the character before byte index `i` (skipping whitespace) is an
+    /// operand terminator (`)`, `]`, digit, identifier char, or closing quote).
+    /// Used to distinguish a binary `-`/`+` (e.g. `a - b`) from a unary one
+    /// (e.g. `a + -b`), so a leading unary sign isn't misread as subtraction.
+    fn prev_is_operand(s: &str, i: usize) -> bool {
+        let bytes = s.as_bytes();
+        let mut j = i;
+        while j > 0 {
+            j -= 1;
+            let c = bytes[j] as char;
+            if c.is_whitespace() {
+                continue;
+            }
+            return matches!(
+                c,
+                ')' | ']' | '0'..='9' | 'a'..='z' | 'A'..='Z' | '_' | '"'
+            );
+        }
+        false
+    }
+
+    /// A found binary operator and its byte span in the source string.
+    ///
+    /// Scan `expr` (at paren/bracket/brace depth 0, skipping string literals)
+    /// for binary operators and return the **rightmost lowest-precedence** one
+    /// — the left-associative split point. For `a - b - c` this picks the second
+    /// `-`, giving `(a - b) - c`. Returns None if there is no binary operator.
+    /// Returns `(op_start, op_end, op)`.
+    fn find_binary_split(expr: &str) -> Option<(usize, usize, String)> {
+        let bytes = expr.as_bytes();
+        let mut depth: i32 = 0;
+        // (precedence, op_start, op_end). Lower precedence wins; ties break to
+        // the rightmost (later position) for left-associativity.
+        let mut best: Option<(u8, usize, usize, String)> = None;
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            // Skip over string literals so operators/braces inside them don't
+            // affect depth or get matched.
+            if c == '"' {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] as char == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] as char == '"' {
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1; // consume closing quote
+                continue;
+            }
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 && i > 0 && Self::prev_is_operand(expr, i) {
+                // Two-character operators first (==, !=, <=, >=).
+                if i + 1 < bytes.len() {
+                    if let Ok(s2) = std::str::from_utf8(&bytes[i..i + 2]) {
+                        if let Some(p) = Self::fmt_op_prec(s2) {
+                            if best.as_ref().map_or(true, |b| p <= b.0) {
+                                best = Some((p, i, i + 2, s2.to_string()));
+                            }
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+                let s1 = c.to_string();
+                if let Some(p) = Self::fmt_op_prec(&s1) {
+                    if best.as_ref().map_or(true, |b| p <= b.0) {
+                        best = Some((p, i, i + 1, s1));
+                    }
+                }
+            }
+            i += 1;
+        }
+        best.map(|(_, start, end, op)| (start, end, op))
     }
 
     fn parse_arg_list(s: &str) -> Option<Vec<Box<dyn Expression>>> {

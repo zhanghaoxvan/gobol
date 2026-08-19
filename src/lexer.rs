@@ -195,6 +195,11 @@ impl Lexer {
                 // attributes (`#[intrinsic(...)]`, `#[builtin(...)]`, etc.).
                 break;
             }
+            if c == '#' && self.peek_next() == '!' {
+                // File-level attribute `#![attr]` — emit `#![` as a token so
+                // the parser can distinguish it from node-level `#[attr]`.
+                break;
+            }
             break;
         }
 
@@ -391,6 +396,20 @@ impl Lexer {
             }
             '#' => {
                 self.consume();
+                if self.peek() == '!' {
+                    self.consume(); // consume '!'
+                    if self.peek() == '[' {
+                        self.consume(); // consume '['
+                        return Token::with_pos(TokenType::Operator, "#![", tok_line, tok_col);
+                    }
+                    // `#!` not followed by `[` is a shebang line on Unix
+                    // (`#!/usr/bin/...`). Skip to end of line so the parser
+                    // never sees it.
+                    while !self.is_source_end() && self.peek() != '\n' {
+                        self.consume();
+                    }
+                    return self.get_next_token();
+                }
                 if self.peek() == '[' {
                     self.consume();
                     return Token::with_pos(TokenType::Operator, "#[", tok_line, tok_col);

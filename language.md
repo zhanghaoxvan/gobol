@@ -248,9 +248,8 @@ impl New for Point {
 }
 
 impl Point {
-    
     func from_origin(): Point {
-        Point::new(0, 0)
+        new Point(0, 0)
     }
 }
 ```
@@ -776,6 +775,7 @@ for i, v in my_vec {
 
 ```gobol
 #[dynamic_args]
+#[expand]
 #[header("std/runtime.h")]
 #[library_features(hidden = true)]
 #[internal]
@@ -788,6 +788,7 @@ for i, v in my_vec {
 | Attribute / 属性 | Applies to / 适用于 | Description / 描述 |
 |:---|:---|:---|
 | `#[dynamic]` | Trait method / Trait 方法 | Allow impls to define arbitrary functions / 允许实现者自由定义函数 |
+| `#[expand]` | Function / 函数 | AST-level macro; inline body at every call site (see §14) / AST 级宏；在每个调用点内联函数体（见 §14） |
 | `#[header("path")]` | `extern "C"` block / 外部块 | C header for function validation / 用于函数验证的 C 头文件 |
 | `#[library_features(hidden = true)]` | Module / 模块 | Hide module prefix in qualified names / 隐藏模块前缀 |
 | `#[internal]` | Function, Struct, Trait | Not exported; module-private / 不导出，模块私有 |
@@ -834,7 +835,129 @@ All standard library types are GC-managed by default — no stdlib type uses `#[
 
 ---
 
-## 14. Complete Example / 完整示例
+## 14. Metaprogramming / 元编程
+
+### 14.1 `#[expand]` Macros / `#[expand]` 宏
+
+Gobol provides AST-level macros via the `#[expand]` attribute. A macro is declared like a normal function, but the compiler **inlines its body at every call site** instead of emitting a real function call. This enables zero-cost abstractions: no call overhead, no stack frame, and the body becomes visible to constant folding and other optimizations.
+
+Gobol 通过 `#[expand]` 属性提供 AST 级别的宏。宏像普通函数一样声明，但编译器会在每个调用点**内联其函数体**，而不是生成真正的函数调用。这实现了零开销抽象：没有调用开销，没有栈帧，并且函数体可被常量折叠等优化识别。
+
+**Definition / 定义:**
+
+```gobol
+#[expand]
+func add(a: int, b: int): int {
+    return a + b
+}
+
+// Implicit-return form is also allowed / 隐式返回形式同样允许
+#[expand]
+func square(n: int): int {
+    n * n
+}
+
+// String macros work too / 字符串宏同样适用
+#[expand]
+func greet(name: str): str {
+    "hello, " + name
+}
+```
+
+**Invocation / 调用:**
+
+A macro is called exactly like a regular function — there is no special call syntax.
+
+宏的调用与普通函数完全一致——没有特殊的调用语法。
+
+```gobol
+var z   = add(5, 10);             // 15
+var s   = square(7);               // 49
+var msg = greet("world");          // "hello, world"
+```
+
+### 14.2 Two Expansion Modes / 两种展开模式
+
+The compiler chooses the mode based on whether every argument at the call site is a compile-time literal.
+
+编译器根据调用点每个参数是否为编译期字面量来选择展开模式。
+
+| Mode / 模式 | Condition / 条件 | Behavior / 行为 |
+|:---|:---|:---|
+| **Constant folding / 常量折叠** | All arguments are literals / 所有参数均为字面量 | Body is evaluated at compile time; the call is replaced with a single constant / 函数体在编译期求值；调用被替换为单个常量 |
+| **Argument substitution / 参数替换** | Any argument is a variable or expression / 任一参数为变量或表达式 | Body is inlined at the call site with each parameter replaced by its (parenthesized) argument; evaluated at runtime / 函数体在调用点内联，每个参数被（带括号的）实参替换；运行期求值 |
+
+```gobol
+#[expand]
+func add(a: int, b: int): int { return a + b }
+
+var x = 5;
+var y = 10;
+
+var lit = add(3, 4);             // literal args → compile-time → 7
+var z   = add(x, y);             // expr args → inlined to (x) + (y) → 15
+var w   = add(x + 1, y * 2);     // inlined to (x + 1) + (y * 2) → 26
+```
+
+Arguments are parenthesized during substitution so that operator precedence inside the body is never altered by the surrounding expression.
+
+替换时实参会加上括号，因此函数体内部的运算符优先级不会受外层表达式影响。
+
+### 14.3 Recursive Expansion / 递归展开
+
+A macro body may call other `#[expand]` macros. The compiler recursively inlines them until no macro calls remain.
+
+宏的函数体可以调用其他 `#[expand]` 宏。编译器会递归内联，直到不再含有宏调用为止。
+
+```gobol
+#[expand]
+func add(a: int, b: int): int { return a + b }
+
+#[expand]
+func dbl(a: int): int { return add(a, a) }
+
+var d = dbl(5);                  // dbl(5) → add(5, 5) → (5) + (5) → 10
+var q = dbl(x + 1);              // → add(x + 1, x + 1) → (x + 1) + (x + 1)
+```
+
+### 14.4 Macros in Format Strings / 格式串中的宏
+
+Macro calls are recognized inside `@"{...}"` interpolations, including calls whose arguments use binary operators. The format-string visitor shares the macro table with the surrounding builder, so the same inlining rules apply.
+
+宏调用在 `@"{...}"` 插值中也能识别，包括参数含二元运算符的情况。格式串访问器与外层构建器共享宏表，因此适用相同的内联规则。
+
+```gobol
+io::println(@"z = {add(x, y)}");           // 15
+io::println(@"w = {add(x + 1, y * 2)}");    // 26
+io::println(@"lit = {add(3, 4)}");          // 7 (constant-folded)
+```
+
+### 14.5 Compile-Time Intrinsics / 编译期内置函数
+
+Inside an `#[expand]` body, the `file()` and `line()` intrinsics return the current source path and line number as compile-time values. They are only valid within `#[expand]` context.
+
+在 `#[expand]` 函数体内，`file()` 和 `line()` 内置函数以编译期值返回当前源文件路径和行号。它们仅在 `#[expand]` 上下文中有效。
+
+```gobol
+#[expand]
+func source_file(): str {
+    file()
+}
+
+var f = source_file();           // → the current .gbl file path
+```
+
+### 14.6 Rules & Caveats / 规则与注意事项
+
+- `#[expand]` applies to `func` declarations only / 仅适用于 `func` 声明。
+- A macro must have a fully-typed signature; parameter types are required / 宏必须具有完整类型签名；参数类型不可省略。
+- Macros are **not first-class values**: they cannot be passed as arguments, stored in variables, or returned / 宏不是一等值：不能作为参数传递、存入变量或被返回。
+- Macro recursion must terminate at a non-macro call; non-terminating macro recursion is a compile error / 宏递归必须终止于非宏调用；非终止的宏递归会触发编译错误。
+- Because inlining duplicates the body at every call site, prefer `#[expand]` for small, frequently-called hot functions / 由于内联会在每个调用点复制函数体，`#[expand]` 宜用于短小且频繁调用的热点函数。
+
+---
+
+## 15. Complete Example / 完整示例
 
 ```gobol
 import io;
@@ -897,7 +1020,7 @@ func main(): int {
 
 ---
 
-## 15. Runtime / 运行时
+## 16. Runtime / 运行时
 
 Gobol's C runtime (`std/runtime/`) is a cross-platform library supporting both POSIX (Linux, macOS) and Windows via `platform.h` abstractions. It is organized into modular components:
 

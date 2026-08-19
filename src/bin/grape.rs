@@ -55,7 +55,12 @@ type Result<T> = std::result::Result<T, GrapeError>;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GrapeToml {
     pub project: Project,
+    #[serde(default)]
     pub dependencies: HashMap<String, DependencySpec>,
+    /// Optional `[build]` section: target triple, entry point, no_std,
+    /// no_gc, link script, opt level. Absent for plain hosted apps.
+    #[serde(default)]
+    pub build: Option<gobol::config::BuildConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -273,6 +278,7 @@ fn cmd_init() -> Result<()> {
             license: None,
         },
         dependencies: HashMap::new(),
+        build: None,
     };
 
     let toml_str =
@@ -534,41 +540,98 @@ fn cmd_list() -> Result<()> {
 // ============ cmd_run — build + optionally execute ============
 
 fn cmd_run(args: &[String]) -> Result<()> {
-    let is_verbose = args.iter().any(|a| a == "--verbose");
-    let no_check = args.iter().any(|a| a == "--no-check");
-    let is_release = args.iter().any(|a| a == "--release");
-    let compile_only = args.iter().any(|a| a == "-c" || a == "--compile-only");
-
     println!("{}", " Running Gobol program...".bold().green());
-
-    // Call shared build logic; compile_only controls execution.
-    build_project(args, is_release, is_verbose, no_check, compile_only)
+    // run => compile + execute.
+    build_project(args, false)
 }
 
 // ============ cmd_build — independent build command ============
 
 fn cmd_build(args: &[String]) -> Result<()> {
-    let is_verbose = args.iter().any(|a| a == "--verbose");
-    let is_release = args.iter().any(|a| a == "--release");
-
     println!("{}", " Building Gobol project...".bold().green());
+    // build only, never execute.
+    build_project(args, true)
+}
 
-    // Build only, never execute.
-    build_project(args, is_release, is_verbose, false, true)
+/// Build options parsed from the `grape run`/`grape build` CLI, BEFORE merging
+/// with the `[build]` section of `grape.toml`. `program_args` captures the
+/// tokens after a `--` separator (passed to the target program on run).
+#[derive(Default)]
+struct BuildCli {
+    verbose: bool,
+    no_check: bool,
+    release: bool,
+    out: Option<String>,
+    target: Option<String>,
+    entry_point: Option<String>,
+    link_script: Option<String>,
+    no_std: bool,
+    no_gc: bool,
+    no_main: bool,
+    program_args: Vec<String>,
+}
+
+fn parse_build_cli(args: &[String]) -> BuildCli {
+    let mut cli = BuildCli::default();
+    let mut i = 0;
+    let mut after_dd = false; // past `--`
+    while i < args.len() {
+        let a = &args[i];
+        if after_dd {
+            cli.program_args.push(a.clone());
+            i += 1;
+            continue;
+        }
+        match a.as_str() {
+            "--" => after_dd = true,
+            "--verbose" | "-v" => cli.verbose = true,
+            "--no-check" => cli.no_check = true,
+            "--release" => cli.release = true,
+            "--debug" => cli.release = false,
+            "-o" | "--output" => {
+                if let Some(v) = args.get(i + 1) {
+                    cli.out = Some(v.clone());
+                    i += 1;
+                }
+            }
+            "--target" => {
+                if let Some(v) = args.get(i + 1) {
+                    cli.target = Some(v.clone());
+                    i += 1;
+                }
+            }
+            "--entry-point" => {
+                if let Some(v) = args.get(i + 1) {
+                    cli.entry_point = Some(v.clone());
+                    i += 1;
+                }
+            }
+            "--link-script" => {
+                if let Some(v) = args.get(i + 1) {
+                    cli.link_script = Some(v.clone());
+                    i += 1;
+                }
+            }
+            "--no-std" => cli.no_std = true,
+            "--no-gc" => cli.no_gc = true,
+            "--no-main" => cli.no_main = true,
+            // `grape run --release` etc. handled above; unknown flags are
+            // silently ignored here (gobol may know about them later).
+            _ => {}
+        }
+        i += 1;
+    }
+    cli
 }
 
 /// Shared build logic used by both `grape run` and `grape build`.
 ///
-/// * `compile_only`: if true, skip binary execution (grape build).
-/// * `is_release`:  pass `--release` to gobol.
-/// * `is_verbose`:  pass `--verbose` to gobol + print extra info.
-fn build_project(
-    args: &[String],
-    is_release: bool,
-    is_verbose: bool,
-    no_check: bool,
-    compile_only: bool,
-) -> Result<()> {
+/// * `compile_only`: true for `grape build` (skip execution).
+///
+/// Merges the `[build]` section of `grape.toml` with CLI overrides (CLI wins),
+/// translates the result into `gobol` flags, builds, and — for `grape run` —
+/// executes the result (directly on the host, or via QEMU for cross targets).
+fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     if !Path::new(GRAPE_TOML).exists() {
         return Err(GrapeError::NotFound(
             "grape.toml not found. Run 'grape init' first.".to_string(),
@@ -576,20 +639,31 @@ fn build_project(
     }
 
     let config = read_grape_toml()?;
+    let cli = parse_build_cli(args);
 
-    let out_name = args
-        .iter()
-        .position(|a| a == "-o" || a == "--output")
-        .and_then(|i| args.get(i + 1).cloned())
+    // Merge the manifest's optional [build] section with CLI overrides.
+    let build_cfg = config.build.clone().unwrap_or_default();
+    let resolved = build_cfg.resolve(
+        cli.target.as_deref(),
+        cli.entry_point.as_deref(),
+        cli.link_script.as_deref(),
+        cli.release,
+        cli.no_std,
+        cli.no_gc,
+    );
+
+    let out_name = cli
+        .out
+        .clone()
         .unwrap_or_else(|| config.project.name.clone());
 
     // Lock file management
-    if !no_check && !Path::new(GRAPE_LOCK).exists() {
-        if is_verbose {
+    if !cli.no_check && !Path::new(GRAPE_LOCK).exists() {
+        if cli.verbose {
             println!("grape.lock not found, generating...");
         }
         update_lock_file(&config)?;
-    } else if !no_check {
+    } else if !cli.no_check {
         verify_lock_file(&config)?;
     }
 
@@ -602,8 +676,8 @@ fn build_project(
     }
 
     // Resolve dependencies into lib/<name>/
-    let mut resolved: HashSet<String> = HashSet::new();
-    resolve_dependencies(&config, &mut resolved, is_verbose)?;
+    let mut resolved_deps: HashSet<String> = HashSet::new();
+    resolve_dependencies(&config, &mut resolved_deps, cli.verbose)?;
 
     let mut lib_paths = build_lib_paths(&config);
 
@@ -615,28 +689,70 @@ fn build_project(
         }
     }
 
-    if is_verbose {
+    if cli.verbose {
         println!("Project: {}", config.project.name);
         println!("Entry: {}", entry_file);
         println!("Output: {}", out_name);
+        println!("Target: {}", resolved.target_or_host());
         println!("Lib paths: {:?}", lib_paths);
     }
 
-    // Invoke gobol
+    // Build the final executable name. Output path spec:
+    //   target/{target_triple}/{debug|release}/{project_name}
+    // The plain `-o <name>` path is kept when the user passed it explicitly;
+    // otherwise we emit into the canonical target dir so cross builds don't
+    // clobber host builds of the same project.
+    let profile = if resolved.release { "release" } else { "debug" };
+    let target_triple = resolved.target_or_host();
+    let target_dir = Path::new("target").join(&target_triple).join(profile);
+    let exe_name = gobol::cranelift::ensure_exe_extension(
+        &target_triple,
+        &out_name,
+    );
+    let final_out: PathBuf = if cli.out.is_some() {
+        // User asked for a specific path; honour it (still add .exe on Windows).
+        PathBuf::from(gobol::cranelift::ensure_exe_extension(
+            &target_triple,
+            &out_name,
+        ))
+    } else {
+        fs::create_dir_all(&target_dir).map_err(GrapeError::Io)?;
+        target_dir.join(&exe_name)
+    };
+
+    // Invoke gobol, translating the resolved build options into flags.
     let mut cmd = process::Command::new("gobol");
     cmd.arg("build")
         .arg(entry_file)
         .arg("-o")
-        .arg(&out_name);
-    if is_release {
+        .arg(final_out.to_string_lossy().as_ref());
+    if resolved.release {
         cmd.arg("--release");
     } else {
         cmd.arg("--debug");
     }
+    if let Some(t) = &resolved.target {
+        cmd.arg("--target").arg(t);
+    }
+    if let Some(ep) = &resolved.entry_point {
+        cmd.arg("--entry-point").arg(ep);
+    }
+    if let Some(ls) = &resolved.link_script {
+        cmd.arg("--link-script").arg(ls);
+    }
+    if resolved.no_std {
+        cmd.arg("--no-std");
+    }
+    if resolved.no_gc {
+        cmd.arg("--no-gc");
+    }
+    if resolved.no_main {
+        cmd.arg("--no-main");
+    }
     for path in &lib_paths {
         cmd.arg("--lib-path").arg(path);
     }
-    if is_verbose {
+    if cli.verbose {
         cmd.arg("--verbose");
     }
 
@@ -652,19 +768,84 @@ fn build_project(
 
     // Execute the compiled binary unless compile-only.
     if !compile_only {
-        let exe_path = if out_name.contains('/') || out_name.contains('\\') {
-            out_name.clone()
-        } else {
-            format!("./{}", out_name)
-        };
-        let run_status = process::Command::new(&exe_path).status().map_err(|e| {
-            GrapeError::CommandFailed(format!("Failed to execute '{}': {}", exe_path, e))
-        })?;
+        run_compiled_binary(&final_out, &target_triple, &cli.program_args, cli.verbose)?;
+    }
+
+    Ok(())
+}
+
+/// Run a freshly built binary. On the host target it is executed directly;
+/// for cross-compiled targets an appropriate QEMU is invoked automatically
+/// (`qemu-<arch>` for Linux user targets, `qemu-system-<arch> -kernel` for
+/// bare-metal `*-unknown-none` targets).
+fn run_compiled_binary(
+    exe: &Path,
+    target: &str,
+    program_args: &[String],
+    verbose: bool,
+) -> Result<()> {
+    let host = gobol::cranelift::host_target_string();
+    if target == host {
+        let run_status = process::Command::new(exe)
+            .args(program_args)
+            .status()
+            .map_err(|e| {
+                GrapeError::CommandFailed(format!("Failed to execute '{}': {}", exe.display(), e))
+            })?;
         if !run_status.success() {
             process::exit(run_status.code().unwrap_or(1));
         }
+        return Ok(());
     }
 
+    // Cross target — choose a QEMU.
+    let arch = target.split('-').next().unwrap_or("");
+    let is_bare = gobol::cranelift::target_is_bare_metal(target);
+    let qemu = if is_bare {
+        format!("qemu-system-{}", arch)
+    } else if target.contains("linux") {
+        // qemu-user names: qemu-aarch64, qemu-arm, qemu-riscv64, qemu-x86_64
+        format!("qemu-{}", arch)
+    } else {
+        // Non-Linux cross target (e.g. windows-msvc from linux) can't be run
+        // directly — report clearly.
+        eprintln!(
+            "{}",
+            format!(
+                "Cannot run cross-compiled binary for target '{}' on host. \
+                 Built at: {}",
+                target,
+                exe.display()
+            )
+            .yellow()
+        );
+        return Ok(());
+    };
+
+    if verbose {
+        println!("Cross-running {} via {}", exe.display(), qemu);
+    }
+    let mut cmd = process::Command::new(&qemu);
+    if is_bare {
+        // Bare-metal: load the binary as the kernel image.
+        cmd.arg("-kernel").arg(exe);
+        // A common default: 256M RAM, no graphics.
+        cmd.args(["-m", "256", "-nographic"]);
+    } else {
+        cmd.arg(exe);
+    }
+    cmd.args(program_args);
+    let run_status = cmd.status().map_err(|e| {
+        GrapeError::CommandFailed(format!(
+            "Failed to run '{}' ({}). Is QEMU installed? {}",
+            qemu,
+            exe.display(),
+            e
+        ))
+    })?;
+    if !run_status.success() {
+        process::exit(run_status.code().unwrap_or(1));
+    }
     Ok(())
 }
 
@@ -1137,6 +1318,7 @@ mod tests {
                 );
                 m
             },
+            build: None,
         };
         let paths = build_lib_paths(&config);
         // All paths must be relative (no hardcoded separators).

@@ -15,6 +15,11 @@ pub struct AstBuilder {
     error_formatter: Option<ErrorFormatter>,
     /// Structured errors for LSP: (line, col, message)
     pub structured_errors: Vec<(i32, i32, String)>,
+    /// File-level attributes (`#![attr]`) parsed at the top of the source.
+    /// Merged into each top-level statement's own `#[...]` (closest-wins:
+    /// a statement's local attribute with the same name overrides the
+    /// file-level one).
+    file_attributes: Vec<Attribute>,
 }
 
 impl AstBuilder {
@@ -34,6 +39,7 @@ impl AstBuilder {
             error_message: Vec::new(),
             error_formatter: None,
             structured_errors: Vec::new(),
+            file_attributes: Vec::new(),
         }
     }
 
@@ -74,72 +80,100 @@ impl AstBuilder {
 
     // ==================== Attribute parsing ====================
 
-    /// Parse a sequence of `#[...]` attributes.
+    /// Parse a sequence of `#[...]` node-level attributes.
     /// Handles: `#[name]`, `#[name("value")]`, `#[name(key = "value")]`, `#[name(key = "v", k2 = "v2")]`
     fn parse_attributes(&mut self) -> Vec<Attribute> {
         let mut attrs = Vec::new();
         while self.match_value("#[") {
             self.advance(); // consume '#['
-            if !self.match_type(&TokenType::Identifier) {
-                self.log_error("Expected attribute name after '#['");
-                while !self.match_value("]") && !self.match_type(&TokenType::EndOfFile) {
-                    self.advance();
-                }
-                if self.match_value("]") { self.advance(); }
-                continue;
+            if let Some(attr) = self.parse_attribute_body() {
+                attrs.push(attr);
+                // Allow newlines between an attribute and the statement it
+                // decorates (e.g. `#[expand]\nfunc ...`).
+                self.consume_end_of_line();
             }
-            let name = self.current_token().value.clone();
-            self.advance();
-
-            let mut attr = Attribute::new(name);
-
-            // Parse attribute arguments: (args) or (key = value, ...)
-            if self.match_value("(") {
-                self.advance(); // consume '('
-                while !self.match_value(")") && !self.match_type(&TokenType::EndOfFile) {
-                    // Check for named arg: key = "value"
-                    if self.match_type(&TokenType::Identifier) {
-                        let key = self.current_token().value.clone();
-                        let next = self.peek_next_token();
-                        if next.value == "=" {
-                            self.advance(); // consume key
-                            self.advance(); // consume '='
-                            let val = self.parse_attribute_value();
-                            attr.named.push((key, val));
-                        } else {
-                            // Positional string value
-                            self.advance(); // consume key (treated as value)
-                            let val = self.parse_attribute_value();
-                            attr.value = Some(val);
-                        }
-                    } else if self.match_type(&TokenType::String) {
-                        let val = self.current_token().value.clone();
-                        self.advance();
-                        attr.value = Some(val);
-                    } else {
-                        // Just consume whatever token is there
-                        self.advance();
-                    }
-                    if self.match_value(",") {
-                        self.advance();
-                    }
-                }
-                if self.match_value(")") {
-                    self.advance(); // consume ')'
-                }
-            }
-
-            if !self.match_value("]") {
-                self.log_error("Expected ']' to close attribute");
-            } else {
-                self.advance(); // consume ']'
-            }
-            attrs.push(attr);
-            // Allow newlines between an attribute and the statement it
-            // decorates (e.g. `#[expand]\nfunc ...`).
-            self.consume_end_of_line();
         }
         attrs
+    }
+
+    /// Parse a sequence of `#![...]` file-level attributes. These may only
+    /// appear at the very top of a source file and apply to the whole
+    /// module/program (e.g. `#![no_gc]`). They are stored on
+    /// `Program.attributes` and propagated to all top-level statements.
+    fn parse_file_attributes(&mut self) -> Vec<Attribute> {
+        let mut attrs = Vec::new();
+        while self.match_value("#![") {
+            self.advance(); // consume '#!['
+            if let Some(attr) = self.parse_attribute_body() {
+                attrs.push(attr);
+                self.consume_end_of_line();
+            }
+        }
+        attrs
+    }
+
+    /// Parse the body of a single attribute (after `#[` or `#![` has been
+    /// consumed): `name`, optional `(args)`, then the closing `]`.
+    /// Returns `None` and logs an error if the name is missing.
+    fn parse_attribute_body(&mut self) -> Option<Attribute> {
+        if !self.match_type(&TokenType::Identifier) {
+            self.log_error("Expected attribute name after '#['");
+            while !self.match_value("]") && !self.match_type(&TokenType::EndOfFile) {
+                self.advance();
+            }
+            if self.match_value("]") {
+                self.advance();
+            }
+            return None;
+        }
+        let name = self.current_token().value.clone();
+        self.advance();
+
+        let mut attr = Attribute::new(name);
+
+        // Parse attribute arguments: (args) or (key = value, ...)
+        if self.match_value("(") {
+            self.advance(); // consume '('
+            while !self.match_value(")") && !self.match_type(&TokenType::EndOfFile) {
+                // Check for named arg: key = "value"
+                if self.match_type(&TokenType::Identifier) {
+                    let key = self.current_token().value.clone();
+                    let next = self.peek_next_token();
+                    if next.value == "=" {
+                        self.advance(); // consume key
+                        self.advance(); // consume '='
+                        let val = self.parse_attribute_value();
+                        attr.named.push((key, val));
+                    } else {
+                        // Positional string value
+                        self.advance(); // consume key (treated as value)
+                        let val = self.parse_attribute_value();
+                        attr.value = Some(val);
+                    }
+                } else if self.match_type(&TokenType::String) {
+                    let val = self.current_token().value.clone();
+                    self.advance();
+                    attr.value = Some(val);
+                } else {
+                    // Just consume whatever token is there
+                    self.advance();
+                }
+                if self.match_value(",") {
+                    self.advance();
+                }
+            }
+            if self.match_value(")") {
+                self.advance(); // consume ')'
+            }
+        }
+
+        if !self.match_value("]") {
+            self.log_error("Expected ']' to close attribute");
+            None
+        } else {
+            self.advance(); // consume ']'
+            Some(attr)
+        }
     }
 
     /// Returns true when the current token can be used as a name binding
@@ -363,11 +397,31 @@ impl AstBuilder {
     fn parse_program(&mut self) -> Program {
         let mut program = Program::new();
 
+        // File-level attributes `#![attr]` that appear before any statement.
+        // They are stored on Program.attributes AND on the builder so that
+        // parse_statement can merge them into each top-level statement's own
+        // `#[...]` (closest-wins: a local attribute overrides the file-level
+        // one with the same name).
+        let file_attrs = self.parse_file_attributes();
+        self.file_attributes = file_attrs.clone();
+        program.attributes = file_attrs;
+
         while !self.match_type(&TokenType::EndOfFile) && !self.error_occurred {
             self.consume_end_of_line();
 
             if self.match_type(&TokenType::EndOfFile) {
                 break;
+            }
+
+            // Inner file-level attributes `#![attr]` may also appear between
+            // top-level statements (like Rust's inner attributes). Append
+            // them to the file-attribute set so subsequent statements inherit
+            // them, and to Program.attributes.
+            if self.match_value("#![") {
+                let inner = self.parse_file_attributes();
+                self.file_attributes.extend(inner.clone());
+                program.attributes.extend(inner);
+                continue;
             }
 
             let stmt = self.parse_statement();
@@ -378,14 +432,42 @@ impl AstBuilder {
             }
         }
 
+        // The merge into each statement already happened inside
+        // parse_statement (via merge_with_file_attributes), so no separate
+        // post-pass is needed here.
+
         program
+    }
+
+    /// Merge a statement's own node-level attributes with the file-level
+    /// attributes. File-level attrs come first; the statement's own attrs are
+    /// appended so that Attribute lookups (which scan left-to-right) find the
+    /// closest (local) one first — implementing "子节点属性覆盖父节点属性".
+    /// A local attribute with the same name entirely replaces the file-level
+    /// one (no duplication).
+    fn merge_with_file_attributes(&self, mut attrs: Vec<Attribute>) -> Vec<Attribute> {
+        if self.file_attributes.is_empty() {
+            return attrs;
+        }
+        let local_names: Vec<String> = attrs.iter().map(|a| a.name.clone()).collect();
+        let mut merged = Vec::with_capacity(self.file_attributes.len() + attrs.len());
+        for fa in &self.file_attributes {
+            if !local_names.iter().any(|n| n == &fa.name) {
+                merged.push(fa.clone());
+            }
+        }
+        merged.append(&mut attrs);
+        merged
     }
 
     // ==================== Statement ====================
 
     fn parse_statement(&mut self) -> Option<Box<dyn Statement>> {
-        // Parse attributes first — they can precede struct, impl, func, trait
-        let attrs = self.parse_attributes();
+        // Parse attributes first — they can precede struct, impl, func, trait.
+        // Merge in any file-level `#![attr]` so they propagate to this node
+        // (closest-wins: a local attribute overrides the file-level one).
+        let raw_attrs = self.parse_attributes();
+        let attrs = self.merge_with_file_attributes(raw_attrs);
 
         if self.match_type(&TokenType::Keyword) {
             let keyword = self.current_token().value.clone();
@@ -783,7 +865,8 @@ impl AstBuilder {
             if self.match_value("}") { break; }
             
             // Parse attributes on methods (e.g., #[intrinsic("i32_add")])
-            let method_attrs = self.parse_attributes();
+            let method_raw = self.parse_attributes();
+            let method_attrs = self.merge_with_file_attributes(method_raw);
 
             // Associated type binding inside an impl block:
             //   `type Name = ConcreteType;`
@@ -874,7 +957,8 @@ impl AstBuilder {
             if self.match_value("}") { break; }
 
             // Parse attributes on trait methods (e.g., #[dynamic_args])
-            let method_attrs = self.parse_attributes();
+            let method_raw = self.parse_attributes();
+            let method_attrs = self.merge_with_file_attributes(method_raw);
 
             // Parse method signature: func name(params): ret_type
             // Associated type declaration inside a trait body:
@@ -1017,7 +1101,8 @@ impl AstBuilder {
             }
 
             // Parse attributes on extern functions (e.g., #[intrinsic("c_printf")])
-            let func_attrs = self.parse_attributes();
+            let func_raw = self.parse_attributes();
+            let func_attrs = self.merge_with_file_attributes(func_raw);
             if !(self.match_type(&TokenType::Keyword) && self.current_token().value == "func") {
                 self.log_error("Expected 'func' keyword in extern block");
                 break;
@@ -1716,11 +1801,17 @@ impl AstBuilder {
             self.advance(); // consume ';'
         }
         self.consume_end_of_line();
-        if has_semi {
-            Some(Box::new(ExpressionStatement::new(Some(expr))))
-        } else {
-            // No semicolon → tail expression (value-producing)
+        // A bare expression (no semicolon) is a tail expression — the block's
+        // implicit return value — ONLY when it is the last statement before
+        // the closing '}'. Marking every non-semicolon expression as a tail
+        // (return) emits a terminator per expression; after the first one the
+        // current Cranelift block is "already filled", so the next statement
+        // panics ("you cannot add an instruction to a block already filled").
+        let is_last_in_block = self.match_value("}");
+        if !has_semi && is_last_in_block {
             Some(Box::new(ExpressionStatement::new_tail(Some(expr))))
+        } else {
+            Some(Box::new(ExpressionStatement::new(Some(expr))))
         }
     }
 

@@ -476,6 +476,10 @@ pub struct CraneliftBackend {
     /// true once the current block has a terminator (return/jump/brif).
     /// Replaces the private `is_filled` API.
     diverged: bool,
+    /// Attributes of the function currently being compiled. Drives codegen
+    /// decisions such as `naked` (no implicit epilogue) and `no_gc`
+    /// (use a non-GC allocator for heap allocations).
+    current_func_attributes: Vec<String>,
 }
 
 impl CraneliftBackend {
@@ -1033,6 +1037,7 @@ impl CraneliftBackend {
             return Ok(());
         }
         self.reset_function_state(ir_func.return_type.clone());
+        self.set_current_func_attributes(&ir_func.attributes);
         // Resolve the exact symbol used during the declare pass. Overloaded
         // methods with the same (name, arity) were disambiguated with a
         // numeric suffix, so we must look up via the occurrence index.
@@ -1074,8 +1079,12 @@ impl CraneliftBackend {
                     self.translate_block(&mut bcx, body)?;
                 }
 
-                // Ensure a return if the builder is still open.
-                if !self.diverged {
+                // Ensure a return if the builder is still open. `#[naked]`
+                // functions opt out of the implicit epilogue — the body is
+                // responsible for all control flow (used for entry points
+                // and interrupt handlers that must not get a synthesized
+                // return).
+                if !self.diverged && !self.current_func_has_attr("naked") {
                     self.emit_default_return(&mut bcx);
                 }
                 bcx.seal_all_blocks();
@@ -1096,6 +1105,7 @@ impl CraneliftBackend {
 
     fn compile_main(&mut self, ir_func: &IRFunction) -> Result<(), String> {
         self.reset_function_state(DataType::Int);
+        self.set_current_func_attributes(&ir_func.attributes);
         // main has no parameters in IR; give it a C-friendly i64 return.
         let sym = "gbl_main".to_string();
         self.func_symbols.insert(("main".to_string(), 0), sym.clone());
@@ -1151,6 +1161,25 @@ impl CraneliftBackend {
         self.loop_stack.clear();
         self.return_type = return_type;
         self.diverged = false;
+        self.current_func_attributes.clear();
+    }
+
+    /// Record the attributes of the function about to be compiled so codegen
+    /// can consult them (e.g. `naked`, `no_gc`).
+    fn set_current_func_attributes(&mut self, attrs: &[String]) {
+        self.current_func_attributes = attrs.to_vec();
+    }
+
+    /// True when the function currently being compiled carries `attr`.
+    fn current_func_has_attr(&self, attr: &str) -> bool {
+        self.current_func_attributes.iter().any(|a| a == attr)
+    }
+
+    /// True when allocations in the current function should bypass the GC.
+    /// This is the case when either the struct itself is `no_gc` or the
+    /// enclosing function (possibly via a file-level `#![no_gc]`) is `no_gc`.
+    fn alloc_uses_no_gc(&self, struct_name: &str) -> bool {
+        self.type_resolver.is_no_gc(struct_name) || self.current_func_has_attr("no_gc")
     }
 
     fn emit_default_return(&mut self, bcx: &mut FunctionBuilder) {
@@ -1907,7 +1936,7 @@ impl CraneliftBackend {
                 if self.func_symbols.contains_key(&(func.to_string(), arity)) {
                     let size = self.type_resolver.struct_size(struct_name);
                     let size_val = bcx.ins().iconst(types::I64, size);
-                    let alloc_fn = if self.type_resolver.is_no_gc(struct_name) {
+                    let alloc_fn = if self.alloc_uses_no_gc(struct_name) {
                         "gobol_alloc"
                     } else {
                         "gobol_gc_alloc"
@@ -2159,7 +2188,7 @@ impl CraneliftBackend {
                 if method == "new" {
                     let size = self.type_resolver.struct_size(name);
                     let size_val = bcx.ins().iconst(types::I64, size);
-                    let alloc_fn = if self.type_resolver.is_no_gc(name) {
+                    let alloc_fn = if self.alloc_uses_no_gc(name) {
                         "gobol_alloc"
                     } else {
                         "gobol_gc_alloc"
@@ -2408,7 +2437,7 @@ impl CraneliftBackend {
             // Allocate self and prepend to constructor args
             let size = self.type_resolver.struct_size(name);
             let size_val = bcx.ins().iconst(types::I64, size);
-            let alloc_fn = if self.type_resolver.is_no_gc(name) {
+            let alloc_fn = if self.alloc_uses_no_gc(name) {
                 "gobol_alloc"
             } else {
                 "gobol_gc_alloc"
@@ -2421,7 +2450,7 @@ impl CraneliftBackend {
         // Otherwise allocate and store fields directly.
         let size = self.type_resolver.struct_size(name);
         let size_val = bcx.ins().iconst(types::I64, size);
-        let alloc_fn = if self.type_resolver.is_no_gc(name) {
+        let alloc_fn = if self.alloc_uses_no_gc(name) {
             "gobol_alloc"
         } else {
             "gobol_gc_alloc"
@@ -2733,28 +2762,47 @@ impl CraneliftBackend {
 }
 
 impl CraneliftBackend {
-    /// Create an AOT backend that produces object files for linking.
+    /// Create an AOT backend targeting the host platform. For cross-compilation
+    /// (e.g. `aarch64-unknown-none`) use [`CraneliftBackend::new_for_target`].
     pub fn new() -> Self {
+        Self::new_for_target_triple(target_lexicon::HOST.clone())
+            .expect("host target must be supported by Cranelift")
+    }
+
+    /// Create an AOT backend for an arbitrary target triple string such as
+    /// `x86_64-pc-windows-msvc`, `aarch64-unknown-none`, or the host triple.
+    /// Returns a clear error if the triple is malformed or unsupported by
+    /// the installed Cranelift.
+    pub fn new_for_target(target: &str) -> Result<Self, String> {
+        let triple: target_lexicon::Triple = target
+            .parse()
+            .map_err(|e| format!("Invalid target triple '{}': {}", target, e))?;
+        Self::new_for_target_triple(triple)
+    }
+
+    fn new_for_target_triple(triple: target_lexicon::Triple) -> Result<Self, String> {
         use cranelift_codegen::isa::lookup;
         use cranelift_codegen::settings::{self, Configurable};
 
+        let triple_str = triple.to_string();
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
         flag_builder.set("is_pic", "true").unwrap();
-        let isa_builder = lookup(target_lexicon::HOST).unwrap();
+        let isa_builder = lookup(triple)
+            .map_err(|e| format!("Cranelift does not support target '{}': {}", triple_str, e))?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
-            .unwrap();
+            .map_err(|e| format!("ISA finish failed for '{}': {}", triple_str, e))?;
 
         let builder = ObjectBuilder::new(
             isa,
             "gobol_aot",
             Box::new(cranelift_module::default_libcall_names()),
         )
-        .unwrap();
+        .map_err(|e| format!("ObjectBuilder init failed: {}", e))?;
         let module = ObjectModule::new(builder);
 
-        CraneliftBackend {
+        Ok(CraneliftBackend {
             module,
             fn_ctx: FunctionBuilderContext::new(),
             func_symbols: HashMap::new(),
@@ -2770,17 +2818,20 @@ impl CraneliftBackend {
             loop_stack: Vec::new(),
             return_type: DataType::None_,
             diverged: false,
-        }
+            current_func_attributes: Vec::new(),
+        })
     }
 
-    /// Compile the IR, emit an object file, and link it with the C runtime
-    /// to produce a standalone executable at `output_path`.
+    /// Compile the IR, emit an object file, and link it to produce a
+    /// standalone executable at `output_path`. Linking is driven by
+    /// [`LinkOptions`], which selects the right linker for the target
+    /// triple (MSVC `link.exe`, MinGW `gcc.exe`, Unix `cc`, or a bare-metal
+    /// `ld` with a link script).
     pub fn compile_to_binary(
         mut self,
         ir: &GobolIR,
         output_path: &str,
-        runtime_c_path: &str,
-        link_libs: &[String],
+        opts: &LinkOptions,
     ) -> Result<(), String> {
         self.compile_ir(ir)?;
 
@@ -2793,14 +2844,18 @@ impl CraneliftBackend {
             .emit()
             .map_err(|e| format!("Object emit failed: {}", e))?;
 
-        // Write object file to a temp path.
-        let obj_path = format!("{}.o", output_path);
+        // Object file extension differs per platform (MSVC uses .obj).
+        let obj_ext = if target_is_msvc(&opts.target) { "obj" } else { "o" };
+        let obj_path = format!("{}.{}", output_path, obj_ext);
         std::fs::write(&obj_path, &obj_bytes)
             .map_err(|e| format!("Failed to write object file: {}", e))?;
 
+        // Ensure the final output name carries `.exe` on Windows targets.
+        let final_output = ensure_exe_extension(&opts.target, output_path);
+
         // If there are variadic call sites, generate a C stub file and
         // compile it alongside the main object file.
-        let stubs_path = format!("{}.va.c", output_path);
+        let stubs_src_path = format!("{}.va.c", output_path);
         let has_stubs = !stubs.is_empty();
         if has_stubs {
             let mut src = String::new();
@@ -2812,38 +2867,430 @@ impl CraneliftBackend {
             for stub in &stubs {
                 src.push_str(&stub.c_source());
             }
-            std::fs::write(&stubs_path, &src)
+            std::fs::write(&stubs_src_path, &src)
                 .map_err(|e| format!("Failed to write variadic stubs: {}", e))?;
         }
 
-        // Link with the C runtime using the system C compiler.
-        // Always link libm (math functions like sin/cos/pow) and libpthread (network support).
-        let mut cmd = std::process::Command::new("cc");
-        cmd.arg(&obj_path);
-        cmd.arg(runtime_c_path);
-        if has_stubs {
-            cmd.arg(&stubs_path);
-        }
-        cmd.args(["-o", output_path]);
-        for lib in link_libs {
-            cmd.arg(format!("-l{}", lib));
-        }
-        cmd.args(["-lm", "-lpthread"]);
-        let status = cmd
-            .status()
-            .map_err(|e| format!("Failed to invoke cc: {}", e))?;
+        // Select the linker appropriate for this target.
+        let (linker, kind) = detect_linker(&opts.target)?;
+
+        let result = match kind {
+            LinkerKind::CcDriver => Self::link_cc_driver(
+                &linker,
+                &obj_path,
+                &opts,
+                &final_output,
+                has_stubs,
+                &stubs_src_path,
+            ),
+            LinkerKind::MsvcLink => Self::link_msvc(
+                &linker,
+                &obj_path,
+                &opts,
+                &final_output,
+                has_stubs,
+                &stubs_src_path,
+            ),
+            LinkerKind::BareLd => {
+                Self::link_bare_metal(&linker, &obj_path, &opts, &final_output)
+            }
+        };
 
         // Clean up temp files.
         let _ = std::fs::remove_file(&obj_path);
         if has_stubs {
-            let _ = std::fs::remove_file(&stubs_path);
+            let _ = std::fs::remove_file(&stubs_src_path);
         }
 
+        result
+    }
+
+    /// Link using a C/C++ compiler driver (cc / gcc / gcc.exe) that compiles
+    /// the runtime `.c` sources and links the final binary in one step.
+    /// Used for `*-unknown-linux-*` and `*-pc-windows-gnu`.
+    fn link_cc_driver(
+        linker: &std::path::Path,
+        obj_path: &str,
+        opts: &LinkOptions,
+        final_output: &str,
+        has_stubs: bool,
+        stubs_src_path: &str,
+    ) -> Result<(), String> {
+        let mut cmd = std::process::Command::new(linker);
+        cmd.arg(obj_path);
+        if let Some(rt) = &opts.runtime_c_path {
+            cmd.arg(rt);
+        }
+        if has_stubs {
+            cmd.arg(stubs_src_path);
+        }
+        cmd.args(["-o", final_output]);
+        for lib in &opts.link_libs {
+            cmd.arg(format!("-l{}", lib));
+        }
+        // libm is available on both Unix and MinGW; libpthread is Unix-only
+        // (MinGW uses its own threading model).
+        cmd.arg("-lm");
+        if !target_is_windows(&opts.target) {
+            cmd.arg("-lpthread");
+        }
+        let status = cmd
+            .status()
+            .map_err(|e| format!("Failed to invoke linker '{}': {}", linker.display(), e))?;
         if !status.success() {
             return Err(format!("Linking failed with exit code {:?}", status.code()));
         }
         Ok(())
     }
+
+    /// Link for the MSVC toolchain. `link.exe` links only, so the C runtime
+    /// sources (and variadic stubs) are pre-compiled to `.obj` with a C
+    /// compiler (`clang-cl` preferred, falling back to `cl`) before linking.
+    fn link_msvc(
+        link_exe: &std::path::Path,
+        obj_path: &str,
+        opts: &LinkOptions,
+        final_output: &str,
+        has_stubs: bool,
+        stubs_src_path: &str,
+    ) -> Result<(), String> {
+        let c_compiler = find_msvc_c_compiler()
+            .ok_or_else(|| msvc_toolchain_missing_error())?;
+
+        // Compile the C runtime sources to .obj objects.
+        let mut extra_objs: Vec<String> = Vec::new();
+        if let Some(rt) = &opts.runtime_c_path {
+            let rt_obj = format!("{}.runtime.obj", final_output);
+            let status = std::process::Command::new(&c_compiler)
+                .args(["/c", "/nologo"])
+                .arg(format!("/Fo{}", rt_obj))
+                .arg(rt)
+                .status()
+                .map_err(|e| format!("Failed to compile runtime with '{}': {}", c_compiler.display(), e))?;
+            if !status.success() {
+                return Err(format!("Runtime compilation failed with exit code {:?}", status.code()));
+            }
+            extra_objs.push(rt_obj);
+        }
+        if has_stubs {
+            let stub_obj = format!("{}.va.obj", final_output);
+            let status = std::process::Command::new(&c_compiler)
+                .args(["/c", "/nologo"])
+                .arg(format!("/Fo{}", stub_obj))
+                .arg(stubs_src_path)
+                .status()
+                .map_err(|e| format!("Failed to compile stubs with '{}': {}", c_compiler.display(), e))?;
+            if !status.success() {
+                return Err(format!("Stubs compilation failed with exit code {:?}", status.code()));
+            }
+            extra_objs.push(stub_obj);
+        }
+
+        let mut cmd = std::process::Command::new(link_exe);
+        cmd.arg("/NOLOGO")
+            .arg(format!("/OUT:{}", final_output))
+            .arg(obj_path);
+        for obj in &extra_objs {
+            cmd.arg(obj);
+        }
+        // Export the entry point symbol so the linker accepts `-e`-style
+        // custom entry functions (e.g. `_start` for kernels).
+        if let Some(ep) = &opts.entry_point {
+            if ep != "main" {
+                cmd.arg(format!("/ENTRY:{}", ep));
+                cmd.arg("/SUBSYSTEM:CONSOLE");
+            }
+        }
+        for lib in &opts.link_libs {
+            cmd.arg(format!("{}.lib", lib));
+        }
+        // Add Rust toolchain lib paths so common system libs resolve.
+        if let Ok(sysroot) = rust_sysroot() {
+            let libroot = sysroot.join("lib");
+            if libroot.exists() {
+                cmd.arg(format!("/LIBPATH:{}", libroot.display()));
+            }
+            let rustlib = sysroot.join("lib").join("rustlib").join(&opts.target).join("lib");
+            if rustlib.exists() {
+                cmd.arg(format!("/LIBPATH:{}", rustlib.display()));
+            }
+        }
+        let status = cmd
+            .status()
+            .map_err(|e| format!("Failed to invoke link.exe '{}': {}", link_exe.display(), e))?;
+
+        // Clean up the temporary .obj files.
+        for obj in &extra_objs {
+            let _ = std::fs::remove_file(obj);
+        }
+        if !status.success() {
+            return Err(format!("Linking failed with exit code {:?}", status.code()));
+        }
+        Ok(())
+    }
+
+    /// Link for bare-metal / `no_std` targets (e.g. `aarch64-unknown-none`,
+    /// `riscv64gc-unknown-none`). Uses a raw `ld` (or cross-`ld`) with a
+    /// link script and a custom entry point — no C runtime is linked.
+    fn link_bare_metal(
+        ld: &std::path::Path,
+        obj_path: &str,
+        opts: &LinkOptions,
+        final_output: &str,
+    ) -> Result<(), String> {
+        let mut cmd = std::process::Command::new(ld);
+        cmd.arg("-nostdlib")
+            .arg("-static")
+            .args(["-o", final_output]);
+        if let Some(script) = &opts.link_script {
+            cmd.args(["-T", script]);
+        }
+        if let Some(ep) = &opts.entry_point {
+            if ep != "main" {
+                cmd.arg("-e").arg(ep);
+            }
+        }
+        for lib in &opts.link_libs {
+            cmd.arg(format!("-l{}", lib));
+        }
+        cmd.arg(obj_path);
+        let status = cmd
+            .status()
+            .map_err(|e| format!("Failed to invoke linker '{}': {}", ld.display(), e))?;
+        if !status.success() {
+            return Err(format!("Linking failed with exit code {:?}", status.code()));
+        }
+        Ok(())
+    }
+}
+
+// ==================== Link options & linker detection ====================
+
+/// Options driving the final link step. Selects the right linker for the
+/// target triple and carries any custom link script / entry point needed
+/// for bare-metal builds.
+#[derive(Clone)]
+pub struct LinkOptions {
+    /// Target triple, e.g. `x86_64-pc-windows-msvc`, `aarch64-unknown-none`.
+    pub target: String,
+    /// Path to the Gobol C runtime master unit (`std/runtime.c`). `None` for
+    /// `no_std` / bare-metal targets that have no runtime.
+    pub runtime_c_path: Option<String>,
+    /// Extra libraries to link (from `extern "C"` blocks).
+    pub link_libs: Vec<String>,
+    /// Custom linker script (`-T`/`/LIBPATH`-less bare-metal path). Used with
+    /// `grape.toml`'s `build.link_script`.
+    pub link_script: Option<String>,
+    /// Custom entry symbol (e.g. `_start`). When set to anything other than
+    /// `"main"`, the linker is told to use it as the entry point and the
+    /// semantic checker is told not to require a `main` function.
+    pub entry_point: Option<String>,
+}
+
+impl LinkOptions {
+    /// Defaults for a hosted build on the current host platform.
+    pub fn host(runtime_c_path: impl Into<String>, link_libs: Vec<String>) -> Self {
+        Self {
+            target: host_target_string(),
+            runtime_c_path: Some(runtime_c_path.into()),
+            link_libs,
+            link_script: None,
+            entry_point: None,
+        }
+    }
+}
+
+/// The host target triple as a string (e.g. `x86_64-unknown-linux-gnu`).
+pub fn host_target_string() -> String {
+    target_lexicon::HOST.to_string()
+}
+
+/// True for any Windows target triple.
+pub fn target_is_windows(target: &str) -> bool {
+    target.contains("windows")
+}
+
+/// True for the MSVC ABI (Windows) target triple.
+pub fn target_is_msvc(target: &str) -> bool {
+    target.contains("windows-msvc")
+}
+
+/// True for `no_std` / bare-metal targets (triple ends in `none`).
+pub fn target_is_bare_metal(target: &str) -> bool {
+    target.ends_with("-none") || target.contains("unknown-none")
+}
+
+/// Append `.exe` to `name` for Windows targets when it isn't already present.
+pub fn ensure_exe_extension(target: &str, name: &str) -> String {
+    if !target_is_windows(target) {
+        return name.to_string();
+    }
+    if name.to_ascii_lowercase().ends_with(".exe") {
+        return name.to_string();
+    }
+    format!("{}.exe", name)
+}
+
+/// Kind of linker selected for a target triple.
+enum LinkerKind {
+    /// A C/C++ compiler driver (cc, gcc, gcc.exe) that both compiles `.c`
+    /// runtime sources and links the final binary in one step.
+    CcDriver,
+    /// MSVC `link.exe` — links only; C sources must be pre-compiled.
+    MsvcLink,
+    /// A raw linker for bare-metal targets (`ld` / cross-`ld`), used with a
+    /// link script and no C runtime.
+    BareLd,
+}
+
+/// Run `rustc --print sysroot` to locate the Rust installation root. Produces
+/// a clear, actionable error message when Rust isn't installed.
+pub fn rust_sysroot() -> Result<std::path::PathBuf, String> {
+    let output = std::process::Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .map_err(|e| format!("Failed to run 'rustc --print sysroot': {}", e))?;
+    if !output.status.success() {
+        return Err(rust_not_installed_error());
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        return Err(rust_not_installed_error());
+    }
+    Ok(std::path::PathBuf::from(s))
+}
+
+/// The friendly error shown when the Rust toolchain (and thus a linker)
+/// can't be located.
+pub fn rust_not_installed_error() -> String {
+    "linker not found\n\
+     Rust toolchain not found. Please ensure Rust is installed:\n  \
+     `https://rustup.rs/`\n\n\
+     For MSVC toolchain:\n  \
+     rustup default stable-msvc\n\n\
+     For GNU toolchain (MinGW):\n  \
+     rustup default stable-gnu".to_string()
+}
+
+fn msvc_toolchain_missing_error() -> String {
+    "MSVC C compiler not found. The MSVC link path requires a C compiler\n\
+     (cl.exe or clang-cl.exe) to compile the Gobol runtime.\n\
+     Install Visual Studio Build Tools (C++ workload) or run:\n  \
+     rustup default stable-gnu\n\
+     to use the MinGW (GNU) toolchain instead, which bundles gcc.exe."
+        .to_string()
+}
+
+/// Locate an executable on `PATH`. A minimal reimplementation of `which`.
+fn which(exe: &str) -> Option<std::path::PathBuf> {
+    let path_env = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join(exe);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Detect the linker for a target triple string. Returns the linker path and
+/// the kind of link command to build.
+///
+/// | Target                          | Linker        | Lookup              |
+/// |---------------------------------|---------------|---------------------|
+/// | `x86_64-pc-windows-msvc`        | `link.exe`    | sysroot/bin, PATH   |
+/// | `x86_64-pc-windows-gnu`         | `gcc.exe`     | sysroot/bin, PATH   |
+/// | `x86_64-unknown-linux-gnu`      | `cc` / `gcc`  | system PATH         |
+/// | `aarch64-unknown-none`          | `ld` / cross | system PATH         |
+/// | `riscv64gc-unknown-none`        | `ld` / cross | system PATH         |
+fn detect_linker(target: &str) -> Result<(std::path::PathBuf, LinkerKind), String> {
+    if target_is_bare_metal(target) {
+        // Prefer a target-prefixed cross ld (e.g. aarch64-linux-gnu-ld),
+        // falling back to the plain `ld`.
+        let arch = target.split('-').next().unwrap_or("");
+        let cross_ld = format!("{}-linux-gnu-ld", arch);
+        if let Some(p) = which(&cross_ld) {
+            return Ok((p, LinkerKind::BareLd));
+        }
+        if let Some(p) = which("ld") {
+            return Ok((p, LinkerKind::BareLd));
+        }
+        return Err(format!(
+            "linker not found for bare-metal target '{}': no `ld` or `{}-linux-gnu-ld` on PATH",
+            target, arch
+        ));
+    }
+
+    let sysroot = rust_sysroot()?;
+    let bin_dir = sysroot.join("bin");
+
+    if target_is_msvc(target) {
+        // MSVC: prefer link.exe from the Rust sysroot, then PATH.
+        let candidate = bin_dir.join("link.exe");
+        if candidate.exists() {
+            return Ok((candidate, LinkerKind::MsvcLink));
+        }
+        if let Some(p) = which("link.exe") {
+            return Ok((p, LinkerKind::MsvcLink));
+        }
+        // lld-link is the linker Rust itself ships for MSVC; accept it too.
+        let lld_link = bin_dir.join("lld-link.exe");
+        if lld_link.exists() {
+            return Ok((lld_link, LinkerKind::MsvcLink));
+        }
+        return Err(format!(
+            "linker not found for MSVC target '{}': no link.exe in {} or on PATH",
+            target,
+            bin_dir.display()
+        ));
+    }
+
+    if target_is_windows(target) {
+        // Windows GNU (MinGW): gcc.exe from the Rust sysroot, then PATH.
+        let candidate = bin_dir.join("gcc.exe");
+        if candidate.exists() {
+            return Ok((candidate, LinkerKind::CcDriver));
+        }
+        if let Some(p) = which("gcc.exe") {
+            return Ok((p, LinkerKind::CcDriver));
+        }
+        return Err(format!(
+            "linker not found for GNU target '{}': no gcc.exe in {} or on PATH",
+            target,
+            bin_dir.display()
+        ));
+    }
+
+    // Unix / other hosted: prefer cc, then gcc, from PATH.
+    if let Some(p) = which("cc") {
+        return Ok((p, LinkerKind::CcDriver));
+    }
+    if let Some(p) = which("gcc") {
+        return Ok((p, LinkerKind::CcDriver));
+    }
+    Err(format!(
+        "linker not found for target '{}': neither cc nor gcc on PATH",
+        target
+    ))
+}
+
+/// Locate a C compiler usable for compiling the Gobol runtime under the MSVC
+/// ABI. Prefers `clang-cl` (often shipped with the Rust MSVC toolchain), then
+/// `cl`. Returns `None` if neither is available.
+fn find_msvc_c_compiler() -> Option<std::path::PathBuf> {
+    if let Some(sysroot) = rust_sysroot().ok() {
+        let cand = sysroot.join("bin").join("clang-cl.exe");
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+    if let Some(p) = which("clang-cl.exe") {
+        return Some(p);
+    }
+    if let Some(p) = which("cl.exe") {
+        return Some(p);
+    }
+    None
 }
 
 /// Map a Gobol builtin call name to its runtime function.

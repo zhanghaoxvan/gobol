@@ -14,3 +14,4 @@ test_*
 
 vscode-gobol/node_modules/
 vscode-gobol/.marscode/
+__pycache__/

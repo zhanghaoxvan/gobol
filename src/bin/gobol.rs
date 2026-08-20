@@ -113,6 +113,8 @@ fn print_help() {
     println!("  --link-script <path>     Custom linker script (bare-metal / kernel builds)");
     println!("  --no-std                 Don't link the C runtime (no_std / bare-metal)");
     println!("  --no-main                Don't require a main() function (kernel entry)");
+    println!("  --link-arg <lib>         Append a library base name to the link line (repeatable).");
+    println!("                           Formatted per linker: ws2_32 -> ws2_32.lib (MSVC) / -lws2_32 (cc)");
     println!();
     println!("Examples:");
     println!("  gobol main.gbl                         Debug build (alias for 'gobol build main.gbl --debug')");
@@ -131,6 +133,12 @@ struct LinkCli {
     no_std: bool,
     no_main: bool,
     no_gc: bool,
+    /// Extra library base names collected from repeatable `--link-arg <lib>`
+    /// flags (e.g. `ws2_32`). These are appended to `LinkOptions::link_libs`
+    /// and formatted per linker kind: `ws2_32.lib` for MSVC, `-lws2_32` for
+    /// the cc-driver path. Lets the package manager (`grape`) inject Windows
+    /// system libraries that the C runtime transitively needs.
+    link_args: Vec<String>,
 }
 
 impl Default for LinkCli {
@@ -142,6 +150,7 @@ impl Default for LinkCli {
             no_std: false,
             no_main: false,
             no_gc: false,
+            link_args: Vec::new(),
         }
     }
 }
@@ -193,6 +202,12 @@ fn main() {
             i += 2;
         } else if args[i] == "--link-script" && i + 1 < args.len() {
             link_cli.link_script = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--link-arg" && i + 1 < args.len() {
+            // Repeatable: `--link-arg ws2_32` may appear multiple times.
+            // Each value is a library base name (no `-l`/`.lib` suffix);
+            // the backend formats it per linker kind.
+            link_cli.link_args.push(args[i + 1].clone());
             i += 2;
         } else if args[i] == "--no-std" {
             link_cli.no_std = true;
@@ -669,10 +684,19 @@ fn main() {
         }
     };
     let extern_libs = semantic_analyzer.get_extern_libs().clone();
+    // Merge libraries declared via `extern "C"` blocks with any extra
+    // `--link-arg <lib>` flags (e.g. `ws2_32` injected by `grape` on
+    // Windows). Duplicates are deduped to avoid double-linking.
+    let mut link_libs = extern_libs.clone();
+    for extra in &link_cli.link_args {
+        if !link_libs.iter().any(|l| l == extra) {
+            link_libs.push(extra.clone());
+        }
+    }
     let link_opts = LinkOptions {
         target: target.clone(),
         runtime_c_path: runtime_c.as_ref().map(|p| p.to_string_lossy().into_owned()),
-        link_libs: extern_libs.clone(),
+        link_libs,
         link_script: link_cli.link_script.clone(),
         entry_point: link_cli.entry_point.clone(),
     };

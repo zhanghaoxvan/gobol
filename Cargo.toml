@@ -17,6 +17,10 @@ tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 dashmap = "6"
 url = "2"
+# Used at runtime (not build-time) by the `gobol::toolchain` module to
+# discover the MSVC/MinGW C toolchain the same way rustc's own build
+# scripts do — replacing hand-written vswhere/vcvarsall/which logic.
+cc = "1.0"
 
 [[bin]]
 name = "gobol"

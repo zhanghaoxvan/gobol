@@ -9,4 +9,5 @@ pub mod error;
 pub mod lexer;
 pub mod semantic_analyzer;
 pub mod token;
+pub mod toolchain;
 pub mod value;

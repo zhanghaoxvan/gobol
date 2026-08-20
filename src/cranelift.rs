@@ -2954,19 +2954,37 @@ impl CraneliftBackend {
         has_stubs: bool,
         stubs_src_path: &str,
     ) -> Result<(), String> {
-        let c_compiler = find_msvc_c_compiler()
-            .ok_or_else(|| msvc_toolchain_missing_error())?;
+        // Delegate MSVC toolchain discovery to the `cc` crate (the same
+        // logic rustc's own build scripts use): it locates the Visual
+        // Studio install, runs the vcvarsall-equivalent setup, and returns
+        // `cl.exe` / `clang-cl.exe` plus the env overlay (PATH/INCLUDE/LIB/
+        // LIBPATH) that `link.exe` needs to find `ws2_32.lib` and the CRT.
+        // This replaces the hand-written `find_msvc_c_compiler` probe and
+        // means we no longer require the user to run vcvarsall.bat first.
+        let tool = crate::toolchain::cc_discover(&opts.target)
+            .map_err(|e| format!("MSVC toolchain discovery failed: {}", e))?
+            .ok_or_else(msvc_toolchain_missing_error)?;
+        if !tool.is_msvc {
+            return Err(format!(
+                "target '{}' is not MSVC-family but the MSVC link path was selected",
+                opts.target
+            ));
+        }
+        let c_compiler = &tool.compiler;
 
-        // Compile the C runtime sources to .obj objects.
+        // Compile the C runtime sources to .obj objects. The cc-discovered
+        // env is applied to cl.exe so it finds the SDK headers (INCLUDE).
         let mut extra_objs: Vec<String> = Vec::new();
         if let Some(rt) = &opts.runtime_c_path {
             let rt_obj = format!("{}.runtime.obj", final_output);
-            let status = std::process::Command::new(&c_compiler)
-                .args(["/c", "/nologo"])
+            let mut c = std::process::Command::new(c_compiler);
+            c.args(["/c", "/nologo"])
                 .arg(format!("/Fo{}", rt_obj))
-                .arg(rt)
-                .status()
-                .map_err(|e| format!("Failed to compile runtime with '{}': {}", c_compiler.display(), e))?;
+                .arg(rt);
+            for (k, v) in &tool.env {
+                c.env(k, v);
+            }
+            let status = c.status().map_err(|e| format!("Failed to compile runtime with '{}': {}", c_compiler.display(), e))?;
             if !status.success() {
                 return Err(format!("Runtime compilation failed with exit code {:?}", status.code()));
             }
@@ -2974,12 +2992,14 @@ impl CraneliftBackend {
         }
         if has_stubs {
             let stub_obj = format!("{}.va.obj", final_output);
-            let status = std::process::Command::new(&c_compiler)
-                .args(["/c", "/nologo"])
+            let mut c = std::process::Command::new(c_compiler);
+            c.args(["/c", "/nologo"])
                 .arg(format!("/Fo{}", stub_obj))
-                .arg(stubs_src_path)
-                .status()
-                .map_err(|e| format!("Failed to compile stubs with '{}': {}", c_compiler.display(), e))?;
+                .arg(stubs_src_path);
+            for (k, v) in &tool.env {
+                c.env(k, v);
+            }
+            let status = c.status().map_err(|e| format!("Failed to compile stubs with '{}': {}", c_compiler.display(), e))?;
             if !status.success() {
                 return Err(format!("Stubs compilation failed with exit code {:?}", status.code()));
             }
@@ -2987,6 +3007,12 @@ impl CraneliftBackend {
         }
 
         let mut cmd = std::process::Command::new(link_exe);
+        // Apply the MSVC env so link.exe resolves import libs (LIB) and
+        // its own DLLs (PATH) — this is what makes ws2_32.lib findable
+        // without a pre-set vcvarsall environment.
+        for (k, v) in &tool.env {
+            cmd.env(k, v);
+        }
         cmd.arg("/NOLOGO")
             .arg(format!("/OUT:{}", final_output))
             .arg(obj_path);
@@ -3193,6 +3219,28 @@ fn which(exe: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Locate an executable by searching the `PATH` entry found inside a
+/// `cc::Tool`-style env overlay. Used to resolve `link.exe` from the MSVC
+/// environment that `cc_discover` returns, so we find the VS linker even
+/// when the parent shell hasn't run vcvarsall.bat (the cc env carries the
+/// post-vcvarsall `PATH`).
+fn which_in_env(
+    exe: &str,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<std::path::PathBuf> {
+    let path_val = env
+        .iter()
+        .find(|(k, _)| k == std::ffi::OsStr::new("PATH"))
+        .map(|(_, v)| v)?;
+    for dir in std::env::split_paths(path_val) {
+        let candidate = dir.join(exe);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Detect the linker for a target triple string. Returns the linker path and
 /// the kind of link command to build.
 ///
@@ -3225,23 +3273,29 @@ fn detect_linker(target: &str) -> Result<(std::path::PathBuf, LinkerKind), Strin
     let bin_dir = sysroot.join("bin");
 
     if target_is_msvc(target) {
-        // MSVC: prefer link.exe from the Rust sysroot, then PATH.
-        let candidate = bin_dir.join("link.exe");
-        if candidate.exists() {
-            return Ok((candidate, LinkerKind::MsvcLink));
-        }
-        if let Some(p) = which("link.exe") {
-            return Ok((p, LinkerKind::MsvcLink));
+        // Use the `cc` crate to discover the MSVC environment (the same
+        // discovery rustc uses), then resolve `link.exe` within that
+        // environment's PATH — this finds the VS linker even when the
+        // current shell hasn't run vcvarsall.bat. Fall back to the
+        // Rust-bundled `lld-link` and a bare PATH lookup.
+        if let Ok(Some(tool)) = crate::toolchain::cc_discover(target) {
+            if let Some(p) = which_in_env("link.exe", &tool.env) {
+                return Ok((p, LinkerKind::MsvcLink));
+            }
         }
         // lld-link is the linker Rust itself ships for MSVC; accept it too.
         let lld_link = bin_dir.join("lld-link.exe");
         if lld_link.exists() {
             return Ok((lld_link, LinkerKind::MsvcLink));
         }
+        if let Some(p) = which("link.exe") {
+            return Ok((p, LinkerKind::MsvcLink));
+        }
         return Err(format!(
-            "linker not found for MSVC target '{}': no link.exe in {} or on PATH",
-            target,
-            bin_dir.display()
+            "linker not found for MSVC target '{}': the `cc` crate could not\n\
+             locate the VS toolchain and no link.exe / lld-link.exe is on PATH.\n\
+             Install Visual Studio with the 'Desktop development with C++' workload.",
+            target
         ));
     }
 
@@ -3272,25 +3326,6 @@ fn detect_linker(target: &str) -> Result<(std::path::PathBuf, LinkerKind), Strin
         "linker not found for target '{}': neither cc nor gcc on PATH",
         target
     ))
-}
-
-/// Locate a C compiler usable for compiling the Gobol runtime under the MSVC
-/// ABI. Prefers `clang-cl` (often shipped with the Rust MSVC toolchain), then
-/// `cl`. Returns `None` if neither is available.
-fn find_msvc_c_compiler() -> Option<std::path::PathBuf> {
-    if let Some(sysroot) = rust_sysroot().ok() {
-        let cand = sysroot.join("bin").join("clang-cl.exe");
-        if cand.exists() {
-            return Some(cand);
-        }
-    }
-    if let Some(p) = which("clang-cl.exe") {
-        return Some(p);
-    }
-    if let Some(p) = which("cl.exe") {
-        return Some(p);
-    }
-    None
 }
 
 /// Map a Gobol builtin call name to its runtime function.

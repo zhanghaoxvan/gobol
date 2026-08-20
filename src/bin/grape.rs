@@ -720,6 +720,24 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
         target_dir.join(&exe_name)
     };
 
+    // ===== Windows toolchain auto-adaptation =====
+    // Before spawning `gobol build`, make sure a C/C++ toolchain is
+    // reachable for Windows targets: the backend links with `link.exe`
+    // (MSVC) or `gcc.exe` (MinGW), which are usually NOT on PATH in a
+    // plain shell. This locates MSVC via vswhere + vcvarsall.bat (or
+    // MinGW via gcc.exe) and returns the env overlay to apply below. It
+    // is a no-op for non-Windows targets, so Unix builds are untouched.
+    let toolchain = gobol::toolchain::detect_for_target(&target_triple)
+        .map_err(GrapeError::CommandFailed)?;
+    if let Some(tc) = &toolchain {
+        if cli.verbose {
+            println!(
+                "Toolchain: {:?} (extra link arg: {})",
+                tc.kind, tc.winsock_lib
+            );
+        }
+    }
+
     // Invoke gobol, translating the resolved build options into flags.
     let mut cmd = process::Command::new("gobol");
     cmd.arg("build")
@@ -752,8 +770,24 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     for path in &lib_paths {
         cmd.arg("--lib-path").arg(path);
     }
+    // Inject the Winsock library (ws2_32) that the C runtime pulls in
+    // transitively via std/runtime/net.c. The compiler formats the base
+    // name per linker kind: `ws2_32.lib` for MSVC, `-lws2_32` for MinGW.
+    // Only Windows targets need it; toolchain is None on Unix.
+    if let Some(tc) = &toolchain {
+        cmd.arg("--link-arg").arg(&tc.winsock_lib);
+    }
     if cli.verbose {
         cmd.arg("--verbose");
+    }
+
+    // Replay the toolchain env (PATH/INCLUDE/LIB/LIBPATH for MSVC, or the
+    // MinGW-augmented PATH) onto the gobol subprocess. gobol inherits the
+    // env by default; `Command::env` overlays individual vars on top.
+    if let Some(tc) = &toolchain {
+        for (k, v) in &tc.env {
+            cmd.env(k, v);
+        }
     }
 
     let status = cmd.status().map_err(|_| {

@@ -32,6 +32,7 @@ pub struct TestResult {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    #[allow(dead_code)]
     pub exit_code: i32,
 }
 
@@ -44,6 +45,7 @@ impl TestResult {
         );
     }
 
+    #[allow(dead_code)]
     pub fn assert_failure(&self, expected_code: ExitCode) {
         assert!(
             !self.success,

@@ -223,70 +223,70 @@ def task_uninstall():
     input("Press Enter to return to main menu...")
 
 def task_extension_guide():
-    """显示 VS Code 和 Neovim 扩展安装指南"""
+    """显示 VS Code 和 Neovim 扩展安装指南（跨平台命令）"""
     clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.OKCYAN}{Colors.BOLD}   VS Code & Neovim Extension Guide   {Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print()
-    
-    # 检测项目中的扩展路径
+
     project_root = Path(__file__).resolve().parent
     vscode_ext_path = project_root / "vscode-gobol"
     nvim_ext_path = project_root / "nvim-gobol"
-    vsix_files = list(vscode_ext_path.glob("*.vsix")) if vscode_ext_path.exists() else []
-    
+    is_windows = platform.system().lower() == "windows"
+
+    # ===== 检测当前 shell =====
+    # PowerShell 特有的环境变量
+    is_pwsh = "PSModulePath" in os.environ
+
+    # ========== VS Code ==========
     print(f"{Colors.BOLD}{Colors.OKGREEN}┌─ VS Code Extension{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│  Location: {vscode_ext_path}{Colors.ENDC}")
     print(f"{Colors.OKGREEN}│{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│  VS Code extension location:{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│  {Colors.OKCYAN}{vscode_ext_path}{Colors.ENDC}")
-    if vsix_files:
-        print(f"{Colors.OKGREEN}│  {Colors.OKGREEN}Found: {vsix_files[0].name}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│  {Colors.BOLD}Build:{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    cd {vscode_ext_path}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    npm install{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    npm run build{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    npm install -g @vscode/vsce{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    vsce package{Colors.ENDC}")
     print(f"{Colors.OKGREEN}│{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│  {Colors.BOLD}Installation steps:{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    1. Open VS Code (code .){Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    2. Press Ctrl+Shift+X to open Extensions{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    3. Click the '...' menu → 'Install from VSIX...'{Colors.ENDC}")
-    if vsix_files:
-        print(f"{Colors.OKGREEN}│    4. Select: {Colors.OKCYAN}{vsix_files[0].resolve()}{Colors.ENDC}")
-    else:
-        print(f"{Colors.OKGREEN}│    4. Select the .vsix file from the vscode-gobol/ directory{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│  {Colors.BOLD}Or via command line:{Colors.ENDC}")
-    if vsix_files:
-        print(f"{Colors.OKGREEN}│    code --install-extension {vsix_files[0].resolve()}{Colors.ENDC}")
-    else:
-        print(f"{Colors.OKGREEN}│    code --install-extension ./vscode-gobol/*.vsix{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│  {Colors.BOLD}Install:{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    code --install-extension ./vscode-gobol-*.vsix{Colors.ENDC}")
     print(f"{Colors.OKGREEN}└─{Colors.ENDC}")
-    
+
+    # ========== Neovim ==========
     print()
     print(f"{Colors.BOLD}{Colors.OKBLUE}┌─ Neovim Extension{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│  Location: {nvim_ext_path}{Colors.ENDC}")
     print(f"{Colors.OKBLUE}│{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│  Neovim extension location:{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│  {Colors.OKCYAN}{nvim_ext_path}{Colors.ENDC}")
+
+    if is_windows:
+        if is_pwsh:
+            copy_cmd = f'Copy-Item -Recurse -Force "{nvim_ext_path}" "$env:USERPROFILE\\AppData\\Local\\nvim\\pack\\plugins\\start\\gobol"'
+        else:
+            copy_cmd = f'xcopy /E /I "{nvim_ext_path}" "%USERPROFILE%\\AppData\\Local\\nvim\\pack\\plugins\\start\\gobol"'
+    else:
+        if is_pwsh:
+            copy_cmd = f'Copy-Item -Recurse -Force "{nvim_ext_path}" "$HOME/.config/nvim/pack/plugins/start/gobol"'
+        else:
+            copy_cmd = f'cp -r {nvim_ext_path} ~/.config/nvim/pack/plugins/start/gobol'
+
+    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Install (manual):{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│    {copy_cmd}{Colors.ENDC}")
     print(f"{Colors.OKBLUE}│{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Installation steps:{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│    1. Copy the nvim-gobol/ directory to your Neovim config:{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.OKCYAN}cp -r nvim-gobol ~/.config/nvim/pack/plugins/start/gobol{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Or with lazy.nvim:{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│    {{{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│      dir = \"~/gobol/nvim-gobol\",{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│      ft = \"gobol\",{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│      config = function(){Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│        vim.cmd(\"packadd gobol\"){Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│      end,{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│    }}{Colors.ENDC}")
     print(f"{Colors.OKBLUE}│{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│    2. Or use a plugin manager (lazy.nvim example):{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.OKCYAN}~/.config/nvim/lua/plugins/gobol.lua{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.GREY}return {{{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.GREY}  dir = \"~/gobol/nvim-gobol\",{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.GREY}  ft = \"gobol\",{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.GREY}  config = function(){Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.GREY}    vim.cmd(\"packadd gobol\"){Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.GREY}  end,{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│       {Colors.GREY}}}{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Notes:{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│    - Ensure Gobol LSP is in PATH: {Colors.OKCYAN}~/.gobol/bin{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│    - LSP config is auto-detected if lsp.lua is sourced{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Note:{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}│    Ensure Gobol LSP is in PATH: ~/.gobol/bin{Colors.ENDC}")
     print(f"{Colors.OKBLUE}└─{Colors.ENDC}")
 
-    # Pause so the user can actually read the guide before the main loop
-    # clears the screen. Without this, print_menu()'s clear_screen() wipes
-    # the output the instant task_extension_guide() returns.
     input(f"{Colors.GREY}Press Enter to return to main menu...{Colors.ENDC}")
 
 # ==================== Main TUI Loop ====================
@@ -314,7 +314,7 @@ def main():
             task_extension_guide()
         elif choice == "3":
             task_uninstall()
-        elif choice == "4":
+        elif choice == "4" or choice == "q":
             print(f"{Colors.OKCYAN}Goodbye!{Colors.ENDC}")
             break
         else:

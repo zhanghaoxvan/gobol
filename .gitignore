@@ -12,6 +12,10 @@ grape.toml
 tmp.*
 test_*
 
+# Wow the extension of VSCode
 vscode-gobol/node_modules/
 vscode-gobol/.marscode/
+vscode-gobol/out/
+vscode-gobol/out/extension.js
+
 __pycache__/

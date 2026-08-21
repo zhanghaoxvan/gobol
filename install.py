@@ -27,7 +27,7 @@ class Colors:
     GREY = '\033[90m'
 
 def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
+    subprocess.run('cls' if os.name == 'nt' else 'clear', shell=True)
 
 def print_menu(title, options, footer=""):
     clear_screen()
@@ -192,9 +192,9 @@ def task_build_and_install(no_build=False):
         print_status(f"Please run: source {rc}  OR restart your terminal", "info")
     else:
         print_status("Setting system environment variables...", "info")
-        os.system(f'setx GOBOL_HOME "{install_dir}"')
-        os.system(f'setx GOBOL_INSTALL_DIR "{install_dir}"')
-        os.system(f'setx PATH "%PATH%;{install_dir}\\bin"')
+        subprocess.run(f'setx GOBOL_HOME "{install_dir}"', shell=True)
+        subprocess.run(f'setx GOBOL_INSTALL_DIR "{install_dir}"', shell=True)
+        subprocess.run(f'setx PATH "%PATH%;{install_dir}\\bin"', shell=True)
         print_status("Environment variables set. Please restart your terminal.", "info")
     
     print_status("Installation complete! Gobol is installed globally.", "ok")

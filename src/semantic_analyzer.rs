@@ -3075,6 +3075,7 @@ mod tests {
     // when the resolved file lives under `.../usr/include/` so we don't
     // miss `printf` just because its declaration is in `<_stdio.h>`.
     #[test]
+    #[cfg(unix)]
     fn header_declares_function_finds_printf_in_angle_bracket_child() {
         // A synthetic header that mirrors Apple's structure: the top-level
         // file `.../usr/include/stdio.h` contains only `#include <_stdio.h>`,

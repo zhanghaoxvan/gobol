@@ -27,30 +27,60 @@ python3 install.py
 ```
 
 That's it! The installer will:
-- Build the compiler and package manager
-- Copy binaries to the installation directory[default is `~/.local/bin`(Unix) or `%USERPROFILE%\.local\bin`(Windows)]
-- Add them to your PATH
-- Copy the standard library
+- Build the compiler, package manager, and LSP server
+- Copy binaries to the installation directory (default `~/.gobol`)
+- Add `~/.gobol/bin` to your PATH
+- Copy the standard library to `~/.gobol/lib/std`
 
 就是这样！安装程序会：
-- 编译编译器和包管理器
-- 复制二进制文件到安装目录[默认是 `~/.local/bin`(Unix) 上的 `%USERPROFILE%\.local\bin`(Windows) 上的 PATH]
-- 复制标准库
+- 编译编译器、包管理器和 LSP 服务器
+- 复制二进制文件到安装目录（默认 `~/.gobol`）
+- 添加 `~/.gobol/bin` 到 PATH
+- 复制标准库到 `~/.gobol/lib/std`
 
-### Custom Install Directory / 自定义安装目录
+#### Custom Install Directory / 自定义安装目录
 
 ```bash
-python3 install.py --install-dir /my/custom/path
+# Set environment variable to specify installation location / 设置环境变量指定安装位置
+export GOBOL_INSTALL_DIR=/my/custom/path
+python3 install.py
 ```
 
-### Options / 选项
+Or enter a custom path when prompted during installation.
+
+或者在安装过程中根据提示输入自定义路径。
+
+#### Options / 选项
 
 | Option / 选项 | Description / 描述 |
-|---------------|-------------------|
-| `--install-dir DIR` | Installation directory / 安装目录 |
-| `--no-build` | Skip building (use existing binaries) / 跳过编译（使用现有二进制文件） |
-| `--uninstall` | Uninstall / 卸载 |
-| `--help` | Show help / 显示帮助 |
+|---|---|
+| `GOBOL_INSTALL_DIR` env / 环境变量 | Installation directory / 安装目录 |
+| `--no-build` | Skip building (use existing binaries) / 跳过编译（使用现有二进制文件）|
+
+#### Verify Installation / 验证安装
+
+```bash
+gobol --version
+grape --version
+gobol-lsp --version
+```
+
+#### Uninstall / 卸载
+
+```bash
+python3 install.py
+# Select "Uninstall Gobol" from the menu / 选择菜单中的 "Uninstall Gobol"
+```
+
+Or manually remove:
+
+或手动删除：
+
+```bash
+rm -rf ~/.gobol
+# And clean up GOBOL_HOME related lines in .bashrc/.zshrc
+# 并清理 .bashrc/.zshrc 中的 GOBOL_HOME 相关行
+```
 
 ### Verify Installation / 验证安装
 
@@ -121,10 +151,10 @@ Create a file `main.gbl`:
 创建文件 `main.gbl`：
 
 ```gobol
-import io
+import std;
 
 func main() {
-    io.println("Hello, Gobol!")
+    io::println("Hello, Gobol!")
 }
 ```
 

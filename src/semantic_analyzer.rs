@@ -600,7 +600,23 @@ impl SemanticAnalyzer {
             return Ok(String::new());
         }
 
+        // Directory where this header lives — used to resolve relative
+        // `#include "..."` form.
         let base_dir = resolved.parent().map(|p| p.to_path_buf());
+        // System include root for `#include <...>`: if the resolved header
+        // lives under `.../usr/include/` then the system-include root is
+        // `.../usr/include`.  On macOS, `<SDK>/usr/include/stdio.h` pulls
+        // in `<_stdio.h>` from the same system-include root (Apple wraps
+        // declarations that way).  On Linux, glibc uses sub-includes under
+        // `/usr/include/<bits|features|sys>/` for the same effect — this
+        // root is correct there too.
+        let sysroot: Option<std::path::PathBuf> = {
+            let s = resolved.to_string_lossy();
+            let marker = "/usr/include/";
+            s.find(marker)
+                .map(|idx| std::path::PathBuf::from(&s[..idx + marker.len()]))
+        };
+
         let mut out = String::new();
         for line in content.lines() {
             let trimmed = line.trim_start();
@@ -630,6 +646,27 @@ impl SemanticAnalyzer {
                         out.push('\n');
                         continue;
                     }
+                } else if rest.starts_with('<') {
+                    // System include `#include <foo.h>`: only resolve when we
+                    // have a well-defined system include root (i.e. this
+                    // header already lives inside .../usr/include/). This
+                    // lets the analyzer see into Apple's `<_stdio.h>` and
+                    // glibc's `<bits/libc-header-start.h>` so declarations
+                    // like `printf` aren't missed just because they live
+                    // in an angle-bracket child.
+                    if let Some(inner_end) = rest.find('>') {
+                        let inc = &rest[1..inner_end];
+                        if let Some(ref root) = sysroot {
+                            let child = root.join(inc);
+                            let child_str = child.to_string_lossy();
+                            match self.read_header_recursive(&child_str, visited) {
+                                Ok(sub) => out.push_str(&sub),
+                                Err(_) => out.push_str(line),
+                            }
+                            out.push('\n');
+                            continue;
+                        }
+                    }
                 }
             }
             out.push_str(line);
@@ -655,10 +692,20 @@ impl SemanticAnalyzer {
                 let prev_ok = i == 0
                     || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
                 // Check that the char after the match is `(` (allowing
-                // optional whitespace between name and `(`).
+                // optional whitespace — space, tab, CR, LF, form-feed,
+                // vertical-tab. C declarations commonly split across lines,
+                // e.g.:
+                //     int
+                //     printf(const char *, ...);
+                // — skipping only ' ' and '\t' misses those.)
                 let mut j = i + needle.len();
-                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
-                    j += 1;
+                while j < bytes.len() {
+                    let b = bytes[j];
+                    if matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C') {
+                        j += 1;
+                    } else {
+                        break;
+                    }
                 }
                 let next_ok = j < bytes.len() && bytes[j] == b'(';
                 if prev_ok && next_ok {
@@ -2998,3 +3045,61 @@ impl AstVisitor for SemanticAnalyzer {
         self.type_stack.push(array_type);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression test for the macOS CI failure on `test_ffi_variadic`:
+    // declarations split across lines (`int\nprintf(...)`) must be detected
+    // even though `\n` sits between the name and the `(`.
+    #[test]
+    fn header_declares_function_accepts_newline_between_name_and_paren() {
+        let hdr = "int\nprintf(const char * restrict, ...);\n";
+        assert!(
+            SemanticAnalyzer::header_declares_function(hdr, "printf"),
+            "expected `printf` to be found across a line break"
+        );
+    }
+
+    // `fprintf` must NOT match when searching for `printf` — word boundary.
+    #[test]
+    fn header_declares_function_respects_word_boundary() {
+        let hdr = "int fprintf(FILE *, const char *, ...);";
+        assert!(!SemanticAnalyzer::header_declares_function(hdr, "printf"));
+        assert!(SemanticAnalyzer::header_declares_function(hdr, "fprintf"));
+    }
+
+    // macOS SDK `stdio.h` wraps declarations in angle-bracket sub-includes,
+    // e.g. `#include <_stdio.h>`. `read_header_recursive` must follow those
+    // when the resolved file lives under `.../usr/include/` so we don't
+    // miss `printf` just because its declaration is in `<_stdio.h>`.
+    #[test]
+    fn header_declares_function_finds_printf_in_angle_bracket_child() {
+        // A synthetic header that mirrors Apple's structure: the top-level
+        // file `.../usr/include/stdio.h` contains only `#include <_stdio.h>`,
+        // with the actual declaration in the angle-bracket child.
+        let tmp = std::env::temp_dir();
+        let usr = tmp.join("ci_test_sa").join("usr").join("include");
+        std::fs::create_dir_all(&usr).expect("mkdir");
+        let stdio = usr.join("stdio.h");
+        let stdio_inner = usr.join("_stdio.h");
+        std::fs::write(&stdio, "#include <_stdio.h>\n").unwrap();
+        std::fs::write(
+            &stdio_inner,
+            "int printf(const char * restrict, ...) __printflike(1,2);\n",
+        )
+        .unwrap();
+        let path = stdio.to_string_lossy().to_string();
+        let sa = SemanticAnalyzer::new();
+        let content = sa.read_header_file(&path).expect("read_header_file");
+        std::fs::remove_dir_all(tmp.join("ci_test_sa")).ok();
+
+        assert!(
+            SemanticAnalyzer::header_declares_function(&content, "printf"),
+            "printf should be found after inlining angle-bracket child _stdio.h\ncontent:\n{}",
+            &content
+        );
+    }
+}
+

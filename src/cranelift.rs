@@ -2950,11 +2950,18 @@ impl CraneliftBackend {
         if !target_is_windows(&opts.target) {
             cmd.arg("-lpthread");
         }
-        let status = cmd
-            .status()
+        // Capture stdout/stderr so the error message includes the actual
+        // linker diagnostic (undefined symbol, cannot find -lfoo, etc.).
+        let out = cmd
+            .output()
             .map_err(|e| format!("Failed to invoke linker '{}': {}", linker.display(), e))?;
-        if !status.success() {
-            return Err(format!("Linking failed with exit code {:?}", status.code()));
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Err(format!(
+                "Linking failed with exit code {:?}\n--- linker stdout ---\n{}\n--- linker stderr ---\n{}",
+                out.status.code(), stdout, stderr
+            ));
         }
         Ok(())
     }
@@ -2987,6 +2994,14 @@ impl CraneliftBackend {
             ));
         }
         let c_compiler = &tool.compiler;
+
+        // Pre-link check: verify the Cranelift-produced object exists.
+        if !std::path::Path::new(obj_path).exists() {
+            return Err(format!(
+                "link_msvc: main object file '{}' does not exist before linking",
+                obj_path
+            ));
+        }
 
         // Compile the C runtime sources to .obj objects. The cc-discovered
         // env is applied to cl.exe so it finds the SDK headers (INCLUDE).
@@ -3021,9 +3036,32 @@ impl CraneliftBackend {
             for (k, v) in &tool.env {
                 c.env(k, v);
             }
-            let status = c.status().map_err(|e| format!("Failed to compile runtime with '{}': {}", c_compiler.display(), e))?;
-            if !status.success() {
-                return Err(format!("Runtime compilation failed with exit code {:?}", status.code()));
+            // Use .output() to capture cl.exe stdout/stderr — when cl.exe
+            // fails we need the diagnostic text (which file wasn't found,
+            // which symbol was unresolved, etc.) in the error message.
+            let out = c.output().map_err(|e| {
+                format!(
+                    "Failed to compile runtime with '{}': {}\n(Is cl.exe on PATH? The cc-discovered env should include it.)",
+                    c_compiler.display(), e
+                )
+            })?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                return Err(format!(
+                    "Runtime compilation failed with exit code {:?}\n--- cl.exe stdout ---\n{}\n--- cl.exe stderr ---\n{}",
+                    out.status.code(), stdout, stderr
+                ));
+            }
+            // Verify the .obj was actually produced — cl.exe can return 0
+            // in edge cases where the output path was silently ignored.
+            if !std::path::Path::new(&rt_obj).exists() {
+                return Err(format!(
+                    "Runtime compilation appeared to succeed but '{}' was not produced.\ncl.exe stdout: {}\ncl.exe stderr: {}",
+                    rt_obj,
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                ));
             }
             extra_objs.push(rt_obj);
         }
@@ -3038,13 +3076,29 @@ impl CraneliftBackend {
             for (k, v) in &tool.env {
                 c.env(k, v);
             }
-            let status = c.status().map_err(|e| format!("Failed to compile stubs with '{}': {}", c_compiler.display(), e))?;
-            if !status.success() {
-                return Err(format!("Stubs compilation failed with exit code {:?}", status.code()));
+            let out = c.output().map_err(|e| {
+                format!("Failed to compile stubs with '{}': {}", c_compiler.display(), e)
+            })?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                return Err(format!(
+                    "Stubs compilation failed with exit code {:?}\n--- cl.exe stdout ---\n{}\n--- cl.exe stderr ---\n{}",
+                    out.status.code(), stdout, stderr
+                ));
+            }
+            if !std::path::Path::new(&stub_obj).exists() {
+                return Err(format!(
+                    "Stubs compilation appeared to succeed but '{}' was not produced.\ncl.exe stdout: {}\ncl.exe stderr: {}",
+                    stub_obj,
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                ));
             }
             extra_objs.push(stub_obj);
         }
 
+        // ---- Build the link.exe command ----
         let mut cmd = std::process::Command::new(link_exe);
         // Apply the MSVC env so link.exe resolves import libs (LIB) and
         // its own DLLs (PATH) — this is what makes ws2_32.lib findable
@@ -3080,16 +3134,46 @@ impl CraneliftBackend {
                 cmd.arg(format!("/LIBPATH:{}", rustlib.display()));
             }
         }
-        let status = cmd
-            .status()
+        // ---- LNK1181 fix: explicitly add /LIBPATH: for every directory
+        // in the cc env's LIB variable. On some Windows CI setups the
+        // `LIB` env var propagation via `cmd.env("LIB", …)` is silently
+        // insufficient (the cc crate is build-script-oriented and may not
+        // populate LIB at runtime). Passing `/LIBPATH:` on the command
+        // line is the belt-and-suspenders approach — link.exe always
+        // honours these, so `ws2_32.lib` and the CRT libs resolve even
+        // when the env var is missing or wrong.
+        for (k, v) in &tool.env {
+            if k.to_ascii_lowercase() == "lib" {
+                let lib_str = v.to_string_lossy();
+                for dir in lib_str.split(';') {
+                    let trimmed = dir.trim();
+                    if !trimmed.is_empty() && std::path::Path::new(trimmed).is_dir() {
+                        cmd.arg(format!("/LIBPATH:{}", trimmed));
+                    }
+                }
+            }
+        }
+
+        // Use .output() to capture link.exe stdout/stderr. LNK1181 /
+        // LNK2019 / LNK2001 diagnostics include the *name of the missing
+        // file or symbol* — without capturing them, the user only sees
+        // the raw exit code (e.g. "Some(1181)") and has no way to know
+        // which file link.exe couldn't find.
+        let out = cmd
+            .output()
             .map_err(|e| format!("Failed to invoke link.exe '{}': {}", link_exe.display(), e))?;
 
         // Clean up the temporary .obj files.
         for obj in &extra_objs {
             let _ = std::fs::remove_file(obj);
         }
-        if !status.success() {
-            return Err(format!("Linking failed with exit code {:?}", status.code()));
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Err(format!(
+                "Linking failed with exit code {:?}\n--- link.exe stdout ---\n{}\n--- link.exe stderr ---\n{}",
+                out.status.code(), stdout, stderr
+            ));
         }
         Ok(())
     }
@@ -3119,11 +3203,20 @@ impl CraneliftBackend {
             cmd.arg(format!("-l{}", lib));
         }
         cmd.arg(obj_path);
-        let status = cmd
-            .status()
+        let output = cmd
+            .output()
             .map_err(|e| format!("Failed to invoke linker '{}': {}", ld.display(), e))?;
-        if !status.success() {
-            return Err(format!("Linking failed with exit code {:?}", status.code()));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!(
+                "Linking failed with exit code {:?}\n\n\
+                 stdout:\n{}\n\n\
+                 stderr:\n{}",
+                output.status.code(),
+                stdout,
+                stderr
+            ));
         }
         Ok(())
     }

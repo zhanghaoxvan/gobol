@@ -2974,13 +2974,34 @@ impl CraneliftBackend {
 
         // Compile the C runtime sources to .obj objects. The cc-discovered
         // env is applied to cl.exe so it finds the SDK headers (INCLUDE).
+        //
+        // Include-search fix (needed so the master TU `runtime.c` can do
+        // `#include "runtime/platform.h"` etc.):
+        //   • If runtime.c lives at `std/runtime.c`, then the parent of its
+        //     parent (i.e. `./`) is not enough — `"runtime/platform.h"` is
+        //     found relative to `std/`, which is runtime.c's parent dir.
+        //   • We therefore add runtime.c's *parent* as `/I` AND its
+        //     grandparent (defensive for installed/non-dev layouts).
+        let mut rt_includes: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(rt) = &opts.runtime_c_path {
+            let rt_p = std::path::Path::new(rt);
+            if let Some(parent) = rt_p.parent() {
+                rt_includes.push(parent.to_path_buf());
+                if let Some(gp) = parent.parent() {
+                    rt_includes.push(gp.to_path_buf());
+                }
+            }
+        }
+
         let mut extra_objs: Vec<String> = Vec::new();
         if let Some(rt) = &opts.runtime_c_path {
             let rt_obj = format!("{}.runtime.obj", final_output);
             let mut c = std::process::Command::new(c_compiler);
-            c.args(["/c", "/nologo"])
-                .arg(format!("/Fo{}", rt_obj))
-                .arg(rt);
+            c.args(["/c", "/nologo"]);
+            for inc in &rt_includes {
+                c.arg(format!("/I{}", inc.display()));
+            }
+            c.arg(format!("/Fo{}", rt_obj)).arg(rt);
             for (k, v) in &tool.env {
                 c.env(k, v);
             }
@@ -2993,9 +3014,11 @@ impl CraneliftBackend {
         if has_stubs {
             let stub_obj = format!("{}.va.obj", final_output);
             let mut c = std::process::Command::new(c_compiler);
-            c.args(["/c", "/nologo"])
-                .arg(format!("/Fo{}", stub_obj))
-                .arg(stubs_src_path);
+            c.args(["/c", "/nologo"]);
+            for inc in &rt_includes {
+                c.arg(format!("/I{}", inc.display()));
+            }
+            c.arg(format!("/Fo{}", stub_obj)).arg(stubs_src_path);
             for (k, v) in &tool.env {
                 c.env(k, v);
             }

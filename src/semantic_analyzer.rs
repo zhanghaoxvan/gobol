@@ -502,26 +502,45 @@ impl SemanticAnalyzer {
     ///
     /// Tries the following locations in order:
     /// 1. The path as-is (absolute or relative to CWD)
-    /// 2. Relative to the current module's directory
-    /// 3. Relative to each configured library path
+    /// 2. On macOS: absolute `/usr/include/<name>` under the Xcode SDK path
+    ///    (retrieved via `xcrun --sdk macosx --show-sdk-path`), because
+    ///    macOS Catalina+ no longer ships system headers at `/usr/include`.
+    /// 3. Relative to the current module's directory
+    /// 4. Relative to each configured library path
     ///
     /// Returns the resolved filesystem path together with its raw content so
     /// callers can resolve relative `#include` directives against the header's
     /// own directory.
     fn resolve_header_file(&self, path: &str) -> Result<(std::path::PathBuf, String), std::io::Error> {
-        // 1. Try as-is (absolute or CWD-relative)
         let p = Path::new(path);
+
+        // 1. Try as-is (absolute or CWD-relative)
         if let Ok(content) = fs::read_to_string(p) {
             return Ok((p.to_path_buf(), content));
         }
-        // 2. Relative to the current module directory
+
+        // 2. macOS SDK fallback for absolute /usr/include/<...> paths.
+        //    macOS Catalina (10.15+) moved system headers into the Xcode
+        //    SDK bundle; the filesystem /usr/include no longer exists even
+        //    with the Command Line Tools installed. xcrun gives the active
+        //    SDK path.
+        if cfg!(target_os = "macos") && path.starts_with("/usr/include/") {
+            if let Some(sdk) = Self::macos_sdk_path() {
+                let relocated = sdk.join(path.trim_start_matches('/'));
+                if let Ok(content) = fs::read_to_string(&relocated) {
+                    return Ok((relocated, content));
+                }
+            }
+        }
+
+        // 3. Relative to the current module directory
         if let Some(ref dir) = self.current_module_dir {
             let p = Path::new(dir).join(path);
             if let Ok(content) = fs::read_to_string(&p) {
                 return Ok((p, content));
             }
         }
-        // 3. Relative to each lib path
+        // 4. Relative to each lib path
         for lp in &self.lib_paths {
             let p = Path::new(lp).join(path);
             if let Ok(content) = fs::read_to_string(&p) {
@@ -539,6 +558,22 @@ impl SemanticAnalyzer {
             std::io::ErrorKind::NotFound,
             format!("header file '{}' not found", path),
         ))
+    }
+
+    /// Return the path to the active macOS SDK via `xcrun`. Cached per-call
+    /// into a `String` so we only shell out once per header file, not per
+    /// nested `#include`. Returns `None` if xcrun is unavailable or errors.
+    fn macos_sdk_path() -> Option<std::path::PathBuf> {
+        use std::process::Command;
+        let output = Command::new("xcrun")
+            .args(["--sdk", "macosx", "--show-sdk-path"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(std::path::PathBuf::from(s)) }
     }
 
     /// Read a C header and recursively inline `#include "..."` directives so

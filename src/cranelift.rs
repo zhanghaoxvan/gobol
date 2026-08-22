@@ -935,14 +935,30 @@ impl CraneliftBackend {
 
         // extern "C" functions use the original C symbol name as the linker
         // symbol (no gbl_ prefix, no arity suffix, no module prefix).
-        // After import processing, f.name may be `builtins::gobol_print`, but
-        // the attributes list may contain "extern" or "extern:name" entries.
+        // After import processing, `f.name` may be `builtins::gobol_print`,
+        // and the attribute list has either:
+        //   • `extern:custom_name` → use `custom_name` verbatim, or
+        //   • plain `extern` → strip the Gobol module prefix and keep the
+        //     last `::`-separated segment (e.g. `builtins::gobol_print`
+        //     becomes the bare C name `gobol_print`).
+        //
+        // BUG FIX (Windows LNK1120 / 15 unresolved externals): the prior
+        // logic chained `.find(|a| *a == "extern").and_then(|a|
+        // a.strip_prefix("extern:"))`, which always produced `None` because
+        // a match of `"extern"` can never start with `"extern:"`. The
+        // `unwrap_or(&f.name)` fallback therefore re-used the module-
+        // qualified name, leading the linker to ask for `builtins::gobol_print`
+        // while runtime.c only exports `gobol_print`.
         let sym = if is_extern {
-            f.attributes.iter()
-                .find(|a| *a == "extern")
-                .and_then(|a| a.strip_prefix("extern:"))
-                .unwrap_or(&f.name)
-                .to_string()
+            match f.attributes.iter().find_map(|a| a.strip_prefix("extern:")) {
+                Some(explicit) => explicit.to_string(),
+                None => f
+                    .name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&f.name)
+                    .to_string(),
+            }
         } else {
             Self::func_symbol(&f.name, arity)
         };

@@ -3039,15 +3039,28 @@ impl CraneliftBackend {
         let mut rt_includes: Vec<std::path::PathBuf> = Vec::new();
         if let Some(rt) = &opts.runtime_c_path {
             let rt_p = std::path::Path::new(rt);
+            // Resolve each include dir to ABSOLUTE, same rationale as the
+            // source path in `compile_to_obj`: cl.exe runs with CWD set to
+            // `build_dir`, so a relative include root like `std` would be
+            // searched *there* and silently miss the SDK headers under the
+            // real (source-file) directory. Absolute dirs are resolved from
+            // the filesystem root and immune to that coordinate mismatch.
+            let abs_of = |p: &std::path::Path| -> std::path::PathBuf {
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    std::env::current_dir().unwrap_or_default().join(p)
+                }
+            };
             if let Some(parent) = rt_p.parent() {
                 // 如果 parent 非空，才加进去
                 if !parent.as_os_str().is_empty() {
-                    rt_includes.push(parent.to_path_buf());
+                    rt_includes.push(abs_of(parent));
                 }
                 if let Some(gp) = parent.parent() {
                     // 如果 grandparent 也是非空的，才加进去
                     if !gp.as_os_str().is_empty() {
-                        rt_includes.push(gp.to_path_buf());
+                        rt_includes.push(abs_of(gp));
                     }
                 }
             }
@@ -3087,6 +3100,25 @@ impl CraneliftBackend {
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| format!("Invalid obj name '{}'", final_obj.display()))?;
 
+            // Resolve the source path to ABSOLUTE before handing it to
+            // cl.exe. The compiler runs with CWD set to `build_dir`, but a
+            // relative source like `std/runtime.c` (the CWD-relative form
+            // returned by find_runtime_c) is resolved *against that build
+            // dir* — the file isn't there, so cl.exe reports C1083 "Cannot
+            // open source file". Absolute paths are interpreted from the
+            // filesystem root and are immune to this "coordinate mismatch".
+            // (For `/Fo` we deliberately keep the short RELATIVE name to
+            // dodge cl.exe's long-absolute-path ghost-compile.)
+            let src_path = std::path::Path::new(src);
+            let abs_src = if src_path.is_absolute() {
+                src_path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| format!("Failed to get current dir: {}", e))?
+                    .join(src_path)
+            };
+            let abs_src = abs_src.to_string_lossy().into_owned();
+
             let mut last_diag = String::new();
             for compiler in &c_compiler_candidates {
                 let mut c = std::process::Command::new(compiler);
@@ -3097,7 +3129,7 @@ impl CraneliftBackend {
                 for inc in &rt_includes {
                     c.arg(format!("/I{}", inc.display()));
                 }
-                c.arg(format!("/Fo{}", obj_file_name)).arg(src);
+                c.arg(format!("/Fo{}", obj_file_name)).arg(&abs_src);
                 for (k, v) in &tool.env {
                     c.env(k, v);
                 }

@@ -3224,6 +3224,18 @@ impl CraneliftBackend {
         for lib in &opts.link_libs {
             cmd.arg(format!("{}.lib", lib));
         }
+        // MSVC: the C runtime's `net` module references Winsock (socket,
+        // connect, accept, …) which on Windows lives in `ws2_32.lib`, not
+        // the standard C library. link.exe must be told to load it, or the
+        // link fails with LNK2019 "unresolved external symbol __imp_accept"
+        // etc. (≈12 symbols). Link it whenever the C runtime is present,
+        // dedup with any `--link-arg ws2_32` already injected by grape —
+        // same guard as the MinGW path in `link_cc_driver`.
+        if opts.runtime_c_path.is_some() && target_is_windows(&opts.target)
+            && !opts.link_libs.iter().any(|l| l.eq_ignore_ascii_case("ws2_32"))
+        {
+            cmd.arg("ws2_32.lib");
+        }
         // Add Rust toolchain lib paths so common system libs resolve.
         if let Ok(sysroot) = rust_sysroot() {
             let libroot = sysroot.join("lib");

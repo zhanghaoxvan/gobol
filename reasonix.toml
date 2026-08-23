@@ -1,2 +1,2 @@
 [permissions]
-allow = ["Bash(sed -n:*)", "Edit", "Bash=rg -nF '.grape' /home/zhx/gobol/src/bin/grape.rs /home/zhx/gobol/install.py; echo \"exit=$?\"", "Bash=cd /home/zhx/gobol && cargo build --bin grape --bin gobol 2>&1 | tail -30"]
+allow = ["Bash(sed -n:*)", "Edit", "Bash=rg -nF '.grape' /home/zhx/gobol/src/bin/grape.rs /home/zhx/gobol/install.py; echo \"exit=$?\"", "Bash=cd /home/zhx/gobol && cargo build --bin grape --bin gobol 2>&1 | tail -30", "Bash=cd /home/zhx/gobol && cargo test 2>&1 | head -100"]

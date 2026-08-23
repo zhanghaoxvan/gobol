@@ -12,6 +12,16 @@ let startingPromise = null;
 let projectInfo = null;
 let projectWatcher = null;
 
+// ============ Cross-file auto-highlight ============
+// Tracks which editors' decorations are active. The LSP's custom
+// `gobol/highlights` request returns highlight ranges for the identifier under
+// the cursor across *all* open documents; on cursor move / content change we
+// re-query and re-decorate every opened gobol editor.
+let highlightDecoration = null;        // decoration style object
+let highlightEditorMap = new Map();    // editor -> its decoration (for cleanup)
+let hlRequestSeq = 0;                  // monotonic id to drop stale highlight responses
+let hlDebounceTimer = null;            // debounce timer for refresh
+
 function setStatus(status, tooltip) {
     if (!statusBarItem) return;
     switch (status) {
@@ -35,6 +45,90 @@ function setStatus(status, tooltip) {
     }
     statusBarItem.tooltip = tooltip || '';
     statusBarItem.show();
+}
+
+// ============ Cross-file auto-highlight: implementation ============
+
+function ensureHighlightDecoration() {
+    if (!highlightDecoration) {
+        highlightDecoration = vscode.window.createTextEditorDecorationType({
+            backgroundColor: new vscode.ThemeColor('editor.wordHighlightBackground'),
+            border: new vscode.ThemeColor('editor.wordHighlightStrongBorder'),
+        });
+    }
+    return highlightDecoration;
+}
+
+// Remove all cross-file highlight decorations from every editor we applied.
+// Editors may have been closed since (map entries can out-live the editor), so
+// skip any that are no longer open and guard against setDecorations errors.
+function clearAllHighlights() {
+    for (const editor of highlightEditorMap.keys()) {
+        if (!editor.document || editor.document.isClosed) continue;
+        try {
+            editor.setDecorations(highlightDecoration, []);
+        } catch (_) {
+            // editor already disposed / invalid; drop it silently
+        }
+    }
+    highlightEditorMap.clear();
+}
+
+// Apply cross-file highlight ranges to the given editor.
+function applyHighlights(editor, ranges) {
+    ensureHighlightDecoration();
+    editor.setDecorations(highlightDecoration, ranges);
+    highlightEditorMap.set(editor, ranges);
+}
+
+// Debounced, sequenced refresh of the cross-file highlights. The public entry
+// point called by VS Code events; coalesces rapid cursor/content changes into
+// a single request and drops responses that are no longer the latest.
+function refreshCrossFileHighlights() {
+    clearTimeout(hlDebounceTimer);
+    hlDebounceTimer = setTimeout(() => {
+        performHighlightRefresh();
+    }, 120);
+}
+
+async function performHighlightRefresh() {
+    const seq = ++hlRequestSeq;
+    const active = vscode.window.activeTextEditor;
+    if (!client || !client.isRunning() || !active || active.document.languageId !== 'gobol') {
+        clearAllHighlights();
+        return;
+    }
+    const params = {
+        textDocument: { uri: active.document.uri.toString() },
+        position: active.selection.active,
+    };
+    // Always clear first so stale highlights never linger if the request
+    // fails or travels to a client that no longer has the document open.
+    clearAllHighlights();
+    try {
+        // Filter out per-file entries that are empty to avoid setDecorations
+        // no-ops, and only touch editors that are still open.
+        const perFile = await client.sendRequest('gobol/highlights', params);
+        if (seq !== hlRequestSeq) return; // a newer request has superseded us
+        for (const item of perFile || []) {
+            if (!item.highlights || item.highlights.length === 0) continue;
+            const docUri = vscode.Uri.parse(item.uri);
+            for (const ed of vscode.window.visibleTextEditors) {
+                if (ed.document.languageId === 'gobol' && ed.document.uri.toString() === docUri.toString()) {
+                    const ranges = item.highlights.map(h =>
+                        new vscode.Range(
+                            h.range.start.line, h.range.start.character,
+                            h.range.end.line, h.range.end.character
+                        )
+                    );
+                    applyHighlights(ed, ranges);
+                }
+            }
+        }
+    } catch (_) {
+        // Server may have restarted or the request may legitimately fail;
+        // highlights were already cleared so the state stays consistent.
+    }
 }
 
 // ============ grape.toml detection and parsing ============
@@ -474,7 +568,34 @@ function activate(context) {
         statusBarItem,
         vscode.commands.registerCommand('gobol.restartLsp', restartLsp),
         vscode.commands.registerCommand('gobol.showStatus', showStatus),
-        vscode.commands.registerCommand('gobol.showProject', showProject)
+        vscode.commands.registerCommand('gobol.showProject', showProject),
+        // Cross-file auto-highlight: re-query whenever the cursor moves within
+        // a gobol file, the active gobol editor changes, a gobol document is
+        // edited/saved, or the set of visible gobol editors changes.
+        vscode.window.onDidChangeTextEditorSelection((e) => {
+            if (e.textEditor.document.languageId === 'gobol') {
+                refreshCrossFileHighlights();
+            }
+        }),
+        vscode.window.onDidChangeActiveTextEditor((ed) => {
+            if (ed && ed.document.languageId === 'gobol') {
+                refreshCrossFileHighlights();
+            } else {
+                clearAllHighlights();
+            }
+        }),
+        vscode.workspace.onDidChangeTextDocument((e) => {
+            if (e.document.languageId === 'gobol') {
+                refreshCrossFileHighlights();
+            }
+        }),
+        vscode.window.onDidChangeVisibleTextEditors(() => {
+            if (vscode.window.activeTextEditor &&
+                vscode.window.activeTextEditor.document.languageId === 'gobol') {
+                refreshCrossFileHighlights();
+            }
+        }),
+        { dispose: () => { clearTimeout(hlDebounceTimer); clearAllHighlights(); } },
     );
 
     // Kick off client when a Gobol file is visible, or immediately if one

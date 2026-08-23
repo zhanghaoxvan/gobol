@@ -153,6 +153,21 @@ impl DocState {
         })
     }
 
+    /// Compute document-highlight ranges for every identifier occurrence of
+    /// `name` in this document. Used both by the standard
+    /// `textDocument/documentHighlight` handler and by the cross-file
+    /// `gobol/highlights` custom method (re-computed on the fly per file).
+    fn highlights_for(&self, name: &str) -> Vec<DocumentHighlight> {
+        self.tokens
+            .iter()
+            .filter(|t| t.r#type == TokenType::Identifier && t.value == name)
+            .map(|t| DocumentHighlight {
+                range: token_to_range(t),
+                kind: Some(DocumentHighlightKind::TEXT),
+            })
+            .collect()
+    }
+
     #[allow(dead_code)]
     fn source_line(&self, line_1based: i32) -> &str {
         if line_1based <= 0 {
@@ -1255,6 +1270,7 @@ impl LanguageServer for GobolLsp {
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -1472,6 +1488,32 @@ impl LanguageServer for GobolLsp {
         }
     }
 
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let pos = params.text_document_position_params;
+        let uri = pos.text_document.uri.to_string();
+        let state_guard = self.documents.read().await;
+        let state = match state_guard.get(&uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let token = match state.token_at(pos.position.line, pos.position.character) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        if token.r#type != TokenType::Identifier {
+            return Ok(None);
+        }
+        let highlights = state.highlights_for(&token.value);
+        if highlights.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(highlights))
+        }
+    }
+
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.to_string();
         let pos = params.text_document_position.position;
@@ -1658,6 +1700,24 @@ impl LanguageServer for GobolLsp {
             Ok(Some(DocumentSymbolResponse::Nested(top_level)))
         }
     }
+}
+
+// ==================== GobolLsp ====================
+
+/// Custom `gobol/highlights` request: given a document position, return the
+/// ranges that highlight the same identifier across *all* open documents, so
+/// clients can visualise cross-file occurrences of a symbol.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CrossFileHighlightRequest {
+    #[serde(rename = "textDocument")]
+    text_document: TextDocumentIdentifier,
+    position: Position,
+}
+
+#[derive(serde::Serialize)]
+struct CrossFileHighlightForFile {
+    uri: String,
+    highlights: Vec<DocumentHighlight>,
 }
 
 impl GobolLsp {
@@ -1935,6 +1995,43 @@ impl GobolLsp {
                 .await;
         }
     }
+
+    /// Handle the custom `gobol/highlights` request (registered in `main`).
+    /// Resolves the identifier under the cursor in the source document, then
+    /// returns per-file highlight ranges for that same identifier across every
+    /// open document (i.e. cross-file auto-highlight).
+    async fn highlights(
+        &self,
+        params: CrossFileHighlightRequest,
+    ) -> Result<Vec<CrossFileHighlightForFile>> {
+        let uri = params.text_document.uri.to_string();
+
+        // Resolve the identifier under the cursor in the source document.
+        let name = {
+            let documents = self.documents.read().await;
+            let source_state = match documents.get(&uri) {
+                Some(s) => s,
+                None => return Ok(Vec::new()),
+            };
+            let token = source_state.token_at(params.position.line, params.position.character);
+            match token {
+                Some(t) if t.r#type == TokenType::Identifier => t.value.clone(),
+                _ => return Ok(Vec::new()),
+            }
+        };
+
+        // Compute occurrences of that identifier in every open document.
+        let mut results = Vec::new();
+        let documents = self.documents.read().await;
+        for (doc_uri, state) in documents.iter() {
+            let highlights = state.highlights_for(&name);
+            results.push(CrossFileHighlightForFile {
+                uri: doc_uri.clone(),
+                highlights,
+            });
+        }
+        Ok(results)
+    }
 }
 
 // ==================== Main ====================
@@ -1943,11 +2040,13 @@ fn main() {
     let stdin = stdin();
     let stdout = stdout();
 
-    let (service, socket) = LspService::new(|client| GobolLsp {
+    let (service, socket) = LspService::build(|client| GobolLsp {
         client,
         documents: Arc::new(RwLock::new(HashMap::new())),
         workspace_roots: Arc::new(std::sync::RwLock::new(Vec::new())),
-    });
+    })
+    .custom_method("gobol/highlights", GobolLsp::highlights)
+    .finish();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(Server::new(stdin, stdout, socket).serve(service));

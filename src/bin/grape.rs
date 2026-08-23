@@ -12,7 +12,6 @@ use git2::{Repository, ResetType};
 const GRAPE_TOML: &str = "grape.toml";
 const GRAPE_LOCK: &str = "grape.lock";
 const GRAPE_ERR: &str = "grape.err";
-const PACKAGES_DIR: &str = ".grape";
 const LIB_DIR: &str = "lib";
 
 // ============ 错误处理 ============
@@ -96,9 +95,20 @@ pub struct LockedPackage {
 
 // ============ 路径工具 ============
 
-/// Base directory for cached packages: `.grape/packages/`
+/// Base directory for cached packages and build artifacts.
+///
+/// Like Cargo, all compilation-local data lives under the single project
+/// root directory `target/`:
+///   * build artifacts (executables, intermediate `.o`/`.obj`) —
+///     `target/{triple}/{debug|release}/`
+///   * cached dependency packages — `target/grape/packages/<name>`
+fn target_dir() -> PathBuf {
+    PathBuf::from("target")
+}
+
+/// Base directory for cached packages: `target/grape/packages/`
 fn packages_dir() -> PathBuf {
-    PathBuf::from(PACKAGES_DIR).join("packages")
+    target_dir().join("grape").join("packages")
 }
 
 /// Project library directory: `lib/`
@@ -119,7 +129,7 @@ impl DependencySpec {
             .unwrap_or_else(|| self.repo.clone())
     }
 
-    /// Cross-platform path to the cached package: `.grape/packages/<name>`
+    /// Cross-platform path to the cached package: `target/grape/packages/<name>`
     fn local_path(&self) -> PathBuf {
         packages_dir().join(self.local_name())
     }
@@ -226,7 +236,7 @@ fn print_help() {
     println!("  grape list                  List all dependencies");
     println!("  grape run [--verbose]       Build and run the Gobol program");
     println!("  grape build [-o <file>] [--release]  Compile to native binary");
-    println!("  grape clean                 Clean cached packages");
+    println!("  grape clean                 Clean build artifacts and cached packages");
     println!("  grape version               Show the version");
     println!("  grape help                  Show this help message");
     println!();
@@ -884,17 +894,20 @@ fn run_compiled_binary(
 }
 
 fn cmd_clean() -> Result<()> {
-    println!("Cleaning cached packages...");
+    println!("Cleaning build artifacts and cached packages...");
 
-    if packages_dir().exists() {
-        for entry in fs::read_dir(packages_dir()).map_err(GrapeError::Io)? {
-            let entry = entry.map_err(GrapeError::Io)?;
-            let path = entry.path();
-            if path.is_dir() {
-                fs::remove_dir_all(&path).map_err(GrapeError::Io)?;
-                println!("  Removed: {}", path.display());
-            }
-        }
+    // Cargo-style: nuke the whole `target/` dir (build artifacts,
+    // intermediate .o/.obj, cached dependency packages).
+    if target_dir().exists() {
+        fs::remove_dir_all(&target_dir()).map_err(GrapeError::Io)?;
+        println!("  Removed: {}", target_dir().display());
+    }
+
+    // Backwards compatibility: remove the legacy `.grape/` cache if it
+    // was created by an older grape.
+    if Path::new(".grape").exists() {
+        fs::remove_dir_all(".grape").map_err(GrapeError::Io)?;
+        println!("  Removed: legacy .grape/ cache");
     }
 
     if Path::new(GRAPE_LOCK).exists() {
@@ -1302,7 +1315,7 @@ mod tests {
         assert_eq!(spec.local_name(), "repo");
         assert_eq!(
             spec.local_path(),
-            PathBuf::from(".grape").join("packages").join("repo")
+            PathBuf::from("target").join("grape").join("packages").join("repo")
         );
         assert_eq!(
             spec.lib_material_path(),
@@ -1322,11 +1335,12 @@ mod tests {
         assert!(p.is_relative(), "path should be relative, got {:?}", p);
         // Must use PathBuf join semantics (components, not string fmt).
         let comps: Vec<_> = p.components().collect();
-        assert!(comps.len() >= 3, "expected at least 3 components, got {:?}", comps);
-        // Verify the expected logical structure: .grape → packages → name
-        assert_eq!(comps[0].as_os_str(), ".grape");
-        assert_eq!(comps[1].as_os_str(), "packages");
-        assert_eq!(comps[2].as_os_str(), "my-lib");
+        assert!(comps.len() >= 4, "expected at least 4 components, got {:?}", comps);
+        // Verify the expected logical structure: target → grape → packages → name
+        assert_eq!(comps[0].as_os_str(), "target");
+        assert_eq!(comps[1].as_os_str(), "grape");
+        assert_eq!(comps[2].as_os_str(), "packages");
+        assert_eq!(comps[3].as_os_str(), "my-lib");
     }
 
     #[test]

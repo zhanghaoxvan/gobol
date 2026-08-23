@@ -61,7 +61,7 @@ void *gobol_array_new_2d(long long rows, long long cols) {
         if (!outer->data) { free(outer); return NULL; }
         for (long long i = 0; i < rows; i++) {
             GobolArray *inner = gobol_array_new_with_size(cols);
-            outer->data[i] = (long long)(long)inner;
+            outer->data[i] = (long long)(intptr_t)inner;
         }
     }
     outer->len = rows;

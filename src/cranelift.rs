@@ -2912,11 +2912,11 @@ impl CraneliftBackend {
             }
         };
 
-        // Clean up temp files.
-        let _ = std::fs::remove_file(&obj_path);
-        if has_stubs {
-            let _ = std::fs::remove_file(&stubs_src_path);
-        }
+        // The object file (and the C stubs source) are deliberately KEPT:
+        // like Cargo's intermediates, they live in the project root
+        // `target/` directory next to the final binary and form the
+        // compilation cache. `grape clean` (which removes `target/`)
+        // reclaims them.
 
         result
     }
@@ -3025,14 +3025,38 @@ impl CraneliftBackend {
         }
 
         let mut extra_objs: Vec<String> = Vec::new();
+        // Object files for the C runtime and variadic stubs are written to a
+        // dedicated, short build dir next to the final output instead of
+        // being suffixed onto `final_output`. This keeps the path
+        // absolute/short and avoids the `~` short-path (RUNNER~1) problems
+        // cl.exe hit when output landed directly under %TEMP% with a long,
+        // dashed stem. `process::id()` guards against concurrent builds
+        // clobbering each other's .obj files.
+        let build_dir = std::env::current_dir()
+            .map_err(|e| format!("Failed to get current dir: {}", e))?
+            .join("target")
+            .join("gobol_build");
+        std::fs::create_dir_all(&build_dir)
+            .map_err(|e| format!("Failed to create build dir '{}': {}", build_dir.display(), e))?;
+        let pid = std::process::id();
+        let rt_name = |suffix: &str| {
+            build_dir.join(format!("runtime_{}_{}.obj", pid, suffix))
+        };
+        let stub_name = || build_dir.join(format!("stubs_{}.obj", pid));
+
         if let Some(rt) = &opts.runtime_c_path {
-            let rt_obj = format!("{}.runtime.obj", final_output);
+            let rt_obj = rt_name("rt");
+            let rt_obj_str = rt_obj.to_string_lossy().into_owned();
             let mut c = std::process::Command::new(c_compiler);
-            c.args(["/c", "/nologo"]);
+            // /WX: promote every warning (incl. C4311 pointer truncation) to
+            // a hard error. On Windows CI cl.exe would otherwise compile
+            // with warnings and return 0, masking real link failures and
+            // making a missing .obj look like a "ghost" success.
+            c.args(["/c", "/nologo", "/WX"]);
             for inc in &rt_includes {
                 c.arg(format!("/I{}", inc.display()));
             }
-            c.arg(format!("/Fo{}", rt_obj)).arg(rt);
+            c.arg(format!("/Fo{}", rt_obj_str)).arg(rt);
             for (k, v) in &tool.env {
                 c.env(k, v);
             }
@@ -3055,24 +3079,27 @@ impl CraneliftBackend {
             }
             // Verify the .obj was actually produced — cl.exe can return 0
             // in edge cases where the output path was silently ignored.
-            if !std::path::Path::new(&rt_obj).exists() {
+            if !rt_obj.exists() {
                 return Err(format!(
                     "Runtime compilation appeared to succeed but '{}' was not produced.\ncl.exe stdout: {}\ncl.exe stderr: {}",
-                    rt_obj,
+                    rt_obj_str,
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr),
                 ));
             }
-            extra_objs.push(rt_obj);
+            extra_objs.push(rt_obj_str);
         }
         if has_stubs {
-            let stub_obj = format!("{}.va.obj", final_output);
+            let stub_obj = stub_name();
+            let stub_obj_str = stub_obj.to_string_lossy().into_owned();
             let mut c = std::process::Command::new(c_compiler);
-            c.args(["/c", "/nologo"]);
+            // /WX: promote warnings to errors, same rationale as the runtime
+            // compile above — surface C4311-style issues at compile time.
+            c.args(["/c", "/nologo", "/WX"]);
             for inc in &rt_includes {
                 c.arg(format!("/I{}", inc.display()));
             }
-            c.arg(format!("/Fo{}", stub_obj)).arg(stubs_src_path);
+            c.arg(format!("/Fo{}", stub_obj_str)).arg(stubs_src_path);
             for (k, v) in &tool.env {
                 c.env(k, v);
             }
@@ -3087,15 +3114,15 @@ impl CraneliftBackend {
                     out.status.code(), stdout, stderr
                 ));
             }
-            if !std::path::Path::new(&stub_obj).exists() {
+            if !stub_obj.exists() {
                 return Err(format!(
                     "Stubs compilation appeared to succeed but '{}' was not produced.\ncl.exe stdout: {}\ncl.exe stderr: {}",
-                    stub_obj,
+                    stub_obj_str,
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr),
                 ));
             }
-            extra_objs.push(stub_obj);
+            extra_objs.push(stub_obj_str);
         }
 
         // ---- Build the link.exe command ----
@@ -3163,10 +3190,10 @@ impl CraneliftBackend {
             .output()
             .map_err(|e| format!("Failed to invoke link.exe '{}': {}", link_exe.display(), e))?;
 
-        // Clean up the temporary .obj files.
-        for obj in &extra_objs {
-            let _ = std::fs::remove_file(obj);
-        }
+        // Keep the intermediate runtime/stub .obj files: they live in the
+        // `target/` dir and form the compilation cache (grape clean reclaims
+        // them). There is no failure-path cleanup on purpose — left-overs
+        // under target/ are harmless and scanable via grape clean.
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let stdout = String::from_utf8_lossy(&out.stdout);

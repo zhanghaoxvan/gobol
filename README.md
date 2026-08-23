@@ -119,12 +119,20 @@ grape run
 # Compile to native binary / 编译为原生二进制
 grape run --compile
 
-# Clean cached packages / 清理缓存包
+# Clean build artifacts and cached packages / 清理编译产物与缓存包
 grape clean
 
 # Show help / 显示帮助
 grape help
 ```
+
+Like Cargo, all compilation-local data lives under the project root `target/`:
+build artifacts (`target/{triple}/{debug|release}/`), intermediate object files
+(`.o`/`.obj`) and cached dependency packages (`target/grape/packages/`).
+
+与 Cargo 类似，所有编译相关数据都集中在项目根目录的 `target/` 下：编译产物
+（`target/{triple}/{debug|release}/`）、中间目标文件（`.o`/`.obj`）以及依赖包缓存
+（`target/grape/packages/`）。
 
 ---
 

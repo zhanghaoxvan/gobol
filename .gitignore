@@ -11,6 +11,7 @@ grape.toml
 *.exe
 tmp.*
 test_*
+reasonix.toml
 
 # Wow the extension of VSCode
 vscode-gobol/node_modules/

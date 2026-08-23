@@ -379,6 +379,22 @@ impl VariadicStub {
     }
 
     /// Map a Gobol type to the C parameter type used in the stub.
+    ///
+    /// `long` is NOT used for string parameters: on Windows (LLP64) MSVC's
+    /// `long` is 32-bit while a pointer is 64-bit, so `(const char*)`-casting a
+    /// `long` stub argument triggers C4312 (cast to a larger pointer) which
+    /// `/WX` promotes to a hard error. Strings are declared directly as
+    /// `const char*` so the argument already has pointer width and no cast is
+    /// needed in the forwarding call.
+    fn c_param_type(dt: &DataType) -> &'static str {
+        if matches!(dt, DataType::Str) {
+            "const char*"
+        } else {
+            Self::c_type(dt)
+        }
+    }
+
+    /// Map a Gobol type to the C parameter type used in the stub.
     fn c_type(dt: &DataType) -> &'static str {
         match dt {
             DataType::Float => "double",
@@ -401,24 +417,18 @@ impl VariadicStub {
             .param_types
             .iter()
             .enumerate()
-            .map(|(i, dt)| format!("{} a{}", Self::c_type(dt), i))
+            .map(|(i, dt)| format!("{} a{}", Self::c_param_type(dt), i))
             .collect();
         let params_joined = if params.is_empty() {
             "void".to_string()
         } else {
             params.join(", ")
         };
-        // Forward each argument, casting str args to const char* (Gobol str is
-        // an opaque pointer; the real C function expects a string pointer).
-        let forward_args: Vec<String> = (0..self.arity)
-            .map(|i| {
-                if matches!(self.param_types[i], DataType::Str) {
-                    format!("(const char*)a{}", i)
-                } else {
-                    format!("a{}", i)
-                }
-            })
-            .collect();
+        // Forward each argument. String parameters are already declared as
+        // `const char*` (see `c_param_type`), so no cast is required here.
+        // This avoids MSVC C4312 (casting a 32-bit `long` to a 64-bit pointer
+        // on Windows/LLP64), which `/WX` would otherwise promote to an error.
+        let forward_args: Vec<String> = (0..self.arity).map(|i| format!("a{}", i)).collect();
         let call_args = forward_args.join(", ");
         let ret_stmt = if matches!(self.return_type, DataType::None_) {
             format!("{}({});", self.func_name, call_args)
@@ -2950,6 +2960,14 @@ impl CraneliftBackend {
         if !target_is_windows(&opts.target) {
             cmd.arg("-lpthread");
         }
+        // MinGW: the C runtime's `net` module reference Winsock transitively.
+        // Link `ws2_32` whenever the C runtime is present (dedup with any
+        // `--link-arg ws2_32` already injected by `grape`).
+        if opts.runtime_c_path.is_some() && target_is_windows(&opts.target)
+            && !opts.link_libs.iter().any(|l| l.eq_ignore_ascii_case("ws2_32"))
+        {
+            cmd.arg("-lws2_32");
+        }
         // Capture stdout/stderr so the error message includes the actual
         // linker diagnostic (undefined symbol, cannot find -lfoo, etc.).
         let out = cmd
@@ -2993,7 +3011,12 @@ impl CraneliftBackend {
                 opts.target
             ));
         }
-        let c_compiler = &tool.compiler;
+        // The cc-discovered MSVC C compiler (cl.exe). We deliberately do NOT
+        // reach for clang-cl: a plain MSVC Developer Prompt / VS install may
+        // not ship it. clang-cl is optional and unreliable to assume.
+        let c_compiler_candidates: Vec<std::path::PathBuf> = {
+            vec![tool.compiler.clone()]
+        };
 
         // Pre-link check: verify the Cranelift-produced object exists.
         if !std::path::Path::new(obj_path).exists() {
@@ -3017,9 +3040,15 @@ impl CraneliftBackend {
         if let Some(rt) = &opts.runtime_c_path {
             let rt_p = std::path::Path::new(rt);
             if let Some(parent) = rt_p.parent() {
-                rt_includes.push(parent.to_path_buf());
+                // 如果 parent 非空，才加进去
+                if !parent.as_os_str().is_empty() {
+                    rt_includes.push(parent.to_path_buf());
+                }
                 if let Some(gp) = parent.parent() {
-                    rt_includes.push(gp.to_path_buf());
+                    // 如果 grandparent 也是非空的，才加进去
+                    if !gp.as_os_str().is_empty() {
+                        rt_includes.push(gp.to_path_buf());
+                    }
                 }
             }
         }
@@ -3044,85 +3073,98 @@ impl CraneliftBackend {
         };
         let stub_name = || build_dir.join(format!("stubs_{}.obj", pid));
 
+        // Compile a C source to an .obj in `build_dir` and force/remap it to
+        // the requested absolute output path. Runs the compiler with CWD set
+        // to `build_dir` and emits under a SHORT relative name — cl.exe is
+        // known to ghost-compile (read source, exit 0, write nothing) on
+        // long absolute `/Fo` paths. The single candidate (cl.exe) is used;
+        let compile_to_obj = |src: &str,
+                              final_obj: &std::path::Path,
+                              tag: &str|
+         -> std::result::Result<(), String> {
+            let obj_file_name = final_obj
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| format!("Invalid obj name '{}'", final_obj.display()))?;
+
+            let mut last_diag = String::new();
+            for compiler in &c_compiler_candidates {
+                let mut c = std::process::Command::new(compiler);
+                // /WX: turn every warning (incl. C4311 pointer truncation)
+                // into a hard error so cl.exe can't "succeed" while failing
+                // to emit.
+                c.args(["/c", "/nologo", "/WX", "/utf-8"]);
+                for inc in &rt_includes {
+                    c.arg(format!("/I{}", inc.display()));
+                }
+                c.arg(format!("/Fo{}", obj_file_name)).arg(src);
+                for (k, v) in &tool.env {
+                    c.env(k, v);
+                }
+                c.current_dir(&build_dir);
+
+                let out = c.output().map_err(|e| {
+                    format!(
+                        "Failed to spawn {} for {} ({}): {}",
+                        compiler.display(),
+                        src,
+                        tag,
+                        e
+                    )
+                })?;
+                let produced = build_dir.join(obj_file_name);
+
+                if out.status.success() && produced.exists() {
+                    // Force / re-map output to the requested absolute path.
+                    std::fs::rename(&produced, final_obj).map_err(|e| {
+                        format!(
+                            "Failed to re-map '{}' -> '{}': {}\nstdout: {}\nstderr: {}",
+                            produced.display(),
+                            final_obj.display(),
+                            e,
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr),
+                        )
+                    })?;
+                    return Ok(());
+                }
+
+                // Record the diagnostic for this candidate and try the next.
+                last_diag = if !out.status.success() {
+                    format!(
+                        "[{}] failed with {:?}\nstdout: {}\nstderr: {}",
+                        compiler.display(),
+                        out.status.code(),
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr),
+                    )
+                } else {
+                    format!(
+                        "[{}] exited 0 but produced no .obj at '{}'\nstdout: {}\nstderr: {}",
+                        compiler.display(),
+                        produced.display(),
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr),
+                    )
+                };
+                let _ = std::fs::remove_file(&produced);
+            }
+
+            Err(format!(
+                "Compiling {} ({}) failed with all compiler candidates.\n{}",
+                src, tag, last_diag
+            ))
+        };
+
         if let Some(rt) = &opts.runtime_c_path {
             let rt_obj = rt_name("rt");
-            let rt_obj_str = rt_obj.to_string_lossy().into_owned();
-            let mut c = std::process::Command::new(c_compiler);
-            // /WX: promote every warning (incl. C4311 pointer truncation) to
-            // a hard error. On Windows CI cl.exe would otherwise compile
-            // with warnings and return 0, masking real link failures and
-            // making a missing .obj look like a "ghost" success.
-            c.args(["/c", "/nologo", "/WX"]);
-            for inc in &rt_includes {
-                c.arg(format!("/I{}", inc.display()));
-            }
-            c.arg(format!("/Fo{}", rt_obj_str)).arg(rt);
-            for (k, v) in &tool.env {
-                c.env(k, v);
-            }
-            // Use .output() to capture cl.exe stdout/stderr — when cl.exe
-            // fails we need the diagnostic text (which file wasn't found,
-            // which symbol was unresolved, etc.) in the error message.
-            let out = c.output().map_err(|e| {
-                format!(
-                    "Failed to compile runtime with '{}': {}\n(Is cl.exe on PATH? The cc-discovered env should include it.)",
-                    c_compiler.display(), e
-                )
-            })?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                return Err(format!(
-                    "Runtime compilation failed with exit code {:?}\n--- cl.exe stdout ---\n{}\n--- cl.exe stderr ---\n{}",
-                    out.status.code(), stdout, stderr
-                ));
-            }
-            // Verify the .obj was actually produced — cl.exe can return 0
-            // in edge cases where the output path was silently ignored.
-            if !rt_obj.exists() {
-                return Err(format!(
-                    "Runtime compilation appeared to succeed but '{}' was not produced.\ncl.exe stdout: {}\ncl.exe stderr: {}",
-                    rt_obj_str,
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr),
-                ));
-            }
-            extra_objs.push(rt_obj_str);
+            compile_to_obj(rt, &rt_obj, "runtime")?;
+            extra_objs.push(rt_obj.to_string_lossy().into_owned());
         }
         if has_stubs {
             let stub_obj = stub_name();
-            let stub_obj_str = stub_obj.to_string_lossy().into_owned();
-            let mut c = std::process::Command::new(c_compiler);
-            // /WX: promote warnings to errors, same rationale as the runtime
-            // compile above — surface C4311-style issues at compile time.
-            c.args(["/c", "/nologo", "/WX"]);
-            for inc in &rt_includes {
-                c.arg(format!("/I{}", inc.display()));
-            }
-            c.arg(format!("/Fo{}", stub_obj_str)).arg(stubs_src_path);
-            for (k, v) in &tool.env {
-                c.env(k, v);
-            }
-            let out = c.output().map_err(|e| {
-                format!("Failed to compile stubs with '{}': {}", c_compiler.display(), e)
-            })?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                return Err(format!(
-                    "Stubs compilation failed with exit code {:?}\n--- cl.exe stdout ---\n{}\n--- cl.exe stderr ---\n{}",
-                    out.status.code(), stdout, stderr
-                ));
-            }
-            if !stub_obj.exists() {
-                return Err(format!(
-                    "Stubs compilation appeared to succeed but '{}' was not produced.\ncl.exe stdout: {}\ncl.exe stderr: {}",
-                    stub_obj_str,
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr),
-                ));
-            }
-            extra_objs.push(stub_obj_str);
+            compile_to_obj(stubs_src_path, &stub_obj, "stubs")?;
+            extra_objs.push(stub_obj.to_string_lossy().into_owned());
         }
 
         // ---- Build the link.exe command ----

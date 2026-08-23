@@ -2,7 +2,7 @@ import std;
 
 // extern "C" variadic functions — declared with `...`.
 // The compiler generates per-arity C stubs at link time.
-#[header("/usr/include/stdio.h")]
+#[header("variadic_printf.h")]
 extern "C" {
     func printf(format: str, ...): int;
 }

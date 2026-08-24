@@ -24,6 +24,7 @@ pub enum GrapeError {
     NotFound(String),
     AlreadyExists(String),
     InvalidDependency(String),
+    BadConfig(String),
     CommandFailed(String),
     NetworkError { dep: String, reason: String },
 }
@@ -37,6 +38,7 @@ impl std::fmt::Display for GrapeError {
             GrapeError::NotFound(s) => write!(f, "Not found: {}", s),
             GrapeError::AlreadyExists(s) => write!(f, "Already exists: {}", s),
             GrapeError::InvalidDependency(s) => write!(f, "Invalid dependency: {}", s),
+            GrapeError::BadConfig(s) => write!(f, "Bad configuration: {}", s),
             GrapeError::CommandFailed(s) => write!(f, "Command failed: {}", s),
             GrapeError::NetworkError { dep, reason } => {
                 write!(f, "Network error for '{}': {}", dep, reason)
@@ -60,6 +62,9 @@ pub struct GrapeToml {
     /// no_gc, link script, opt level. Absent for plain hosted apps.
     #[serde(default)]
     pub build: Option<gobol::config::BuildConfig>,
+    /// Optional `[optimize]` section: per-profile Cranelift opt levels.
+    #[serde(default)]
+    pub optimize: Option<gobol::config::OptimizeConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -289,6 +294,7 @@ fn cmd_init() -> Result<()> {
         },
         dependencies: HashMap::new(),
         build: None,
+        optimize: None,
     };
 
     let toml_str =
@@ -578,6 +584,8 @@ struct BuildCli {
     no_std: bool,
     no_gc: bool,
     no_main: bool,
+    /// Optimization level from `-O0`/`-O1`/`-O2` CLI flags.
+    opt_level: Option<usize>,
     program_args: Vec<String>,
 }
 
@@ -591,6 +599,14 @@ fn parse_build_cli(args: &[String]) -> BuildCli {
             cli.program_args.push(a.clone());
             i += 1;
             continue;
+        }
+        // `-O0` / `-O1` / `-O2` optimization levels.
+        if let Some(digits) = a.strip_prefix("-O") {
+            if !digits.is_empty() {
+                cli.opt_level = digits.parse::<usize>().ok();
+                i += 1;
+                continue;
+            }
         }
         match a.as_str() {
             "--" => after_dd = true,
@@ -653,6 +669,23 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
 
     // Merge the manifest's optional [build] section with CLI overrides.
     let build_cfg = config.build.clone().unwrap_or_default();
+
+    // Validate optimization levels up front: CLI -O and the [optimize]
+    // section must be 0–2.
+    if let Some(lvl) = cli.opt_level {
+        if lvl > 2 {
+            return Err(GrapeError::BadConfig(format!(
+                "invalid optimization level {} (must be 0, 1, or 2)",
+                lvl
+            )));
+        }
+    }
+    if let Some(opt) = &config.optimize {
+        if let Err(e) = opt.validate() {
+            return Err(GrapeError::BadConfig(format!("[optimize] {}", e)));
+        }
+    }
+
     let resolved = build_cfg.resolve(
         cli.target.as_deref(),
         cli.entry_point.as_deref(),
@@ -660,6 +693,8 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
         cli.release,
         cli.no_std,
         cli.no_gc,
+        cli.opt_level,
+        &config.optimize,
     );
 
     let out_name = cli
@@ -759,6 +794,7 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     } else {
         cmd.arg("--debug");
     }
+    cmd.arg("--opt-level").arg(resolved.opt_level.to_string());
     if let Some(t) = &resolved.target {
         cmd.arg("--target").arg(t);
     }
@@ -1367,6 +1403,7 @@ mod tests {
                 m
             },
             build: None,
+            optimize: None,
         };
         let paths = build_lib_paths(&config);
         // All paths must be relative (no hardcoded separators).
@@ -1422,6 +1459,26 @@ mod tests {
             .and_then(|i| args.get(i + 1).cloned());
         assert!(is_release);
         assert_eq!(out_name, Some("mybin".to_string()));
+    }
+
+    #[test]
+    fn test_parse_build_cli_opt_level() {
+        let args = vec![
+            "grape".to_string(),
+            "build".to_string(),
+            "-O2".to_string(),
+        ];
+        let cli = parse_build_cli(&args);
+        assert_eq!(cli.opt_level, Some(2));
+
+        let args = vec!["grape".to_string(), "build".to_string(), "-O0".to_string()];
+        let cli = parse_build_cli(&args);
+        assert_eq!(cli.opt_level, Some(0));
+
+        // No -O flag → None.
+        let args = vec!["grape".to_string(), "build".to_string()];
+        let cli = parse_build_cli(&args);
+        assert_eq!(cli.opt_level, None);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 // (via a small runtime), string concatenation, and casts.
 use crate::environment::DataType;
 use crate::ir::*;
-use cranelift_codegen::ir::{self, types, AbiParam, Inst, InstBuilder};
+use cranelift_codegen::ir::{self, types, AbiParam, BlockArg, Inst, InstBuilder};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Linkage, Module};
@@ -465,6 +465,10 @@ pub struct CraneliftBackend {
     func_ids: HashMap<String, cranelift_module::FuncId>,
     /// string literal text -> DataId
     string_data: HashMap<String, cranelift_module::DataId>,
+    /// Module-level mutable `var` globals. name -> (data slot, type, initializer).
+    /// Each global owns a shared 8-byte data slot so all functions see the
+    /// same storage (fixed `var` mutation across function calls).
+    global_vars: HashMap<String, (cranelift_module::DataId, DataType, Option<IRExpr>)>,
     /// struct name -> set of constructor method names (e.g. "new")
     constructors: HashMap<String, bool>,
     /// centralised type inference / layout / return-type lookup
@@ -523,6 +527,10 @@ impl CraneliftBackend {
 
         // Declare runtime functions (imports).
         self.declare_runtime_functions();
+
+        // Declare shared storage for module-level mutable `var` globals so
+        // every function (including main) reads/writes the same slot.
+        self.declare_global_slots(ir);
 
         // Per-(name, arity) occurrence counter, shared across declare and
         // compile passes so both iterate in identical order and assign the
@@ -1156,6 +1164,10 @@ impl CraneliftBackend {
                 self.diverged = false;
                 bcx.seal_block(entry);
 
+                // Initialize module-level mutable `var` globals before running
+                // any user code in main.
+                self.translate_global_inits(&mut bcx)?;
+
                 if let Some(body) = &ir_func.body {
                     self.translate_block(&mut bcx, body)?;
                 }
@@ -1723,6 +1735,13 @@ impl CraneliftBackend {
         }
         // Simple variable assignment
         if let IRExpr::Variable(name) = target {
+            // Module-level mutable `var` global: store into shared slot.
+            if self.global_vars.contains_key(name) {
+                let from = self.type_resolver.infer_type(value);
+                let gval = self.translate_expr(bcx, value)?;
+                self.translate_global_write(bcx, name, gval, &from)?;
+                return Ok(());
+            }
             let val = self.translate_expr(bcx, value)?;
             if let Some(var) = self.variables.get(name) {
                 let var_ty = self.type_resolver.var_type(name);
@@ -1752,6 +1771,10 @@ impl CraneliftBackend {
         match expr {
             IRExpr::Literal(lit) => Ok(self.translate_literal(bcx, lit)),
             IRExpr::Variable(name) => {
+                // Module-level mutable `var` global: read from shared slot.
+                if self.global_vars.contains_key(name) {
+                    return Ok(self.translate_global_read(bcx, name));
+                }
                 if let Some(var) = self.variables.get(name) {
                     let v = bcx.use_var(*var);
                     Ok(v)
@@ -1845,8 +1868,16 @@ impl CraneliftBackend {
         }
 
         let l = self.translate_expr(bcx, left)?;
-        let r = self.translate_expr(bcx, right)?;
         let lty = self.type_resolver.infer_type(left);
+
+        // Short-circuit evaluation for && and ||: the right operand is only
+        // evaluated when needed. `&&` skips the right side when the left is
+        // false; `||` skips it when the left is true.
+        if op == "&&" || op == "||" {
+            return self.translate_short_circuit(bcx, op, l, &lty, right);
+        }
+
+        let r = self.translate_expr(bcx, right)?;
 
         if matches!(lty, DataType::Float) {
             return Ok(self.binary_float(bcx, op, l, r));
@@ -1865,16 +1896,6 @@ impl CraneliftBackend {
             ">" => bcx.ins().icmp(IntCC::SignedGreaterThan, l, r),
             "<=" => bcx.ins().icmp(IntCC::SignedLessThanOrEqual, l, r),
             ">=" => bcx.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r),
-            "&&" => {
-                let l_b = self.to_bool(bcx, l, &lty);
-                let r_b = self.to_bool(bcx, r, &self.type_resolver.infer_type(right));
-                bcx.ins().band(l_b, r_b)
-            }
-            "||" => {
-                let l_b = self.to_bool(bcx, l, &lty);
-                let r_b = self.to_bool(bcx, r, &self.type_resolver.infer_type(right));
-                bcx.ins().bor(l_b, r_b)
-            }
             "&" => bcx.ins().band(l, r),
             "|" => bcx.ins().bor(l, r),
             "^" => bcx.ins().bxor(l, r),
@@ -1883,6 +1904,48 @@ impl CraneliftBackend {
                 bcx.ins().iconst(types::I64, 0)
             }
         })
+    }
+
+    /// Lower `&&` / `||` with short-circuit semantics using Cranelift control
+    /// flow: the right operand is only evaluated when needed.
+    ///
+    /// Both outcomes (short-circuit and full-eval) converge on `end_b`,
+    /// which carries an i8 block-param holding the final boolean result.
+    fn translate_short_circuit(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        op: &str,
+        l_val: ir::Value,
+        lty: &DataType,
+        right: &IRExpr,
+    ) -> Result<ir::Value, String> {
+        let l_b = self.to_bool(bcx, l_val, lty);
+        let zero = BlockArg::Value(bcx.ins().iconst(types::I8, 0));
+        let one = BlockArg::Value(bcx.ins().iconst(types::I8, 1));
+
+        let rhs_b = bcx.create_block();
+        let end_b = bcx.create_block();
+        let end_param = bcx.append_block_param(end_b, types::I8);
+
+        // Branch on the left operand:
+        //   && : left true  -> evaluate right ; left false -> short-circuit to 0
+        //   || : left true  -> short-circuit to 1 ; left false -> evaluate right
+        if op == "&&" {
+            bcx.ins().brif(l_b, rhs_b, &[], end_b, &[zero]);
+        } else {
+            bcx.ins().brif(l_b, end_b, &[one], rhs_b, &[]);
+        }
+        bcx.seal_block(rhs_b);
+
+        // Right-hand side: evaluate and jump to the merge block with its result.
+        bcx.switch_to_block(rhs_b);
+        let r_val = self.translate_expr(bcx, right)?;
+        let r_arg = BlockArg::Value(self.to_bool(bcx, r_val, &self.type_resolver.infer_type(right)));
+        bcx.ins().jump(end_b, &[r_arg]);
+
+        bcx.seal_block(end_b);
+        bcx.switch_to_block(end_b);
+        Ok(end_param)
     }
 
     fn binary_float(
@@ -2645,6 +2708,99 @@ impl CraneliftBackend {
         bcx.ins().symbol_value(types::I64, global)
     }
 
+    // ==================== global variables ====================
+    //
+    // Module-level mutable `var` declarations are lowered to a shared 8-byte
+    // data slot so all functions read/write the same storage. This makes
+    // `var counter` mutated inside one function visible to every other
+    // function (previously each function treated it as its own local).
+
+    /// Declare a zero-initialized 8-byte data slot for each module-level
+    /// mutable `var` and remember (slot, type, initializer). Called once at
+    /// compile time; the slot address is shared by every function.
+    fn declare_global_slots(&mut self, ir: &GobolIR) {
+        for (i, (name, ty, init)) in ir.globals.iter().enumerate() {
+            let data_name = format!("gbl_global_{}_{}", i, name.replace("::", "_"));
+            // writable=true so the slot lands in the writable `.data` segment —
+            // globals are mutated at runtime (unlike string literals, which are
+            // stored in read-only data and never written).
+            let data_id = match self.module.declare_data(&data_name, Linkage::Local, true, false) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("declare global data failed: {}", e);
+                    continue;
+                }
+            };
+            let mut desc = DataDescription::new();
+            // 8 zero bytes: holds i64 / f64 / a pointer, zero-initialized.
+            desc.define(vec![0u8; 8].into_boxed_slice());
+            if let Err(e) = self.module.define_data(data_id, &desc) {
+                eprintln!("define global data failed: {}", e);
+                continue;
+            }
+            self.global_vars.insert(name.clone(), (data_id, ty.clone(), init.clone()));
+        }
+    }
+
+    /// Runtime address (i64 pointer) of a global variable's data slot.
+    fn global_addr(&mut self, bcx: &mut FunctionBuilder, name: &str) -> ir::Value {
+        let data_id = self.global_vars.get(name).map(|g| g.0).unwrap_or_else(|| {
+            // Shouldn't happen: force a dummy slot so compilation continues.
+            eprintln!("internal: missing global slot for {}", name);
+            let dummy = self.module.declare_data("gbl_missing", Linkage::Local, false, false)
+                .map_err(|e| eprintln!("{}", e))
+                .unwrap();
+            dummy
+        });
+        let global = self.module.declare_data_in_func(data_id, &mut bcx.func);
+        bcx.ins().symbol_value(types::I64, global)
+    }
+
+    fn global_type(&self, name: &str) -> DataType {
+        self.global_vars.get(name).map(|g| g.1.clone()).unwrap_or(DataType::Int)
+    }
+
+    /// Read a global variable, producing a value of its declared type.
+    fn translate_global_read(&mut self, bcx: &mut FunctionBuilder, name: &str) -> ir::Value {
+        let ty = self.global_type(name);
+        let clif_ty = self.data_type_to_clif(&ty).unwrap_or(types::I64);
+        let addr = self.global_addr(bcx, name);
+        let flags = cranelift_codegen::ir::MemFlagsData::trusted();
+        bcx.ins().load(clif_ty, flags, addr, 0)
+    }
+
+    /// Store a value into a global variable, coercing `value` (whose source
+    /// type is `from`) to the global's declared type.
+    fn translate_global_write(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        name: &str,
+        value: ir::Value,
+        from: &DataType,
+    ) -> Result<(), String> {
+        let ty = self.global_type(name);
+        let v = self.coerce(bcx, value, from, &ty)?;
+        let addr = self.global_addr(bcx, name);
+        let flags = cranelift_codegen::ir::MemFlagsData::trusted();
+        bcx.ins().store(flags, v, addr, 0);
+        Ok(())
+    }
+
+    /// Evaluate and store every global's initializer. Called at the top of
+    /// main so globals are initialized before user code runs. Globals without
+    /// an initializer keep their zero-filled slot.
+    fn translate_global_inits(&mut self, bcx: &mut FunctionBuilder) -> Result<(), String> {
+        let names: Vec<String> = self.global_vars.keys().cloned().collect();
+        for name in names {
+            if let Some(init) = self.global_vars.get(&name).and_then(|g| g.2.clone()) {
+                let from = self.type_resolver.infer_type(&init);
+                let v = self.translate_expr(bcx, &init)?;
+                self.translate_global_write(bcx, &name, v, &from)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Convert any value to a string pointer (for print / concatenation).
     fn to_string_value(
         &mut self,
@@ -2791,22 +2947,33 @@ impl CraneliftBackend {
     /// Create an AOT backend targeting the host platform. For cross-compilation
     /// (e.g. `aarch64-unknown-none`) use [`CraneliftBackend::new_for_target`].
     pub fn new() -> Self {
-        Self::new_for_target_triple(target_lexicon::HOST.clone())
+        Self::new_for_target_triple(target_lexicon::HOST.clone(), 0)
             .expect("host target must be supported by Cranelift")
     }
 
     /// Create an AOT backend for an arbitrary target triple string such as
     /// `x86_64-pc-windows-msvc`, `aarch64-unknown-none`, or the host triple.
     /// Returns a clear error if the triple is malformed or unsupported by
-    /// the installed Cranelift.
+    /// the installed Cranelift. Uses optimization level 0 (none); use
+    /// [`CraneliftBackend::new_for_target_with_opt`] to request a higher level.
     pub fn new_for_target(target: &str) -> Result<Self, String> {
+        Self::new_for_target_with_opt(target, 0)
+    }
+
+    /// Like [`CraneliftBackend::new_for_target`] but with an explicit
+    /// optimization level. `opt_level` is 0 (none), 1 (speed), or ≥2 (treated
+    /// as speed_and_size, the highest Cranelift level).
+    pub fn new_for_target_with_opt(target: &str, opt_level: usize) -> Result<Self, String> {
         let triple: target_lexicon::Triple = target
             .parse()
             .map_err(|e| format!("Invalid target triple '{}': {}", target, e))?;
-        Self::new_for_target_triple(triple)
+        Self::new_for_target_triple(triple, opt_level)
     }
 
-    fn new_for_target_triple(triple: target_lexicon::Triple) -> Result<Self, String> {
+    fn new_for_target_triple(
+        triple: target_lexicon::Triple,
+        opt_level: usize,
+    ) -> Result<Self, String> {
         use cranelift_codegen::isa::lookup;
         use cranelift_codegen::settings::{self, Configurable};
 
@@ -2814,6 +2981,13 @@ impl CraneliftBackend {
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
         flag_builder.set("is_pic", "true").unwrap();
+        // Map the numeric level to Cranelift's three-supported opt levels.
+        let opt = match opt_level {
+            0 => "none",
+            1 => "speed",
+            _ => "speed_and_size",
+        };
+        flag_builder.set("opt_level", opt).unwrap();
         let isa_builder = lookup(triple)
             .map_err(|e| format!("Cranelift does not support target '{}': {}", triple_str, e))?;
         let isa = isa_builder
@@ -2835,6 +3009,7 @@ impl CraneliftBackend {
             func_overload_symbols: HashMap::new(),
             func_ids: HashMap::new(),
             string_data: HashMap::new(),
+            global_vars: HashMap::new(),
             constructors: HashMap::new(),
             type_resolver: TypeResolver::new(),
             variadic_funcs: std::collections::HashSet::new(),

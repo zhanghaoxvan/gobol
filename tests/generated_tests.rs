@@ -173,6 +173,16 @@ fn test_functions_void_return() {
     result.assert_success();
 }
 
+/// 用例：functions/global_var.gbl | 预期正常运行
+#[test]
+fn test_functions_global_var() {
+    let path = fixture_path("fixtures/functions/global_var.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+    result.assert_stdout_contains("after 3 bumps: 3");
+    result.assert_stdout_contains("after +10: 13");
+}
+
 /// 用例：modules/lib/math.gbl | 预期编译失败（库文件，无main，AOT链接缺main符号）
 #[test]
 fn test_modules_lib_math() {
@@ -214,14 +224,6 @@ fn test_structs_rectangle() {
     result.assert_success();
 }
 
-/// 用例：types/nullable.gbl | 预期正常运行
-#[test]
-fn test_types_nullable() {
-    let path = fixture_path("fixtures/types/nullable.gbl");
-    let result = run_gobol(path.to_str().unwrap(), false);
-    result.assert_success();
-}
-
 /// 用例：types/type_conversion.gbl | 预期正常运行
 #[test]
 fn test_types_type_conversion() {
@@ -250,6 +252,14 @@ fn test_expressions_block_expr() {
 #[test]
 fn test_expressions_implicit_return() {
     let path = fixture_path("fixtures/expressions/implicit_return.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：expressions/short_circuit.gbl | 预期正常运行
+#[test]
+fn test_expressions_short_circuit() {
+    let path = fixture_path("fixtures/expressions/short_circuit.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
 }

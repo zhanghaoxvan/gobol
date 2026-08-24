@@ -104,6 +104,8 @@ fn print_help() {
     println!("Options:");
     println!("  --debug                  Debug build (default)");
     println!("  --release                Release build (optimized)");
+    println!("  -O<n>                    Optimization level 0-2 (0=none, 1=speed, 2=speed_and_size).");
+    println!("                           Default: 0 for debug, 2 for release.");
     println!("  -o <name>                Output binary name");
     println!("  --verbose, -v            Enable verbose output");
     println!("  --lib-path <path>        Add a library search path (can be used multiple times)");
@@ -177,6 +179,8 @@ fn main() {
     let mut out_name: Option<String> = None;
     let mut lib_paths_from_cli: Vec<String> = Vec::new();
     let mut link_cli = LinkCli::default();
+    // Optimization level from `-O0`/`-O1`/`-O2` / `--opt-level N`.
+    let mut opt_level: Option<usize> = None;
 
     let mut i = 1;
     let mut filename: Option<String> = None;
@@ -223,6 +227,16 @@ fn main() {
             i += 1;
         } else if args[i] == "--debug" {
             build_mode = BuildMode::Debug;
+            i += 1;
+        } else if args[i] == "--opt-level" && i + 1 < args.len() {
+            opt_level = match args[i + 1].parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(_) => None,
+            };
+            i += 2;
+        } else if let Some(digits) = args[i].strip_prefix("-O") {
+            // -O0 / -O1 / -O2
+            opt_level = digits.parse::<usize>().ok();
             i += 1;
         } else if matches!(args[i].as_str(), "--verbose" | "-v") {
             i += 1;
@@ -676,7 +690,18 @@ fn main() {
         println!("Target: {}", target);
     }
 
-    let backend = match CraneliftBackend::new_for_target(&target) {
+    // Effective optimization level: explicit CLI `-O`, else the build-mode
+    // default (release → 2, debug → 0). Levels must be 0–2.
+    let opt_level = opt_level.unwrap_or(if build_mode == BuildMode::Release { 2 } else { 0 });
+    if opt_level > 2 {
+        eprintln!(
+            "{}",
+            format!("Error: invalid optimization level {} (must be 0, 1, or 2)", opt_level).red()
+        );
+        process::exit(1);
+    }
+
+    let backend = match CraneliftBackend::new_for_target_with_opt(&target, opt_level) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{}", format!("Target setup failed: {}", e).red());

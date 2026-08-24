@@ -11,6 +11,9 @@ pub struct GobolIR {
     pub structs: Vec<IRStruct>,
     pub impls: Vec<IRImpl>,
     pub main_function: Option<String>,
+    /// Module-level mutable `var` declarations, shared storage across all
+    /// functions. Each entry is (name, type, initializer).
+    pub globals: Vec<(String, DataType, Option<IRExpr>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +148,8 @@ pub struct IRBuilder {
     // Tracks local variable types in the current function scope so that
     // captured variables (free vars in lambdas) can be typed correctly.
     var_types: HashMap<String, DataType>,
+    // Module-level mutable `var` declarations collected during build().
+    globals: Vec<(String, DataType, Option<IRExpr>)>,
 }
 
 impl IRBuilder {
@@ -155,6 +160,7 @@ impl IRBuilder {
                 structs: Vec::new(),
                 impls: Vec::new(),
                 main_function: None,
+                globals: Vec::new(),
             },
             current_function: None,
             current_struct: None,
@@ -174,6 +180,7 @@ impl IRBuilder {
             tmp_counter: 0,
             lambda_counter: 0,
             var_types: HashMap::new(),
+            globals: Vec::new(),
         }
     }
 
@@ -236,6 +243,21 @@ impl IRBuilder {
                 }
             }
         }
+
+        // 第五遍：收集模块级可变全局变量（`var`）。这些是跨函数共享的
+        // 存储，与函数局部变量不同。`visit_declaration` 在非函数上下文里
+        // 会把它们记录到 self.globals。
+        {
+            let decls: Vec<&Box<dyn Statement>> = program.get_statements()
+                .iter()
+                .filter(|stmt| stmt.as_any().downcast_ref::<Declaration>().is_some())
+                .collect();
+            for stmt in decls {
+                stmt.accept(&mut self);
+            }
+        }
+
+        self.ir.globals = std::mem::take(&mut self.globals);
 
         if !self.errors.is_empty() {
             return Err(self.errors);
@@ -1629,8 +1651,14 @@ impl AstVisitor for IRBuilder {
             ty
         };
 
-        self.current_block.push(IRStmt::Declaration { name: name.clone(), ty: ty.clone(), init });
-        self.var_types.insert(name, ty);
+        // 顶层（非函数内）可变 `var` 声明收集为跨函数共享的全局变量；
+        // 其余（函数局部、或顶层只读 `val`）按常规声明处理。
+        if !self.in_function && node.get_keyword() == "var" {
+            self.globals.push((name, ty, init));
+        } else {
+            self.current_block.push(IRStmt::Declaration { name: name.clone(), ty: ty.clone(), init });
+            self.var_types.insert(name, ty);
+        }
     }
 
     fn visit_expression_statement(&mut self, node: &ExpressionStatement) {

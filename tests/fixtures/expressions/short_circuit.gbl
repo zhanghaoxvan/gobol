@@ -1,0 +1,33 @@
+import std;
+
+/// Short-circuit evaluation for `&&` and `||`: the right operand is only
+/// evaluated when needed. Each call prints its tag, so the presence of the
+/// EVAL line reflects whether the right side was evaluated.
+func probe(tag: str): bool {
+    io::println(@"EVAL {tag}");
+    true
+}
+
+func main() {
+    // `&&` skips the right side when the left is false.
+    var a: bool = false && probe("a");
+    // `||` skips the right side when the left is true.
+    var b: bool = true || probe("b");
+    // Both evaluate the right side when it is needed.
+    var c: bool = true && probe("c");
+    var d: bool = false || probe("d");
+
+    // Boolean results of each form.
+    var r1: bool = false && true;
+    var r2: bool = true && true;
+    var r3: bool = true && false;
+    var r4: bool = false || true;
+    var r5: bool = false || false;
+    var r6: bool = true || false;
+    io::print(@"r1 = {r1}\n");
+    io::print(@"r2 = {r2}\n");
+    io::print(@"r3 = {r3}\n");
+    io::print(@"r4 = {r4}\n");
+    io::print(@"r5 = {r5}\n");
+    io::print(@"r6 = {r6}\n");
+}

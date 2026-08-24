@@ -150,17 +150,6 @@ val Point { x, y } = p;
 | `str` | String / 字符串 | `const char*` | `"hello"`, `"世界"` |
 | `bool` | Boolean / 布尔值 | `bool` | `true`, `false` |
 
-### 4.2 Nullable Types / 可空类型
-
-```gobol
-var opt: int? = null;
-opt = 42;
-```
-
-Nullable types are marked with `?` suffix. A nullable variable can hold either a value of its base type or `null`.
-
-可空类型用 `?` 后缀标记。可空变量可以持有其基础类型的值或 `null`。
-
 ---
 
 ## 5. Functions / 函数

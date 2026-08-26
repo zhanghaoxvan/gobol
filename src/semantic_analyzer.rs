@@ -49,6 +49,10 @@ pub struct SemanticAnalyzer {
     /// while still allowing overloaded methods (same name, different arity,
     /// e.g. `Range::new(start, end)` vs `Range::new(start, end, step)`).
     impl_methods: HashSet<(String, String, usize)>,
+    /// Generic function signatures for return-type resolution at call sites:
+    /// name -> (generic params, param types, return type). Populated for
+    /// top-level generic functions so `var a: float = identity(3.5)` type-checks.
+    generic_signatures: HashMap<String, (Vec<String>, Vec<DataType>, DataType)>,
 }
 
 /// Registered trait method signature for validation
@@ -94,6 +98,7 @@ impl SemanticAnalyzer {
             structured_errors: Vec::new(),
             extern_libs: Vec::new(),
             impl_methods: HashSet::new(),
+            generic_signatures: HashMap::new(),
         }
     }
 
@@ -284,6 +289,15 @@ impl SemanticAnalyzer {
                 self.current_generic_params = combined;
                 let return_type = self.get_data_type_from_ast(func.get_return_type());
                 self.env.declare_function(func.get_name(), &return_type, &self.current_module);
+                // Record the generic signature so call sites can resolve the
+                // concrete return type (e.g. `identity(3.5): float`).
+                if !func.get_generic_params().is_empty() {
+                    self.record_generic_signature(
+                        func.get_name(),
+                        func,
+                        return_type.clone(),
+                    );
+                }
                 self.current_generic_params = prev_generic;
             } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
                 let prev_generic = self.current_generic_params.clone();
@@ -474,6 +488,136 @@ impl SemanticAnalyzer {
                 self.error(&format!("Unknown type: {}", name));
                 DataType::Unknown
             }
+        }
+    }
+
+    /// Record the signature of a top-level generic function so later call sites
+    /// can resolve a concrete return type by unifying argument types with the
+    /// generic parameter types (e.g. `identity<T>(x: T) -> T` called as
+    /// `identity(3.5)` resolves to `float`).
+    fn record_generic_signature(
+        &mut self,
+        name: &str,
+        func: &Function,
+        return_type: DataType,
+    ) {
+        // Collect the declared parameter types. Generic type parameters resolve
+        // to `Struct("T")` because `get_data_type_from_ast` runs under
+        // `current_generic_params`, so the stored param types keep a reference
+        // that later unification can map to the concrete argument type.
+        let mut param_types: Vec<DataType> = Vec::new();
+        if let Some(params) = func.get_parameters() {
+            for p in params {
+                param_types.push(self.get_data_type_from_ast(p.get_type()));
+            }
+        }
+        self.generic_signatures.insert(
+            name.to_string(),
+            (func.get_generic_params().clone(), param_types, return_type),
+        );
+    }
+
+    /// Resolve the concrete return type of a top-level generic call by unifying
+    /// the argument types with the recorded generic signature. For a generic
+    /// parameter `T`, the argument type is bound to `T` and then substituted
+    /// throughout the signature's return type. Returns `None` when no generic
+    /// signature matches or a type parameter cannot be determined.
+    fn resolve_generic_call_type(
+        &self,
+        full_name: &str,
+        func_name: &str,
+        arg_types: &[DataType],
+    ) -> Option<DataType> {
+        let (generic_params, param_types, return_type) = self
+            .generic_signatures
+            .get(full_name)
+            .or_else(|| self.generic_signatures.get(func_name))?;
+
+        if generic_params.is_empty() {
+            return None;
+        }
+
+        let mut bindings: HashMap<String, DataType> = HashMap::new();
+        for (i, arg_ty) in arg_types.iter().enumerate() {
+            if let Some(pattern) = param_types.get(i) {
+                self.unify_generic_pattern(pattern, arg_ty, &mut bindings);
+            }
+        }
+
+        // Every generic parameter must be bound to a concrete type; otherwise
+        // the fallback return type is used instead.
+        for g in generic_params {
+            if !bindings.contains_key(g) {
+                return None;
+            }
+        }
+
+        Some(self.substitute_generic_types(return_type, &bindings))
+    }
+
+    /// Unify a generic parameter type (`pattern`) with an actual argument type,
+    /// recording bindings for generic parameters (`Struct(name)` where the name
+    /// is not a concrete struct).
+    fn unify_generic_pattern(
+        &self,
+        pattern: &DataType,
+        actual: &DataType,
+        bindings: &mut HashMap<String, DataType>,
+    ) {
+        match pattern {
+            DataType::Struct(name) => {
+                // Treat a bare `Struct(name)` as a generic parameter placeholder
+                // rather than a concrete struct type, and bind it to the actual
+                // argument type. Unknown/None actual types don't carry usable
+                // information, so leave them unbound.
+                if !matches!(actual, DataType::Unknown | DataType::None_) {
+                    bindings.entry(name.clone()).or_insert(actual.clone());
+                }
+            }
+            DataType::Array(inner) => {
+                // Array parameters/variables store the *element* type (the
+                // analyzer pushes element types rather than the wrapped array
+                // type), so the actual may arrive as either `Array(E)` (from an
+                // array literal) or the bare element type `E` (from an array
+                // variable). In both cases we unify the array's element pattern
+                // against the element type we have.
+                match actual {
+                    DataType::Array(a) => {
+                        self.unify_generic_pattern(inner, a, bindings)
+                    }
+                    other => {
+                        self.unify_generic_pattern(inner, other, bindings)
+                    }
+                }
+            }
+            DataType::Nullable(inner) => {
+                if let DataType::Nullable(a) = actual {
+                    self.unify_generic_pattern(inner, a, bindings);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Substitute the recorded generic-parameter bindings throughout a type,
+    /// replacing `Struct("T")` references with their concrete bound types.
+    fn substitute_generic_types(
+        &self,
+        dt: &DataType,
+        bindings: &HashMap<String, DataType>,
+    ) -> DataType {
+        match dt {
+            DataType::Struct(name) => bindings
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| dt.clone()),
+            DataType::Array(inner) => {
+                DataType::Array(Box::new(self.substitute_generic_types(inner, bindings)))
+            }
+            DataType::Nullable(inner) => {
+                DataType::Nullable(Box::new(self.substitute_generic_types(inner, bindings)))
+            }
+            _ => dt.clone(),
         }
     }
 
@@ -2658,14 +2802,21 @@ impl AstVisitor for SemanticAnalyzer {
 
         match sym_data_type {
             Some(dt) => {
-                // Process arguments
+                // Process arguments (collect their types for generic resolution).
+                let mut arg_types: Vec<DataType> = Vec::new();
                 if let Some(args) = node.get_arguments() {
                     for arg in args {
                         arg.accept(self);
+                        arg_types.push(self.get_current_type());
                         self.type_stack.pop();
                     }
                 }
-                self.type_stack.push(dt);
+                // Resolve the concrete return type for top-level generic calls
+                // (e.g. `identity(3.5): float`) by unifying argument types with
+                // the generic signature's parameter types.
+                let resolved = self.resolve_generic_call_type(&full_name, &func_name, &arg_types)
+                    .unwrap_or(dt.clone());
+                self.type_stack.push(resolved);
             }
             None => {
                 self.error(&format!("Undeclared function: '{}'", full_name));

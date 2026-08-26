@@ -201,3 +201,68 @@ func main() {
     result.assert_stdout_contains("cmp = true");
     result.assert_stdout_contains("unary = -5");
 }
+
+// ============ Regression: generic function monomorphization ============
+
+/// A top-level generic `identity<T>` must instantiate per concrete type and
+/// rewrite call sites so the compiled program prints the right values. This
+/// exercises inference for int/float/str/bool, and the fix that resolves the
+/// dangling `Struct("T")` placeholder left in the caller's declarations.
+#[test]
+fn test_generic_identity_multiple_concrete_types() {
+    let src = r#"import std;
+
+func identity<T>(x: T): T { return x }
+
+func main() {
+    var i = identity(5)
+    var f = identity(3.5)
+    var s = identity("hi")
+    var b = identity(true)
+    io::println(@"i={i} f={f} s={s} b={b}")
+}
+"#;
+    let result = run_inline_test(src);
+    result.assert_success();
+    result.assert_stdout_contains("i=5 f=3.5 s=hi b=true");
+}
+
+/// Chained generic calls (`identity(identity(7))`) must infer the outer call
+/// from the returned instance type and produce correct results.
+#[test]
+fn test_generic_chained_calls() {
+    let src = r#"import std;
+
+func identity<T>(x: T): T { return x }
+
+func main() {
+    var i = identity(identity(7))
+    var f = identity(identity(2.5))
+    io::println(@"i={i} f={f}")
+}
+"#;
+    let result = run_inline_test(src);
+    result.assert_success();
+    result.assert_stdout_contains("i=7 f=2.5");
+}
+
+/// When one call site cannot be inferred (a `null` argument yields no useful
+/// type), the template must be kept as a fallback so that call site still
+/// links — while the inferable call site is still specialized. Regresses the
+/// "successful instance + uninferred call site" dangling-symbol bug.
+#[test]
+fn test_generic_uninferred_call_keeps_template() {
+    let src = r#"import std;
+
+func identity<T>(x: T): T { return x }
+
+func main() {
+    var i = identity(5)
+    var n = identity(null)
+    io::println(@"i={i}")
+}
+"#;
+    let result = run_inline_test(src);
+    result.assert_success();
+    result.assert_stdout_contains("i=5");
+}

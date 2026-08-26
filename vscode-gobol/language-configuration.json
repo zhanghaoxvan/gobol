@@ -27,7 +27,7 @@
   "indentationRules": {
     "increaseIndentPattern": "^\\s*((func|if|else|for|while|match|impl|trait|struct|enum|extern|static|operator|constructor|type|where)\\s+.*|.*(\\{|\\[|\\(|=>))\\s*$",
     "decreaseIndentPattern": "^\\s*(\\}|\\)|\\])\\s*$"
-  }
+  },
   "folding": {
     "markers": {
       "start": "^\\s*//\\s*#?region\\b.*",

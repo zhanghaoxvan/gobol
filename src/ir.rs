@@ -369,8 +369,17 @@ impl IRBuilder {
     }
 
     fn extract_generic_params(&self, func: &Function) -> Vec<String> {
-        let mut params = Vec::new();
-        
+        // Authoritative source: the explicit generic parameter list written in
+        // the source, e.g. `<T, U>` in `func identity<T>(x: T): T`. This makes
+        // single-uppercase names (the convention used throughout stdlib and
+        // language.md) work, which the type-scanning fallback below alone would
+        // miss (it only recognised lowercase identifiers).
+        let mut params: Vec<String> = func.get_generic_params().clone();
+        params.dedup();
+
+        // Fallback: scan parameter / return types for generic-looking names so
+        // legacy lowercase-style generics (written without an explicit <...>
+        // list) keep working.
         if let Some(param_list) = func.get_parameters() {
             for p in param_list {
                 self.collect_generic_names(p.get_type(), &mut params);
@@ -2640,139 +2649,596 @@ fn collect_free_vars_from_expr(expr: &dyn Expression, bound: &HashSet<String>, f
 
 // ==================== 单态化器（Monomorphizer） ====================
 
-#[allow(dead_code)]
+/// 单态化器：把「顶层泛型函数」实例化成针对具体类型的普通函数，并把所有
+/// 调用点改写为对应实例，从而让用户自定义泛型函数（如 `identity<T>`）在
+/// 生成的机器码中正常工作。
+///
+/// 范围约定：
+/// - 只处理顶层（非方法）且带函数体的泛型函数。方法 / 泛型结构体
+///   （如 `Vec<T>`、`Option<T>`）由运行时容器支持，不在本阶段展开，以免破坏
+///   现有行为。
+/// - 无函数体的泛型函数（如 `io::println<T>`）由 cranelift 的
+///   `builtin_runtime` 按名分发，这里原样保留其名字、清空泛型信息即可。
+/// - 若某调用点无法推断出具体类型参数，则保留原调用与被调泛型函数，作为
+///   兜底，保证链路仍然可链接。
 pub struct Monomorphizer {
-    instance_counter: usize,
-    instances: HashMap<String, String>,
+    /// (泛型函数名, 类型参数序列) -> 对应实例名。用于去重，避免同一实例
+    /// 被反复生成（也保证递归/互相调用能终止）。
+    instances: HashMap<(String, Vec<DataType>), String>,
+    /// 已生成的全部实例函数。
+    generated: Vec<IRFunction>,
+    /// 调用点实参类型推断所需的当前函数局部变量类型表。
+    var_types: HashMap<String, DataType>,
+    /// 已占用的实例名集合，用于命名去歧义（保证不同 key 不与同名字符串冲突）。
+    used_names: HashSet<String>,
+    /// 当前实例化嵌套深度。用于限制递归/互相递归泛型的展开深度，防止
+    /// 类型组合无界的泛型（如 `T -> T[] -> T[][] -> ...`）无限生成实例。
+    expand_depth: usize,
+    /// 无法被实例化的泛型模板名（推断失败，或实例化到达深度上限）。这些
+    /// 名字对应的原模板会被保留到输出作为兜底，避免调用点悬空。
+    deferred: HashSet<String>,
 }
+
+/// 单态化递归展开的最大嵌套深度。超过该深度的泛型调用不再展开，改为保留
+/// 原模板兜底，从而在“类型参数空间无界”时能可靠终止。
+const MAX_INSTANCE_DEPTH: usize = 64;
 
 impl Monomorphizer {
     pub fn new() -> Self {
         Monomorphizer {
-            instance_counter: 0,
             instances: HashMap::new(),
+            generated: Vec::new(),
+            var_types: HashMap::new(),
+            used_names: HashSet::new(),
+            expand_depth: 0,
+            deferred: HashSet::new(),
         }
     }
 
-    /// 对 IR 进行单态化，展开所有泛型
+    /// 对 IR 进行单态化，展开所有泛型函数。
     pub fn monomorphize(&mut self, ir: &GobolIR) -> GobolIR {
         let mut result = ir.clone();
         
-        // 收集需要实例化的泛型函数
-        let mut generic_functions: Vec<IRFunction> = Vec::new();
-        let mut concrete_functions: Vec<IRFunction> = Vec::new();
-        
-        for func in &ir.functions {
-            if !func.generic_params.is_empty() {
-                // 泛型函数：需要实例化
-                // 从调用点收集实际类型参数
-                let instances = self.collect_instances(ir, func);
-                for (_type_args, instance) in instances {
-                    generic_functions.push(instance);
-                }
-            } else {
-                // 非泛型函数：直接保留
-                concrete_functions.push(func.clone());
+        // 收集需要单态化的泛型模板（按名字索引），以及所有函数的返回类型
+        //（供调用点实参推断使用）。泛型模板必须是顶层、带函数体。
+        let mut generic_by_name: HashMap<String, IRFunction> = HashMap::new();
+        let mut returns_by_name: HashMap<String, DataType> = HashMap::new();
+        for f in &ir.functions {
+            returns_by_name.insert(f.name.clone(), f.return_type.clone());
+            if !f.generic_params.is_empty() && !f.is_method && f.body.is_some() {
+                generic_by_name.insert(f.name.clone(), f.clone());
             }
         }
-        
-        // 更新结果
-        result.functions = concrete_functions;
-        result.functions.extend(generic_functions);
-        
+
+        // 重置单次编译的状态。
+        self.instances.clear();
+        self.generated.clear();
+        self.var_types.clear();
+        self.used_names.clear();
+        self.expand_depth = 0;
+        self.deferred.clear();
+
+        // 输出：非泛型函数原样保留；无函数体的运行时泛型（println 等）保留
+        // 原名、清空泛型信息。泛型模板本身不输出，只输出它派生的实例。
+        let mut out: Vec<IRFunction> = Vec::new();
+        for f in &ir.functions {
+            if generic_by_name.contains_key(&f.name) {
+                continue;
+            }
+            let mut f = f.clone();
+            if !f.generic_params.is_empty() {
+                f.generic_params.clear();
+            }
+            if let Some(body) = &mut f.body {
+                self.var_types.clear();
+                self.rewrite_block(body, &generic_by_name, &mut returns_by_name);
+            }
+            out.push(f);
+        }
+
+        // 兜底：对于「至少有一个调用点无法被实例化」的泛型模板（推断失败，
+        // 或展开到达递归深度上限），保留原模板，从而让那些未改写的调用点
+        // 仍能链接到它，避免符号悬空。
+        for f in &ir.functions {
+            if self.deferred.contains(&f.name) {
+                out.push(f.clone());
+            }
+        }
+
+        out.extend(std::mem::take(&mut self.generated));
+        result.functions = out;
         result
     }
 
-    fn collect_instances(&mut self, _ir: &GobolIR, func: &IRFunction) -> Vec<(Vec<DataType>, IRFunction)> {
-        let mut instances = Vec::new();
-        
-        // 从函数体中收集类型参数
-        if let Some(body) = &func.body {
-            self.scan_for_type_args(body, &func.generic_params, &mut instances, func);
-        }
-        
-        // 如果没有找到任何实例，使用默认类型
-        if instances.is_empty() {
-            // 默认使用 int, float, str
-            for ty in [DataType::Int, DataType::Float, DataType::Str] {
-                let type_args = vec![ty.clone()];
-                let instance = self.instantiate_function(func, &type_args);
-                instances.push((type_args, instance));
-            }
-        }
-        
-        instances
-    }
+    // ==================== 调用点改写 ====================
 
-    fn scan_for_type_args(
+    fn rewrite_block(
         &mut self,
-        block: &IRBlock,
-        _generic_params: &[String],
-        instances: &mut Vec<(Vec<DataType>, IRFunction)>,
-        func: &IRFunction,
+        block: &mut IRBlock,
+        generic_by_name: &HashMap<String, IRFunction>,
+        returns_by_name: &mut HashMap<String, DataType>,
     ) {
-        for stmt in &block.statements {
+        for stmt in &mut block.statements {
             match stmt {
-                IRStmt::Call { func: call_name, args: _args, generic_args } => {
-                    if call_name == &func.name && !generic_args.is_empty() {
-                        // 找到了一个泛型调用
-                        let type_args = generic_args.clone();
-                        let instance = self.instantiate_function(func, &type_args);
-                        instances.push((type_args, instance));
+                IRStmt::Declaration { name, ty, init } => {
+                    if let Some(init) = init {
+                        self.rewrite_expr(init, generic_by_name, returns_by_name);
+                        let t = self.infer_concrete_type(init, &*returns_by_name);
+                        if !matches!(t, DataType::Unknown) {
+                            self.var_types.insert(name.clone(), t.clone());
+                            // 若声明类型仍是悬空的泛型占位符（`Struct("T")`，来自
+                            // 泛型模板的返回类型，在调用方没有具体含义）而推断出的是
+                            // 具体基础类型，则用后者替换 `ty`，避免 Cranelift
+                            // “声明类型与值类型不符”的失配。
+                            if matches!(*ty, DataType::Struct(_))
+                                && !matches!(t, DataType::Struct(_) | DataType::None_)
+                            {
+                                *ty = t;
+                            }
+                        }
                     }
                 }
-                IRStmt::MethodCall { args: _args, generic_args, .. } => {
-                    if !generic_args.is_empty() {
-                        let type_args = generic_args.clone();
-                        let instance = self.instantiate_function(func, &type_args);
-                        instances.push((type_args, instance));
+                IRStmt::Expression(e) => {
+                    self.rewrite_expr(e, generic_by_name, returns_by_name);
+                }
+                IRStmt::Return(e) => {
+                    if let Some(e) = e {
+                        self.rewrite_expr(e, generic_by_name, returns_by_name);
                     }
                 }
-                _ => {}
+                IRStmt::If { cond, then_block, else_block } => {
+                    self.rewrite_expr(cond, generic_by_name, returns_by_name);
+                    self.rewrite_block(then_block, generic_by_name, returns_by_name);
+                    if let Some(else_block) = else_block {
+                        self.rewrite_block(else_block, generic_by_name, returns_by_name);
+                    }
+                }
+                IRStmt::While { cond, body } => {
+                    self.rewrite_expr(cond, generic_by_name, returns_by_name);
+                    self.rewrite_block(body, generic_by_name, returns_by_name);
+                }
+                IRStmt::For { iterable, body, .. } => {
+                    self.rewrite_expr(iterable, generic_by_name, returns_by_name);
+                    self.rewrite_block(body, generic_by_name, returns_by_name);
+                }
+                IRStmt::Assignment { target, value } => {
+                    self.rewrite_expr(target, generic_by_name, returns_by_name);
+                    self.rewrite_expr(value, generic_by_name, returns_by_name);
+                }
+                IRStmt::Call { func, args, generic_args } => {
+                    for a in args.iter_mut() {
+                        self.rewrite_expr(a, generic_by_name, returns_by_name);
+                    }
+                    self.maybe_rewrite_call(
+                        func,
+                        args,
+                        generic_args,
+                        generic_by_name,
+                        returns_by_name,
+                    );
+                }
+                IRStmt::MethodCall { object, method, args, generic_args } => {
+                    self.rewrite_expr(object, generic_by_name, returns_by_name);
+                    for a in args.iter_mut() {
+                        self.rewrite_expr(a, generic_by_name, returns_by_name);
+                    }
+                    // 方法调用若能解析为结构体方法，则形如 S::method。
+                    let target = if let IRExpr::Variable(sname) = object.as_ref() {
+                        format!("{}::{}", sname, method)
+                    } else {
+                        method.clone()
+                    };
+                    if generic_by_name.contains_key(&target) {
+                        let args2: Vec<IRExpr> = args.clone();
+                        let mut target = target;
+                        self.maybe_rewrite_call(
+                            &mut target,
+                            &args2,
+                            generic_args,
+                            generic_by_name,
+                            returns_by_name,
+                        );
+                        *method = target
+                            .rsplit("::")
+                            .next()
+                            .map(|m| m.to_string())
+                            .unwrap_or(target);
+                    }
+                }
+                IRStmt::Break | IRStmt::Continue => {}
             }
         }
     }
 
-    fn instantiate_function(&mut self, func: &IRFunction, type_args: &[DataType]) -> IRFunction {
-        // 生成实例化名称: func_T1_T2
-        let type_suffix: String = type_args.iter()
-            .map(|t| format!("_{}", t))
-            .collect();
-        let instance_name = format!("{}{}", func.name, type_suffix);
-        
-        // 创建类型映射
+    fn rewrite_expr(
+        &mut self,
+        expr: &mut IRExpr,
+        generic_by_name: &HashMap<String, IRFunction>,
+        returns_by_name: &mut HashMap<String, DataType>,
+    ) {
+        match expr {
+            IRExpr::Call { func, args, generic_args } => {
+                for a in args.iter_mut() {
+                    self.rewrite_expr(a, generic_by_name, returns_by_name);
+                }
+                let args2 = args.clone();
+                self.maybe_rewrite_call(
+                    func,
+                    &args2,
+                    generic_args,
+                    generic_by_name,
+                    returns_by_name,
+                );
+            }
+            IRExpr::MethodCall { object, method, args, generic_args } => {
+                self.rewrite_expr(object, generic_by_name, returns_by_name);
+                for a in args.iter_mut() {
+                    self.rewrite_expr(a, generic_by_name, returns_by_name);
+                }
+                let args2 = args.clone();
+                let target = if let IRExpr::Variable(sname) = object.as_ref() {
+                    format!("{}::{}", sname, method)
+                } else {
+                    method.clone()
+                };
+                if generic_by_name.contains_key(&target) {
+                    let mut target = target;
+                    self.maybe_rewrite_call(
+                        &mut target,
+                        &args2,
+                        generic_args,
+                        generic_by_name,
+                        returns_by_name,
+                    );
+                    *method = target
+                        .rsplit("::")
+                        .next()
+                        .map(|m| m.to_string())
+                        .unwrap_or(target);
+                }
+            }
+            IRExpr::Binary { left, right, .. } => {
+                self.rewrite_expr(left, generic_by_name, returns_by_name);
+                self.rewrite_expr(right, generic_by_name, returns_by_name);
+            }
+            IRExpr::Unary { operand, .. } => {
+                self.rewrite_expr(operand, generic_by_name, returns_by_name);
+            }
+            IRExpr::MemberAccess { object, .. } => {
+                self.rewrite_expr(object, generic_by_name, returns_by_name);
+            }
+            IRExpr::ArrayIndex { array, index } => {
+                self.rewrite_expr(array, generic_by_name, returns_by_name);
+                self.rewrite_expr(index, generic_by_name, returns_by_name);
+            }
+            IRExpr::ArrayLiteral(items) => {
+                for it in items.iter_mut() {
+                    self.rewrite_expr(it, generic_by_name, returns_by_name);
+                }
+            }
+            IRExpr::StructLiteral { fields, .. } => {
+                for (_, e) in fields.iter_mut() {
+                    self.rewrite_expr(e, generic_by_name, returns_by_name);
+                }
+            }
+            IRExpr::Cast { expr, .. } => {
+                self.rewrite_expr(expr, generic_by_name, returns_by_name);
+            }
+            IRExpr::Assignment { target, value } => {
+                self.rewrite_expr(target, generic_by_name, returns_by_name);
+                self.rewrite_expr(value, generic_by_name, returns_by_name);
+            }
+            IRExpr::IndirectCall { callee, args } => {
+                self.rewrite_expr(callee, generic_by_name, returns_by_name);
+                for a in args.iter_mut() {
+                    self.rewrite_expr(a, generic_by_name, returns_by_name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 若 `func` 指向一个泛型模板，则推断其具体类型参数，生成/复用实例并把
+    /// `func` 改写为实例名。若无法推断则保持不变（调用方后续保留原模板兜底）。
+    #[allow(clippy::too_many_arguments)]
+    fn maybe_rewrite_call(
+        &mut self,
+        func: &mut String,
+        args: &[IRExpr],
+        generic_args: &[DataType],
+        generic_by_name: &HashMap<String, IRFunction>,
+        returns_by_name: &mut HashMap<String, DataType>,
+    ) {
+        let key_name = func.clone();
+        let Some(template) = generic_by_name.get(&key_name) else {
+            return;
+        };
+        let Some(type_args) =
+            self.infer_type_args(template, args, generic_args, &*returns_by_name)
+        else {
+            // 类型参数无法推断：保留原调用，并把模板记入 deferred 以便兜底。
+            self.deferred.insert(key_name);
+            return;
+        };
+        let Some(instance_name) = self.ensure_instance(
+            &key_name,
+            template,
+            &type_args,
+            generic_by_name,
+            returns_by_name,
+        ) else {
+            // 展开到达递归深度上限：同上，保留原调用，兜底保留模板。
+            self.deferred.insert(key_name);
+            return;
+        };
+        *func = instance_name;
+    }
+
+    /// 为泛型模板在某一组具体类型下的调用求实例；若已存在则直接返回其实例名。
+    /// 生成实例时会对函数整体替换类型，并改写其实例体内对其它泛型的调用。
+    /// 返回 None 表示展开到达递归深度上限，调用方应保留原调用并兜底保留模板。
+    fn ensure_instance(
+        &mut self,
+        name: &str,
+        template: &IRFunction,
+        type_args: &[DataType],
+        generic_by_name: &HashMap<String, IRFunction>,
+        returns_by_name: &mut HashMap<String, DataType>,
+    ) -> Option<String> {
+        let key = (name.to_string(), type_args.to_vec());
+        if let Some(existing) = self.instances.get(&key) {
+            return Some(existing.clone());
+        }
+        // 递归深度保险丝：防止类型参数空间无界的泛型（如 `T -> T[] -> T[][]`
+        // -> ...）无限生成实例。超限时不再继续展开,交由调用方兜底。
+        if self.expand_depth >= MAX_INSTANCE_DEPTH {
+            return None;
+        }
+        self.expand_depth += 1;
+        let result = self.expand_instance(
+            &key,
+            name,
+            template,
+            type_args,
+            generic_by_name,
+            returns_by_name,
+        );
+        self.expand_depth -= 1;
+        result
+    }
+
+    /// 执行实际的实例生成（调用前应已通过深度限制检查）。
+    fn expand_instance(
+        &mut self,
+        key: &(String, Vec<DataType>),
+        name: &str,
+        template: &IRFunction,
+        type_args: &[DataType],
+        generic_by_name: &HashMap<String, IRFunction>,
+        returns_by_name: &mut HashMap<String, DataType>,
+    ) -> Option<String> {
+        let instance_name = self.instance_name(name, type_args);
+        self.used_names.insert(instance_name.clone());
+        self.instances.insert(key.clone(), instance_name.clone());
+
+        let mut instance = template.clone();
+        instance.name = instance_name.clone();
+        instance.generic_params.clear();
+
+        // 建立类型映射：泛型形参 -> 具体类型。
         let mut type_map = HashMap::new();
-        for (i, param) in func.generic_params.iter().enumerate() {
+        for (i, param) in template.generic_params.iter().enumerate() {
             if i < type_args.len() {
                 type_map.insert(param.clone(), type_args[i].clone());
             }
         }
-        
-        // 替换函数体中的泛型类型
-        let mut instance = func.clone();
-        instance.name = instance_name;
-        instance.generic_params = Vec::new(); // 已经实例化，不再是泛型
-        
-        // 替换参数类型
+
         for param in &mut instance.params {
             param.ty = self.substitute_type(&param.ty, &type_map);
         }
-        
-        // 替换返回类型
         instance.return_type = self.substitute_type(&instance.return_type, &type_map);
-        
-        // 替换 body 中的类型
         if let Some(body) = &mut instance.body {
             self.substitute_in_block(body, &type_map);
+            // 改写实例体内部的调用点（一个泛型调用另一个泛型）。
+            self.var_types.clear();
+            self.rewrite_block(body, generic_by_name, returns_by_name);
         }
-        
-        instance
+
+        // 让链式泛型调用（identity(identity(5))）的外层实参推断能看到该实例的
+        // 返回类型。
+        returns_by_name.insert(instance_name.clone(), instance.return_type.clone());
+
+        self.generated.push(instance);
+        Some(instance_name)
+    }
+
+    // ==================== 具体类型推断 ====================
+
+    /// 依据调用点实参推断泛型模板的具体类型参数。优先使用显式 generic_args，
+    /// 否则把每个实参与对应形参做类型统一。任一泛型形参无法确定时返回 None。
+    fn infer_type_args(
+        &self,
+        template: &IRFunction,
+        args: &[IRExpr],
+        generic_args: &[DataType],
+        returns_by_name: &HashMap<String, DataType>,
+    ) -> Option<Vec<DataType>> {
+        if !generic_args.is_empty() {
+            if generic_args.len() == template.generic_params.len() {
+                return Some(generic_args.to_vec());
+            }
+            return None;
+        }
+
+        let mut type_map: HashMap<String, DataType> = HashMap::new();
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(param) = template.params.get(i) {
+                let actual = self.infer_concrete_type(arg, returns_by_name);
+                if self.unify_type(&param.ty, &actual, &mut type_map) {
+                    // 同一泛型形参被多个实参约束成互相矛盾的具体类型：无法给出
+                    // 一致的实例，按未推断处理（保留模板兜底）。
+                    return None;
+                }
+            }
+        }
+        let ordered: Vec<DataType> = template
+            .generic_params
+            .iter()
+            .map(|p| type_map.get(p).cloned())
+            .collect::<Option<Vec<_>>>()?;
+        Some(ordered)
+    }
+
+    /// 把 pattern 形参类型与 actual 具体类型统一：将形参中的泛型形参绑定到
+    /// actual 的对应具体类型。返回 true 表示检测到矛盾（同一泛型形参已绑定到
+    /// 一个不同的具体类型），调用方应视为无法推断。
+    fn unify_type(
+        &self,
+        pattern: &DataType,
+        actual: &DataType,
+        type_map: &mut HashMap<String, DataType>,
+    ) -> bool {
+        match pattern {
+            DataType::Struct(name)
+                if !matches!(
+                    actual,
+                    DataType::None_ | DataType::Unknown
+                ) =>
+            {
+                match type_map.get(name) {
+                    Some(existing) if existing != actual => true,
+                    Some(_) => false,
+                    None => {
+                        type_map.insert(name.clone(), actual.clone());
+                        false
+                    }
+                }
+            }
+            DataType::Array(inner) => {
+                if let DataType::Array(a) = actual {
+                    self.unify_type(inner, a, type_map)
+                } else {
+                    false
+                }
+            }
+            DataType::Nullable(inner) => {
+                if let DataType::Nullable(a) = actual {
+                    self.unify_type(inner, a, type_map)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// 轻量实参类型推断：确定表达式对应的具体类型（用于泛型实例选择）。
+    fn infer_concrete_type(
+        &self,
+        expr: &IRExpr,
+        returns_by_name: &HashMap<String, DataType>,
+    ) -> DataType {
+        match expr {
+            IRExpr::Literal(LitValue::Int(_)) => DataType::Int,
+            IRExpr::Literal(LitValue::Float(_)) => DataType::Float,
+            IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
+            IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
+            IRExpr::Literal(LitValue::None) => DataType::None_,
+            IRExpr::Variable(name) => {
+                self.var_types.get(name).cloned().unwrap_or(DataType::Unknown)
+            }
+            IRExpr::StructLiteral { name, .. } => DataType::Struct(name.clone()),
+            IRExpr::Binary { op, left, right } => {
+                // 比较 / 逻辑运算符结果恒为 Bool。
+                if matches!(
+                    op.as_str(),
+                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+                ) {
+                    return DataType::Bool;
+                }
+                let lt = self.infer_concrete_type(left, returns_by_name);
+                let rt = self.infer_concrete_type(right, returns_by_name);
+                // 数字提升：任一操作数为 Float 则结果为 Float。
+                if matches!(lt, DataType::Float) || matches!(rt, DataType::Float) {
+                    return DataType::Float;
+                }
+                // 字符串拼接（+）：任一侧为 Str 即结果为 Str。
+                if op == "+"
+                    && (matches!(lt, DataType::Str) || matches!(rt, DataType::Str))
+                {
+                    return DataType::Str;
+                }
+                // 一侧类型无法确定时，尽量采用已知的一侧；两侧都确定且一致时
+                // 保留该类型（Int、Float 已在前面的提升中处理，这里覆盖 Str、
+                // Struct、Bool 等相等类型）。
+                if matches!(lt, DataType::Unknown) && !matches!(rt, DataType::Unknown) {
+                    return rt;
+                }
+                if matches!(rt, DataType::Unknown) && !matches!(lt, DataType::Unknown) {
+                    return lt;
+                }
+                rt
+            }
+            IRExpr::Unary { operand, .. } => self.infer_concrete_type(operand, returns_by_name),
+            IRExpr::Call { func, .. } => returns_by_name.get(func).cloned().unwrap_or(DataType::Unknown),
+            IRExpr::MethodCall { object, method, .. } => {
+                if method == "new" {
+                    if let IRExpr::Variable(name) = object.as_ref() {
+                        return DataType::Struct(name.clone());
+                    }
+                }
+                if let IRExpr::Variable(name) = object.as_ref() {
+                    let full = format!("{}::{}", name, method);
+                    if let Some(dt) = returns_by_name.get(&full) {
+                        return dt.clone();
+                    }
+                }
+                DataType::Unknown
+            }
+            IRExpr::Cast { target, .. } => target.clone(),
+            IRExpr::ArrayLiteral(items) => {
+                let elem = items
+                    .first()
+                    .map(|e| self.infer_concrete_type(e, returns_by_name))
+                    .unwrap_or(DataType::Unknown);
+                DataType::Array(Box::new(elem))
+            }
+            IRExpr::Assignment { value, .. } => self.infer_concrete_type(value, returns_by_name),
+            _ => DataType::Unknown,
+        }
+    }
+
+    // ==================== 实例生成与命名 ====================
+
+    /// 生成稳定、可读的实例名。完全由“模板名 + 具体类型参数”决定，与处理
+    /// 顺序、Hash / 计数无关，因此同一程序的多次编译会得到一致的实例名
+    /// （便于 diff、缓存与调试）。当不同 key 经 `sanitize_type_name` 折叠出
+    /// 相同字符串（极端边界）时，用递减后缀去歧义并保证唯一。
+    fn instance_name(&self, name: &str, type_args: &[DataType]) -> String {
+        let mut base = name.to_string();
+        for t in type_args {
+            base.push_str("__");
+            base.push_str(&sanitize_type_name(t));
+        }
+        if base == *name {
+            // 无类型参数（理论上泛型模板不会发生），退化为原名即唯一。
+            return base;
+        }
+        if !self.used_names.contains(&base) {
+            return base;
+        }
+        let mut candidate = format!("{}__dup", base);
+        let mut i = 1;
+        while self.used_names.contains(&candidate) {
+            candidate = format!("{}__dup{}", base, i);
+            i += 1;
+        }
+        candidate
     }
 
     fn substitute_type(&self, dt: &DataType, type_map: &HashMap<String, DataType>) -> DataType {
         match dt {
             DataType::Struct(name) => {
-                // 检查是否是泛型参数
                 if let Some(actual) = type_map.get(name) {
                     actual.clone()
                 } else {
@@ -2789,17 +3255,133 @@ impl Monomorphizer {
         }
     }
 
+    /// 递归替换语句序列中出现的所有 DataType（声明、cast 目标、嵌套调用点、
+    /// 以及表达式树里各处的类型标注）。
     fn substitute_in_block(&self, block: &mut IRBlock, type_map: &HashMap<String, DataType>) {
         for stmt in &mut block.statements {
             match stmt {
-                IRStmt::Declaration { ty, .. } => {
+                IRStmt::Declaration { ty, init, .. } => {
                     *ty = self.substitute_type(ty, type_map);
+                    if let Some(init) = init {
+                        self.substitute_in_expr(init, type_map);
+                    }
                 }
-                IRStmt::Call { generic_args: _generic_args, .. } => {
-                    // 替换泛型参数
+                IRStmt::Expression(e) => self.substitute_in_expr(e, type_map),
+                IRStmt::Return(Some(e)) => self.substitute_in_expr(e, type_map),
+                IRStmt::Return(None) => {}
+                IRStmt::If { cond, then_block, else_block } => {
+                    self.substitute_in_expr(cond, type_map);
+                    self.substitute_in_block(then_block, type_map);
+                    if let Some(else_block) = else_block {
+                        self.substitute_in_block(else_block, type_map);
+                    }
                 }
-                _ => {}
+                IRStmt::While { cond, body } => {
+                    self.substitute_in_expr(cond, type_map);
+                    self.substitute_in_block(body, type_map);
+                }
+                IRStmt::For { iterable, body, .. } => {
+                    self.substitute_in_expr(iterable, type_map);
+                    self.substitute_in_block(body, type_map);
+                }
+                IRStmt::Assignment { target, value } => {
+                    self.substitute_in_expr(target, type_map);
+                    self.substitute_in_expr(value, type_map);
+                }
+                IRStmt::Call { args, generic_args, .. } => {
+                    for a in args.iter_mut() {
+                        self.substitute_in_expr(a, type_map);
+                    }
+                    for ga in generic_args.iter_mut() {
+                        *ga = self.substitute_type(ga, type_map);
+                    }
+                }
+                IRStmt::MethodCall { object, args, generic_args, .. } => {
+                    self.substitute_in_expr(object, type_map);
+                    for a in args.iter_mut() {
+                        self.substitute_in_expr(a, type_map);
+                    }
+                    for ga in generic_args.iter_mut() {
+                        *ga = self.substitute_type(ga, type_map);
+                    }
+                }
+                IRStmt::Break | IRStmt::Continue => {}
             }
         }
+    }
+
+    fn substitute_in_expr(&self, expr: &mut IRExpr, type_map: &HashMap<String, DataType>) {
+        match expr {
+            IRExpr::Call { args, generic_args, .. } => {
+                for a in args.iter_mut() {
+                    self.substitute_in_expr(a, type_map);
+                }
+                for ga in generic_args.iter_mut() {
+                    *ga = self.substitute_type(ga, type_map);
+                }
+            }
+            IRExpr::MethodCall { object, args, generic_args, .. } => {
+                self.substitute_in_expr(object, type_map);
+                for a in args.iter_mut() {
+                    self.substitute_in_expr(a, type_map);
+                }
+                for ga in generic_args.iter_mut() {
+                    *ga = self.substitute_type(ga, type_map);
+                }
+            }
+            IRExpr::Binary { left, right, .. } => {
+                self.substitute_in_expr(left, type_map);
+                self.substitute_in_expr(right, type_map);
+            }
+            IRExpr::Unary { operand, .. } => self.substitute_in_expr(operand, type_map),
+            IRExpr::MemberAccess { object, .. } => self.substitute_in_expr(object, type_map),
+            IRExpr::ArrayIndex { array, index } => {
+                self.substitute_in_expr(array, type_map);
+                self.substitute_in_expr(index, type_map);
+            }
+            IRExpr::ArrayLiteral(items) => {
+                for it in items.iter_mut() {
+                    self.substitute_in_expr(it, type_map);
+                }
+            }
+            IRExpr::StructLiteral { fields, .. } => {
+                for (_, e) in fields.iter_mut() {
+                    self.substitute_in_expr(e, type_map);
+                }
+            }
+            IRExpr::Cast { expr, target } => {
+                self.substitute_in_expr(expr, type_map);
+                *target = self.substitute_type(target, type_map);
+            }
+            IRExpr::Assignment { target, value } => {
+                self.substitute_in_expr(target, type_map);
+                self.substitute_in_expr(value, type_map);
+            }
+            IRExpr::IndirectCall { callee, args } => {
+                self.substitute_in_expr(callee, type_map);
+                for a in args.iter_mut() {
+                    self.substitute_in_expr(a, type_map);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 把 DataType 折叠成一个用于实例命名的、仅含字母数字与下划线的短标识。
+fn sanitize_type_name(dt: &DataType) -> String {
+    let s = dt.to_string();
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "None".to_string()
+    } else {
+        out
     }
 }

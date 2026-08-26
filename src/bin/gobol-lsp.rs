@@ -27,9 +27,45 @@ use gobol::lexer::Lexer;
 use gobol::semantic_analyzer::SemanticAnalyzer;
 use gobol::token::{Token, TokenType};
 
+// ==================== Semantic Tokens ====================
+// rust-analyzer-style automatic semantic highlighting. The LSP
+// `textDocument/semanticTokens/full` handler below maps the lexer token stream
+// (+ the symbol index) onto the standard LSP token types, so `import xxx`'s
+// `xxx` (and other identifiers) are colored automatically by any client that
+// advertises semantic-token support — no manual highlight toggling needed.
+
+/// Order is significant: the client maps bitset positions back to these names.
+/// All names are from the standard LSP token-type set so VS Code / Neovim give
+/// them sensible default colours out of the box.
+static SEMANTIC_TYPES: &[SemanticTokenType] = &[
+    SemanticTokenType::NAMESPACE,
+    SemanticTokenType::TYPE,
+    SemanticTokenType::STRUCT,
+    SemanticTokenType::ENUM,
+    SemanticTokenType::ENUM_MEMBER,
+    SemanticTokenType::FUNCTION,
+    SemanticTokenType::METHOD,
+    SemanticTokenType::VARIABLE,
+    SemanticTokenType::PARAMETER,
+    SemanticTokenType::TYPE_PARAMETER,
+    SemanticTokenType::PROPERTY,
+    SemanticTokenType::KEYWORD,
+    SemanticTokenType::STRING,
+    SemanticTokenType::NUMBER,
+    SemanticTokenType::OPERATOR,
+];
+
+static SEMANTIC_MODIFIERS: &[SemanticTokenModifier] = &[
+    SemanticTokenModifier::DECLARATION,
+    SemanticTokenModifier::DEFINITION,
+    SemanticTokenModifier::READONLY,
+    SemanticTokenModifier::STATIC,
+    SemanticTokenModifier::DEFAULT_LIBRARY,
+];
+
 // ==================== Symbol Index ====================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum SymKind {
     Function,
     Method,
@@ -168,6 +204,14 @@ impl DocState {
             .collect()
     }
 
+    /// Compute LSP semantic tokens (delta-encoded) from the token stream and
+    /// the symbol index. Emits one token per lexer token, classifying
+    /// identifiers by declaration kind / context so `import xxx`, types,
+    /// function calls, variables, etc. are highlighted automatically.
+    fn semantic_tokens(&self) -> Vec<SemanticToken> {
+        build_semantic_tokens(&self.tokens, &self.symbols)
+    }
+
     #[allow(dead_code)]
     fn source_line(&self, line_1based: i32) -> &str {
         if line_1based <= 0 {
@@ -178,6 +222,196 @@ impl DocState {
             .nth((line_1based - 1) as usize)
             .unwrap_or("")
     }
+}
+
+// ==================== Semantic Token Builder ====================
+
+/// Collect the absolute (line, col) positions of module-name identifiers in
+/// `import ...` / `from ... import ...` statements (excluding aliases and the
+/// imported members of a `from` import). Used to mark those identifiers as
+/// `NAMESPACE` so they get a distinct colour from plain variables.
+fn import_module_token_positions(tokens: &[Token]) -> std::collections::HashSet<(i32, i32)> {
+    let mut set = std::collections::HashSet::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if t.r#type == TokenType::Keyword && (t.value == "import" || t.value == "from") {
+            let is_from = t.value == "from";
+            let mut j = i + 1;
+            while j < tokens.len() {
+                let nt = &tokens[j];
+                if nt.r#type == TokenType::EndOfLine || nt.value == ";" {
+                    break;
+                }
+                // `from X import ...`: stop before `import` so the imported
+                // members are not treated as module names.
+                if is_from && nt.value == "import" {
+                    break;
+                }
+                // `import X as Alias` / `import X::Y`: `as` ends the module path,
+                // while `::` continues it (nested module path segments).
+                match &nt.r#type {
+                    TokenType::Keyword => break,
+                    TokenType::Operator => {
+                        // `::` is a path separator inside a module path.
+                        if nt.value != "::" {
+                            break;
+                        }
+                    }
+                    TokenType::Identifier => {
+                        set.insert((nt.line, nt.col));
+                    }
+                    _ => break,
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    set
+}
+
+/// Look up a symbol declared exactly at (line, col).
+fn find_symbol_at<'a>(
+    symbols: &'a [SymbolEntry],
+    line: i32,
+    col: i32,
+) -> Option<&'a SymbolEntry> {
+    symbols.iter().find(|s| s.line == line && s.col == col)
+}
+
+/// Map a `SymKind` to a semantic-token-type index (position in SEMANTIC_TYPES)
+/// and the modifier bitset for its definition.
+fn symbol_semantic(kind: &SymKind) -> (u32, u32) {
+    match kind {
+        SymKind::Function => (type_index(SemanticTokenType::FUNCTION), MOD_DECLARATION),
+        SymKind::Method => (type_index(SemanticTokenType::METHOD), MOD_DECLARATION),
+        SymKind::StaticFunc => (
+            type_index(SemanticTokenType::FUNCTION),
+            MOD_DECLARATION | MOD_STATIC,
+        ),
+        SymKind::Struct => (type_index(SemanticTokenType::STRUCT), MOD_DECLARATION),
+        SymKind::Enum => (type_index(SemanticTokenType::ENUM), MOD_DECLARATION),
+        SymKind::EnumVariant => (
+            type_index(SemanticTokenType::ENUM_MEMBER),
+            MOD_DECLARATION,
+        ),
+        SymKind::Variable => (type_index(SemanticTokenType::VARIABLE), MOD_DECLARATION),
+        SymKind::Parameter => (type_index(SemanticTokenType::PARAMETER), MOD_DECLARATION),
+        SymKind::Trait => (type_index(SemanticTokenType::TYPE), MOD_DECLARATION),
+        SymKind::Import => (type_index(SemanticTokenType::NAMESPACE), 0),
+        SymKind::ExternFn => (type_index(SemanticTokenType::FUNCTION), MOD_DECLARATION),
+        SymKind::TypeAlias => (type_index(SemanticTokenType::TYPE), MOD_DECLARATION),
+    }
+}
+
+// Modifier bits correspond to indices in SEMANTIC_MODIFIERS.
+const MOD_DECLARATION: u32 = 1 << 0; // DECLARATION
+const MOD_STATIC: u32 = 1 << 3; // STATIC
+
+/// Index of a token type within SEMANTIC_TYPES.
+fn type_index(ty: SemanticTokenType) -> u32 {
+    SEMANTIC_TYPES
+        .iter()
+        .position(|t| *t == ty)
+        .unwrap_or(0) as u32
+}
+
+fn is_capitalized(s: &str) -> bool {
+    s.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+}
+
+/// Classify an identifier token's semantic type + modifiers based on the
+/// symbol index and surrounding context.
+fn classify_ident(
+    tokens: &[Token],
+    i: usize,
+    symbols: &[SymbolEntry],
+    ns_set: &std::collections::HashSet<(i32, i32)>,
+) -> (u32, u32) {
+    let t = &tokens[i];
+    // 1. Position is a declaration (from the symbol index) — use its kind.
+    if let Some(sym) = find_symbol_at(symbols, t.line, t.col) {
+        return symbol_semantic(&sym.kind);
+    }
+    // 2. Module name in an import statement.
+    if ns_set.contains(&(t.line, t.col)) {
+        return (type_index(SemanticTokenType::NAMESPACE), 0);
+    }
+    // 3. Module qualifier before `::` (e.g. `io::println`, `Vec::new`).
+    if let Some(next) = tokens.get(i + 1) {
+        if next.r#type == TokenType::Operator && next.value == "::" {
+            return (type_index(SemanticTokenType::NAMESPACE), 0);
+        }
+    }
+    // 4. Capitalized identifier not matched above is a type reference.
+    if is_capitalized(&t.value) {
+        return (type_index(SemanticTokenType::TYPE), 0);
+    }
+    // 5. Identifier directly followed by `(` is a function call.
+    if let Some(next) = tokens.get(i + 1) {
+        if next.value == "(" {
+            return (type_index(SemanticTokenType::FUNCTION), 0);
+        }
+    }
+    // 6. Everything else is a variable reference.
+    (type_index(SemanticTokenType::VARIABLE), 0)
+}
+
+/// Build delta-encoded semantic tokens from the lexer token stream.
+fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<SemanticToken> {
+    let ns_set = import_module_token_positions(tokens);
+    let mut out: Vec<SemanticToken> = Vec::new();
+    let mut prev_line: u32 = 0;
+    let mut prev_start: u32 = 0;
+
+    for i in 0..tokens.len() {
+        let t = &tokens[i];
+        if t.r#type == TokenType::EndOfFile || t.r#type == TokenType::EndOfLine {
+            continue;
+        }
+
+        let (type_idx, mods): (u32, u32) = match &t.r#type {
+            TokenType::Keyword => match t.value.as_str() {
+                // Primitive types are lexed as keywords; color them as types.
+                "int" | "float" | "str" | "bool" | "void" | "char" | "unit" => {
+                    (type_index(SemanticTokenType::TYPE), 0)
+                }
+                _ => (type_index(SemanticTokenType::KEYWORD), 0),
+            },
+            TokenType::Number => (type_index(SemanticTokenType::NUMBER), 0),
+            TokenType::String | TokenType::FormatString => {
+                (type_index(SemanticTokenType::STRING), 0)
+            }
+            TokenType::Operator => (type_index(SemanticTokenType::OPERATOR), 0),
+            TokenType::Identifier => classify_ident(tokens, i, symbols, &ns_set),
+            TokenType::Unknown | TokenType::EndOfLine | TokenType::EndOfFile => continue,
+        };
+
+        let line = (t.line as u32).saturating_sub(1); // LSP lines are 0-based
+        let start = t.col.max(0) as u32;
+        let length = (t.value.len() as u32).max(1);
+
+        let delta_line = line - prev_line;
+        let delta_start = if delta_line == 0 {
+            start - prev_start
+        } else {
+            start
+        };
+
+        out.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type: type_idx,
+            token_modifiers_bitset: mods,
+        });
+
+        prev_line = line;
+        prev_start = start;
+    }
+
+    out
 }
 
 // ==================== Symbol Index Builder ====================
@@ -1271,6 +1505,20 @@ impl LanguageServer for GobolLsp {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                // Automatic, rust-analyzer-style semantic highlighting.
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: SEMANTIC_TYPES.to_vec(),
+                                token_modifiers: SEMANTIC_MODIFIERS.to_vec(),
+                            },
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -1345,8 +1593,10 @@ impl LanguageServer for GobolLsp {
         };
 
         let mut hover_text = String::new();
+        let mut sym_not_found = true;
         for sym in &state.symbols {
             if sym.name == token.value {
+                sym_not_found = false;
                 let kind_label = sym.kind.label();
                 let type_str = sym.type_info.clone().unwrap_or_else(|| "-".to_string());
                 let parent_str = sym
@@ -1403,6 +1653,26 @@ impl LanguageServer for GobolLsp {
 
         if hover_text.is_empty() {
             hover_text = format!("`{}`", token.value);
+        }
+
+        // Cross-file fallback: the token may be a function/type defined in a
+        // module this document imports (e.g. `lib::greet` or `from lib import
+        // greet`).  Surface the imported definition's name, source module and
+        // return type so hover still shows useful info across files.
+        if sym_not_found {
+            let uri_q = uri.clone();
+            let resolved = self.resolve_imported_symbol(&uri_q, &token.value).await;
+            if let Some((module, kind_label, ty)) = resolved {
+                let type_part = ty.clone().unwrap_or_else(|| "-".to_string());
+                let detail = match ty {
+                    Some(_) => format!("{}::{}", module, token.value),
+                    None => format!("{}::{} ({})", module, token.value, kind_label),
+                };
+                hover_text = format!(
+                    "**{}** imported from `{}`\n\n`{}`\n\nType: `{}`",
+                    kind_label, detail, detail, type_part
+                );
+            }
         }
 
         Ok(Some(Hover {
@@ -1514,6 +1784,25 @@ impl LanguageServer for GobolLsp {
         }
     }
 
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri.to_string();
+        let state_guard = self.documents.read().await;
+        let state = match state_guard.get(&uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        Ok(Some(
+            SemanticTokens {
+                result_id: None,
+                data: state.semantic_tokens(),
+            }
+            .into(),
+        ))
+    }
+
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.to_string();
         let pos = params.text_document_position.position;
@@ -1565,6 +1854,8 @@ impl LanguageServer for GobolLsp {
         }
 
         // Add symbols from the document
+        let mut seen_labels: std::collections::HashSet<String> =
+            items.iter().map(|it| it.label.as_str().to_string()).collect();
         {
             let state_guard = self.documents.read().await;
             if let Some(state) = state_guard.get(&uri) {
@@ -1587,6 +1878,44 @@ impl LanguageServer for GobolLsp {
                                 },
                             )
                         }),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        // Cross-file: surface functions / types defined in modules that this
+        // document imports (`import lib;` / `from lib import ...;`).  This lets
+        // the user type a bare `greet` after `import lib;` and get completion
+        // for lib's `greet`, even though the definition lives in another file.
+        {
+            let state_guard = self.documents.read().await;
+            let imports: Vec<String> = state_guard
+                .get(&uri)
+                .map(|state| {
+                    state
+                        .symbols
+                        .iter()
+                        .filter(|s| s.kind == SymKind::Import)
+                        .map(|s| s.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for module in imports {
+                for (name, kind_label, ty) in self.index_imported_module(&uri, &module) {
+                    if !seen_labels.insert(name.clone()) {
+                        continue;
+                    }
+                    let detail = if let Some(t) = ty {
+                        format!("{}::{} → {}", module, name, t)
+                    } else {
+                        format!("{}::{} ({})", module, name, kind_label)
+                    };
+                    items.push(CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some(detail),
+                        sort_text: Some(format!("1_{}", name)),
                         ..Default::default()
                     });
                 }
@@ -1958,6 +2287,38 @@ impl GobolLsp {
         result
     }
 
+    /// Look up `name` among the modules imported by the document at `uri`.
+    /// Returns `(module, kind_label, type_info)` if the symbol is found in an
+    /// imported module (cross-file definition), else `None`.
+    async fn resolve_imported_symbol(
+        &self,
+        uri: &str,
+        name: &str,
+    ) -> Option<(String, String, Option<String>)> {
+        let imports: Vec<String> = {
+            let state_guard = self.documents.read().await;
+            state_guard
+                .get(uri)
+                .map(|state| {
+                    state
+                        .symbols
+                        .iter()
+                        .filter(|s| s.kind == SymKind::Import)
+                        .map(|s| s.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for module in imports {
+            for (sym_name, kind_label, ty) in self.index_imported_module(uri, &module) {
+                if sym_name == name {
+                    return Some((module, kind_label, ty));
+                }
+            }
+        }
+        None
+    }
+
     async fn reanalyze(&self, uri: &str, text: &str) {
         let uri_owned = uri.to_string();
         let text_owned = text.to_string();
@@ -2186,5 +2547,131 @@ fib(10) == 55
         // func is on line 3, attribute on line 2, comment on line 1
         let doc = extract_doc_comment(source, 3);
         assert_eq!(doc.as_deref(), Some("real doc"));
+    }
+
+    // ---- Semantic token helpers ----
+
+    fn lex(source: &str) -> Vec<Token> {
+        let mut lexer = Lexer::new(source);
+        let mut tokens = Vec::new();
+        loop {
+            let t = lexer.get_next_token();
+            if t.r#type == TokenType::EndOfFile {
+                break;
+            }
+            tokens.push(t);
+        }
+        tokens
+    }
+
+    /// Decode delta-encoded LSP semantic tokens back into absolute
+    /// (line, col, type-name) triples for assertions.
+    fn decode(data: &[SemanticToken]) -> Vec<(u32, u32, String)> {
+        let mut out = Vec::new();
+        let mut line = 0u32;
+        let mut col = 0u32;
+        for t in data {
+            line += t.delta_line;
+            if t.delta_line == 0 {
+                col += t.delta_start;
+            } else {
+                col = t.delta_start;
+            }
+            let name = SEMANTIC_TYPES[t.token_type as usize]
+                .as_str()
+                .to_string();
+            out.push((line, col, name));
+        }
+        out
+    }
+
+    #[test]
+    fn test_semantic_tokens_import_module_is_namespace() {
+        let source = "import std::io;\nimport math as m;\nfrom lib import helper, other;\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let data = build_semantic_tokens(&tokens, &symbols);
+        let decoded = decode(&data);
+
+        // `import std::io;` → both `std` and `io` are namespaces.
+        assert!(
+            decoded.contains(&(0, 7, "namespace".to_string())),
+            "std should be a namespace, got {:?}",
+            decoded
+        );
+        assert!(
+            decoded.contains(&(0, 12, "namespace".to_string())),
+            "io should be a namespace, got {:?}",
+            decoded
+        );
+        // `import math as m;` → module `math` is a namespace.
+        assert!(
+            decoded.contains(&(1, 7, "namespace".to_string())),
+            "math should be a namespace, got {:?}",
+            decoded
+        );
+        // `from lib import helper, other;` → `lib` is a namespace.
+        assert!(
+            decoded.contains(&(2, 5, "namespace".to_string())),
+            "lib should be a namespace, got {:?}",
+            decoded
+        );
+        assert!(
+            decoded.contains(&(2, 16, "function".to_string())),
+            "helper (a from-import member) should be a function, got {:?}",
+            decoded
+        );
+    }
+
+    #[test]
+    fn test_semantic_tokens_primitive_types_and_keywords() {
+        let source = "func add(a: int, b: int): int {\n    return a + b;\n}\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let data = build_semantic_tokens(&tokens, &symbols);
+        let decoded = decode(&data);
+
+        // `func` keyword
+        assert!(decoded.contains(&(0, 0, "keyword".to_string())));
+        // `add` function declaration
+        assert!(decoded.contains(&(0, 5, "function".to_string())));
+        // `a: int` → int at col 12 (type)
+        assert!(decoded.contains(&(0, 12, "type".to_string())));
+        // `b: int` → int at col 20 (type)
+        assert!(decoded.contains(&(0, 20, "type".to_string())));
+        // `: int` return → int at col 26 (type)
+        assert!(decoded.contains(&(0, 26, "type".to_string())));
+        // `return` keyword
+        assert!(decoded.contains(&(1, 4, "keyword".to_string())));
+    }
+
+    #[test]
+    fn test_semantic_tokens_type_qualifier_and_variable() {
+        let source = "var v = io::MAX;\nimport io;\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let data = build_semantic_tokens(&tokens, &symbols);
+        let decoded = decode(&data);
+
+        // `var` keyword and `v` variable
+        assert!(decoded.contains(&(0, 0, "keyword".to_string())));
+        assert!(decoded.contains(&(0, 4, "variable".to_string())));
+        // `io` before `::` is a module qualifier (namespace), line 0 col 8
+        assert!(decoded.contains(&(0, 8, "namespace".to_string())));
+        // `io` in an import statement (line 1 col 7) is a namespace
+        assert!(decoded.contains(&(1, 7, "namespace".to_string())));
+    }
+
+    #[test]
+    fn test_semantic_tokens_delta_encoding_is_absolute_consistent() {
+        // Manually verify the first token encodes its own absolute position.
+        let source = "import abc;\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let data = build_semantic_tokens(&tokens, &symbols);
+        // First emitted token is `import` at (0,0) keyword.
+        let first = &data[0];
+        assert_eq!(first.delta_line, 0);
+        assert_eq!(first.delta_start, 0);
     }
 }

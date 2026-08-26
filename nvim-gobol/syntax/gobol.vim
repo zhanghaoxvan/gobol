@@ -15,6 +15,14 @@ syntax keyword gobolKeyword int float str bool
 " Types / builtins (highlighted as Type)
 syntax keyword gobolType Vec Ref Option Result
 
+" Import module names — `import mod`, `import a::b::c`, `from mod import ...`.
+" The module identifier(s) get their own highlight group so `import xxx`'s
+" `xxx` stands out even without an LSP (rust-analyzer-style coloring is
+" provided by the LSP semantic tokens; this is the no-LSP fallback).
+syntax match gobolImportModule "\(import\|from\)\s\+\zs[[:alpha:]_][[:word:]]*"
+syntax match gobolImportModule "\zs[[:alpha:]_][[:word:]]*\ze\s*::"
+syntax match gobolImportModule "::\s*\zs[[:alpha:]_][[:word:]]*"
+
 " Comments
 syntax match gobolComment "//.*" contains=gobolTodo
 syntax region gobolBlockComment start="/\*" end="\*/" contains=gobolTodo
@@ -37,6 +45,7 @@ syntax match gobolAttribute "#\[.*\]"
 
 highlight default link gobolKeyword Keyword
 highlight default link gobolType Type
+highlight default link gobolImportModule Identifier
 highlight default link gobolComment Comment
 highlight default link gobolBlockComment Comment
 highlight default link gobolTodo Todo

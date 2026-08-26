@@ -5,14 +5,11 @@
 // type of IndexMut::index_mut, enabling `arr[i] = v` to be desugared
 // to `arr.index_mut(i).write(v)`.
 
-#[library_features(hidden = true)]
+// The raw memory helpers used below (`gobol_mem_load`,
+// `gobol_mem_store`, `gobol_array_elem_addr`) are declared once in
+// std/builtins.gbl, which every Gobol program auto-imports.
 
-#[header("std/runtime.h")]
-extern "C" {
-    func gobol_mem_load(addr: int): int;
-    func gobol_mem_store(addr: int, value: int);
-    func gobol_array_elem_addr(arr: int, i: int): int;
-}
+#[library_features(hidden = true)]
 
 struct Ref<T> {
     _addr: int
@@ -25,11 +22,11 @@ impl<T> Ref<T> {
     }
 
     func read(self): T {
-        gobol_mem_load(_addr)
+        builtins::gobol_mem_load(_addr)
     }
 
     func write(self, value: T) {
-        gobol_mem_store(_addr, value);
+        builtins::gobol_mem_store(_addr, value);
     }
 
     func drop(self) {

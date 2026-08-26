@@ -12,19 +12,23 @@
 // the backend; this file documents the public struct so downstream modules
 // (and the LSP) know the type exists and what its API looks like.
 
+import builtins;
+
 struct FuncArgs {
     _count: int,
     _data: int  // raw pointer to an i64[] slot array (opaque to user code)
 }
 
-impl FuncArgs {
+impl new for FuncArgs {
     /// Wrap a raw slot buffer for index-based access.
-    constructor(count: int, data: int): FuncArgs {
+    func new(count: int, data: int): FuncArgs {
         _count = count;
         _data  = data;
         self
     }
+}
 
+impl FuncArgs {
     /// Number of variadic arguments in the call.
     func len(self): int {
         _count
@@ -42,7 +46,7 @@ impl FuncArgs {
         if i < 0 || i >= _count {
             panic("FuncArgs index out of bounds");
         }
-        var slot: int = gobol_mem_load(_data + i * 8);
+        var slot: int = builtins::gobol_mem_load(_data + i * 8);
         slot
     }
 }

@@ -98,6 +98,16 @@ local function on_attach(client, bufnr)
     if client.server_capabilities.documentHighlightProvider then
         setup_highlight_autocmds(bufnr)
     end
+    -- Automatic rust-analyzer-style semantic highlighting: Neovim's built-in
+    -- semantic-token engine requests textDocument/semanticTokens/full and
+    -- colors identifiers (import module names, types, functions, variables)
+    -- with no manual enabling. Guarded for older nightlies where the API may
+    -- not exist yet.
+    if client.server_capabilities.semanticTokensProvider then
+        if vim.lsp.semantic_tokens and vim.lsp.semantic_tokens.start then
+            vim.lsp.semantic_tokens.start(bufnr, client.id)
+        end
+    end
 end
 
 --- Start (or reuse) the gobol language server for the given workspace root.

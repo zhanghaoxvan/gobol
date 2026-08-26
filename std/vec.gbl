@@ -108,7 +108,7 @@ impl<T> Vec<T> {
         if index < 0 || index >= _len {
             panic("index out of bounds");
         }
-        var addr = gobol_array_elem_addr(_data, index);
+        var addr = builtins::gobol_array_elem_addr(_data, index);
         Ref<T>::new(addr)
     }
 

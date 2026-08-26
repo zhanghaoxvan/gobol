@@ -4,7 +4,7 @@ use crate::ast::Expression;
 use std::collections::HashMap;
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
     Int,
     Float,

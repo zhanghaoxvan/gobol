@@ -1,21 +1,91 @@
 // std/builtins.gbl — Runtime function declarations.
 //
-// Declares the C runtime functions that provide I/O, memory allocation,
-// and panic/exit.  Previously these were hardcoded in the semantic
-// analyzer as the pseudo-module `__builtins__`.
+// Declares the C runtime functions from std/runtime.h (and its sub-headers
+// under std/runtime/) as a single, authoritative `extern "C"` block.
 //
-// Every Gobol program auto-imports this module via __setup__.
+// Every Gobol program auto-imports this module via __setup__ (`builtins`),
+// so these functions are available as `builtins::<name>` from any std module
+// or user module.  Use the `builtins::` qualifier (e.g. `builtins::gobol_str_len`)
+// or the bare name — the compiler resolves both.
+//
+// The signatures below mirror std/runtime.h; the actual C implementations
+// live in std/runtime.c / std/runtime/*.c and are linked into every program.
 #[library_features(hidden = true)]
 
 #[header("std/runtime.h")]
 extern "C" {
-    // I/O
+    // ---- I/O (std/runtime/io.h) ----
     func gobol_print(s: int);
     func gobol_println(s: int);
     func gobol_eprint(s: int);
     func gobol_eprintln(s: int);
     func gobol_read(): str;
 
-    // Memory
+    // ---- String (std/runtime/str.h) ----
+    func gobol_str_int(n: int): str;
+    func gobol_str_float(f: float): str;
+    func gobol_str_bool(b: bool): str;
+    func gobol_str_cat(a: str, b: str): str;
+    func gobol_str_eq(a: str, b: str): bool;
+    func gobol_str_len(s: str): int;
+    func gobol_str_get(s: str, i: int): int;
+    func gobol_str_char(code: int): str;
+    func gobol_str_contains(s: str, sub: str): bool;
+    func gobol_str_trim(s: str): str;
+    func gobol_str_replace(s: str, from_old: str, to_new: str): str;
+
+    // ---- Memory & raw pointer access (std/runtime/mem.h) ----
     func gobol_alloc(size: int): int;
+    func gobol_mem_load(addr: int): int;
+    func gobol_mem_store(addr: int, value: int);
+    func gobol_array_elem_addr(arr: int, i: int): int;
+    func gobol_malloc(size: int): int;
+    func gobol_free(ptr: int);
+
+    // ---- Growable array (std/runtime/array.h) ----
+    func gobol_array_new(): int;
+    func gobol_array_new_with_size(size: int): int;
+    func gobol_array_new_2d(rows: int, cols: int): int;
+    func gobol_array_add(arr: int, val_elt: int);
+    func gobol_array_len(arr: int): int;
+    func gobol_array_get(arr: int, i: int): int;
+    func gobol_array_set(arr: int, i: int, val_elt: int);
+
+    // ---- Math intrinsics (std/runtime/math.h) ----
+    func gobol_math_sin(x: float): float;
+    func gobol_math_cos(x: float): float;
+    func gobol_math_pow(base: float, exp: float): float;
+
+    // ---- File-system (std/runtime/fs.h) ----
+    func gobol_fs_open(path: str, mode: str): int;
+    func gobol_fs_read_all(handle: int): str;
+    func gobol_fs_write(handle: int, data: str): int;
+    func gobol_fs_close(handle: int);
+    func gobol_fs_exists(path: str): bool;
+
+    // ---- Networking (std/runtime/net.h) ----
+    func gobol_tcp_connect(addr: str, port: int): int;
+    func gobol_tcp_send(fd: int, data: str): int;
+    func gobol_tcp_recv(fd: int, len: int): str;
+    func gobol_tcp_close(fd: int);
+    func gobol_tcp_bind(addr: str, port: int): int;
+    func gobol_tcp_accept(fd: int): int;
+
+    // ---- Threads (std/runtime/thread.h) ----
+    func gobol_thread_spawn(func_ptr: int, arg: int): int;
+    func gobol_thread_join(thread_id: int): int;
+
+    // ---- Channels (std/runtime/channel.h) ----
+    func gobol_chan_create(): int;
+    func gobol_chan_send(chan: int, data: int): int;
+    func gobol_chan_recv(chan: int): int;
+    func gobol_chan_destroy(chan: int);
+
+    // ---- Garbage collector (std/runtime/gc.h) ----
+    func gobol_gc_alloc(size: int): int;
+    func gobol_gc_mark(ptr: int);
+    func gobol_gc_sweep();
+    func gobol_gc_collect();
+    func gobol_gc_collect_now();
+    func gobol_gc_alloc_count(): int;
 }

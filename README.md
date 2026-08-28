@@ -187,7 +187,7 @@ gobol main.gbl
 
 ## 📜 License / 许可证
 
-**GNU General Public License v3.0**
+** MIT License **
 
 See [LICENSE](LICENSE) for details.
 

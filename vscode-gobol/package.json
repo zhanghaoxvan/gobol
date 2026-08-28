@@ -71,19 +71,19 @@
     "commands": [
       {
         "command": "gobol.restartLsp",
-        "title": "Gobol: Restart Language Server",
+        "title": "Restart Language Server",
         "category": "Gobol",
         "icon": "$(refresh)"
       },
       {
         "command": "gobol.showStatus",
-        "title": "Gobol: Show Language Server Status",
+        "title": "Show Language Server Status",
         "category": "Gobol",
         "icon": "$(server)"
       },
       {
         "command": "gobol.showProject",
-        "title": "Gobol: Show Project Info (grape.toml)",
+        "title": "Show Project Info (grape.toml)",
         "category": "Gobol",
         "icon": "$(package)"
       }

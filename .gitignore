@@ -13,6 +13,8 @@ tmp.*
 test_*
 reasonix.toml
 
+tmp/
+
 # Wow the extension of VSCode
 vscode-gobol/node_modules/
 vscode-gobol/.marscode/

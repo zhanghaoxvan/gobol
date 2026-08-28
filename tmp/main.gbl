@@ -1,5 +1,0 @@
-import std;
-
-func main() {
-    io::println("Hello, World!");
-}

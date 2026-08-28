@@ -189,6 +189,17 @@ impl DocState {
         })
     }
 
+    /// If `name` matches a module imported by this document, return the full
+    /// imported module name (which may be a `a::b` path). Used to decide
+    /// whether a symbol that carries this module as its `parent` is a
+    /// `from lib import ...` re-export that should resolve cross-file.
+    fn module_imported(&self, name: &str) -> Option<String> {
+        self.symbols
+            .iter()
+            .find(|s| s.kind == SymKind::Import && s.name == name)
+            .map(|s| s.name.clone())
+    }
+
     /// Compute document-highlight ranges for every identifier occurrence of
     /// `name` in this document. Used both by the standard
     /// `textDocument/documentHighlight` handler and by the cross-file
@@ -1216,16 +1227,29 @@ fn build_lib_paths(file_path: &str, workspace_roots: &[PathBuf]) -> Vec<String> 
             {
                 paths.push(p);
             }
+            // Installed layout with lib/: ~/.gobol/bin/gobol-lsp → ~/.gobol/lib
+            // (std/mod.gbl lives at <install>/lib/std/mod.gbl). Fallback for
+            // desktop-started editors that don't inherit GOBOL_INSTALL_DIR.
+            if let Some(p) = exe_dir
+                .parent()
+                .map(|d| d.join("lib"))
+                .and_then(|d| d.to_str().map(|s| s.to_string()))
+            {
+                paths.push(p);
+            }
         }
     }
 
     if let Ok(install_dir) = std::env::var("GOBOL_INSTALL_DIR") {
-        let std_path = PathBuf::from(&install_dir).join("lib").join("std");
-        if let Some(p) = std_path.to_str() {
+        // lib_paths entries must point at the *parent* of the std/ directory so
+        // that `import std;` resolves to <lib_path>/std/mod.gbl. The installed
+        // layout is <install>/lib/std/mod.gbl (also <install>/std/mod.gbl for
+        // legacy installs). See grape.rs find_std_path() for the same rule.
+        let install = PathBuf::from(&install_dir);
+        if let Some(p) = install.join("lib").to_str() {
             paths.push(p.to_string());
         }
-        let alt = PathBuf::from(&install_dir).join("std");
-        if let Some(p) = alt.to_str() {
+        if let Some(p) = install.to_str() {
             paths.push(p.to_string());
         }
     }
@@ -1281,6 +1305,14 @@ fn uri_to_path(uri: &str) -> String {
     uri.strip_prefix("file://")
         .unwrap_or(uri)
         .to_string()
+}
+
+/// Convert a filesystem path back into a `file://` URI (the inverse of
+/// `uri_to_path`). Used to point cross-file `gotoDefinition`/hover results at
+/// an imported module's source file.
+fn path_to_uri(path: &str) -> url::Url {
+    url::Url::parse(&format!("file://{}", path))
+        .unwrap_or_else(|_| url::Url::parse("file:///").unwrap())
 }
 
 fn token_to_range(token: &Token) -> Range {
@@ -1645,6 +1677,29 @@ impl LanguageServer for GobolLsp {
                 // Append doc comment if available
                 if let Some(doc) = &sym.doc_comment {
                     hover_text.push_str(&format!("\n\n---\n\n{}", doc));
+                } else if let Some(module) = sym
+                    .parent
+                    .as_ref()
+                    .and_then(|p| state.module_imported(p))
+                {
+                    // This is a `from lib import ...` re-export whose source
+                    // lives in the imported module: enrich the hover with the
+                    // definition's doc comment from that module's file.
+                    let uri_c = uri.clone();
+                    let name_c = token.value.clone();
+                    if let Some((_n, _mod2, _k, _ty, _u, _l, _c, doc)) = self
+                        .resolve_imported_symbol(&uri_c, &name_c)
+                        .await
+                    {
+                        if let Some(doc) = doc {
+                            if !doc.trim().is_empty() {
+                                hover_text.push_str(&format!(
+                                    "\n\n---\n\n*from `{}`* —\n\n{}",
+                                    module, doc
+                                ));
+                            }
+                        }
+                    }
                 }
 
                 break;
@@ -1657,21 +1712,28 @@ impl LanguageServer for GobolLsp {
 
         // Cross-file fallback: the token may be a function/type defined in a
         // module this document imports (e.g. `lib::greet` or `from lib import
-        // greet`).  Surface the imported definition's name, source module and
-        // return type so hover still shows useful info across files.
+        // greet`).  Surface the imported definition's full signature, its
+        // source module and (when available) its doc comment.
         if sym_not_found {
             let uri_q = uri.clone();
             let resolved = self.resolve_imported_symbol(&uri_q, &token.value).await;
-            if let Some((module, kind_label, ty)) = resolved {
+            if let Some((_name, module, kind_label, ty, _file_uri, _line, _col, doc_comment)) =
+                resolved
+            {
                 let type_part = ty.clone().unwrap_or_else(|| "-".to_string());
                 let detail = match ty {
                     Some(_) => format!("{}::{}", module, token.value),
                     None => format!("{}::{} ({})", module, token.value, kind_label),
                 };
                 hover_text = format!(
-                    "**{}** imported from `{}`\n\n`{}`\n\nType: `{}`",
+                    "**{}** imported from `{}`\n\n```gobol\n{}\n```\n\nType: `{}`",
                     kind_label, detail, detail, type_part
                 );
+                if let Some(doc) = doc_comment {
+                    if !doc.trim().is_empty() {
+                        hover_text.push_str(&format!("\n\n---\n\n{}", doc));
+                    }
+                }
             }
         }
 
@@ -1701,8 +1763,40 @@ impl LanguageServer for GobolLsp {
             Some(t) => t,
             None => return Ok(None),
         };
+        if token.r#type != TokenType::Identifier {
+            return Ok(None);
+        }
 
+        // 0. If the cursor is on an imported *module name* (`import lib;`,
+        // `from lib import ...`, the module of `lib::greet`), jump to the
+        // module source file itself. Detect this before the in-document symbol
+        // lookup, since module names are indexed as SymKind::Import.
+        if let Some(module) = state.module_imported(&token.value) {
+            // But if the cursor is on the member side of `lib::greet`, the
+            // `greet` symbol (not `lib`) is under it, so this only fires for
+            // the module-name position. Jump to the module file.
+            if let Some(loc) = self.goto_imported_module_file(&uri, &module).await {
+                return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+            }
+        }
+
+        // 1. Definition in this document.
         if let Some(sym) = state.find_definition(&token.value) {
+            // If the local symbol is a `from lib import greet` re-export (its
+            // parent names an imported module), prefer the definition in that
+            // module's source file so Ctrl+Click lands on the real code.
+            if let Some(module) = sym
+                .parent
+                .as_ref()
+                .and_then(|p| state.module_imported(p))
+            {
+                let loc = self
+                    .goto_imported_symbol_in_module(&uri, &module, &token.value)
+                    .await;
+                if let Some(loc) = loc {
+                    return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                }
+            }
             let line = (sym.line as u32).saturating_sub(1);
             let col = sym.col as u32;
             let end_col = col + sym.name.len() as u32;
@@ -1714,6 +1808,15 @@ impl LanguageServer for GobolLsp {
                 ),
             };
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+        }
+
+        // 2. Cross-file: the identifier may be defined in a module that this
+        // document imports (`lib::greet` / `from lib import greet`). Jump to
+        // the definition inside the imported module's source file.
+        let uri_q = uri.clone();
+        let name = token.value.clone();
+        if let Some(loc) = self.goto_imported_symbol(&uri_q, &name).await {
+            return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
         }
 
         Ok(None)
@@ -1825,24 +1928,44 @@ impl LanguageServer for GobolLsp {
             "int", "float", "str", "bool", "void", "char", "unit",
         ];
 
-        let mut items: Vec<CompletionItem> = keywords
-            .iter()
-            .map(|kw| CompletionItem {
+        let mut items: Vec<CompletionItem> = Vec::new();
+
+        // Add snippet completions FIRST (they carry an insert template and are
+        // more useful than the bare keyword), then bare keywords, de-duplicating
+        // labels so a snippet like "func" is not offered twice alongside the
+        // plain "func" keyword (previously produced duplicate completion entries).
+        let snippets = keyword_snippets();
+        let snippet_labels: std::collections::HashSet<String> =
+            snippets.iter().map(|s| s.label.clone()).collect();
+        items.extend(snippets);
+        for kw in keywords {
+            if snippet_labels.contains(*kw) {
+                // snippet supersedes the bare keyword label
+                continue;
+            }
+            items.push(CompletionItem {
                 label: kw.to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some(format!("keyword `{}`", kw)),
                 ..Default::default()
-            })
-            .collect();
+            });
+        }
 
-        // Add snippet completions (lower sort so plain keywords first when user types `func`)
-        let snippets = keyword_snippets();
-        items.extend(snippets);
+        // seen_labels tracks every completion label emitted so far; the
+        // keyword/snippet entries, stdlib modules (import context) and the
+        // document/cross-file symbols below all dedup against it.
+        let mut seen_labels: std::collections::HashSet<String> =
+            items.iter().map(|it| it.label.as_str().to_string()).collect();
 
         // Add stdlib modules when user is typing `import ...`
         if import_ctx {
             let std_modules = self.list_std_modules(&uri);
             for (name, kind) in &std_modules {
+                if !seen_labels.insert(name.clone()) {
+                    // module name collides with a keyword/snippet label (e.g.
+                    // int/float/str/trait) — do not emit a duplicate entry.
+                    continue;
+                }
                 items.push(CompletionItem {
                     label: name.clone(),
                     kind: Some(CompletionItemKind::MODULE),
@@ -1854,12 +1977,13 @@ impl LanguageServer for GobolLsp {
         }
 
         // Add symbols from the document
-        let mut seen_labels: std::collections::HashSet<String> =
-            items.iter().map(|it| it.label.as_str().to_string()).collect();
         {
             let state_guard = self.documents.read().await;
             if let Some(state) = state_guard.get(&uri) {
                 for sym in &state.symbols {
+                    if !seen_labels.insert(sym.name.clone()) {
+                        continue;
+                    }
                     let mut detail = sym.type_info.clone().unwrap_or_else(|| sym.kind.label().to_string());
                     if let Some(ref parent) = sym.parent {
                         detail = format!("{}::{} → {}", parent, sym.name, detail);
@@ -2050,6 +2174,82 @@ struct CrossFileHighlightForFile {
 }
 
 impl GobolLsp {
+    /// Resolve a module name (e.g. `lib` in `import lib;` / `from lib import`)
+    /// to the source *file* of that module so Ctrl+Click jumps into it.
+    /// Returns `None` if no module file can be located.
+    async fn goto_imported_module_file(
+        &self,
+        uri: &str,
+        module_name: &str,
+    ) -> Option<Location> {
+        let file_path = uri_to_path(uri);
+        let roots = self
+            .workspace_roots
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let lib_paths = build_lib_paths(&file_path, &roots);
+
+        let module_parts: Vec<&str> = module_name.split("::").collect();
+        let file_name = module_parts.last().unwrap_or(&module_name);
+
+        for lib_path in &lib_paths {
+            // `<lib>/std/mod.gbl` layout and `<lib>/io.gbl` layout.
+            let candidates = [
+                PathBuf::from(lib_path).join(file_name).join("mod.gbl"),
+                PathBuf::from(lib_path).join(format!("{}.gbl", file_name)),
+            ];
+            for mod_path in candidates {
+                if mod_path.exists() {
+                    let mod_path_str = mod_path.to_string_lossy().into_owned();
+                    return Some(Location {
+                        uri: path_to_uri(&mod_path_str),
+                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Cross-file `gotoDefinition`: locate `name` among the modules imported by
+    /// `uri` and build a `Location` pointing at the symbol's definition inside
+    /// that module's source file.
+    async fn goto_imported_symbol(&self, uri: &str, name: &str) -> Option<Location> {
+        for module in self.imported_module_names(uri).await {
+            if let Some(loc) = self.goto_imported_symbol_in_module(uri, &module, name).await {
+                return Some(loc);
+            }
+        }
+        None
+    }
+
+    /// Cross-file `gotoDefinition` restricted to a single imported `module`:
+    /// look up `name` in that module and return a `Location` at its definition.
+    async fn goto_imported_symbol_in_module(
+        &self,
+        uri: &str,
+        module: &str,
+        name: &str,
+    ) -> Option<Location> {
+        for sym in self.index_imported_module_detailed(uri, module) {
+            if sym.0 == name {
+                // Tuple layout: (name, kind, type, file_uri, line, col, doc).
+                let col = sym.5.max(0) as u32;
+                let end_col = col + name.len() as u32;
+                let line0 = (sym.4 as u32).saturating_sub(1);
+                return Some(Location {
+                    uri: sym.3.clone(),
+                    range: Range::new(
+                        Position::new(line0, col),
+                        Position::new(line0, end_col),
+                    ),
+                });
+            }
+        }
+        None
+    }
+
     async fn find_qualifier_before_colon_colon(
         &self,
         uri: &str,
@@ -2229,72 +2429,24 @@ impl GobolLsp {
         result
     }
 
+    /// Collect the exported symbols of an imported module as tuples of
+    /// `(name, kind_label, type_info)`. Used by completion.
     fn index_imported_module(
         &self,
         uri: &str,
         module_name: &str,
     ) -> Vec<(String, String, Option<String>)> {
-        let mut result = Vec::new();
-        let file_path = uri_to_path(uri);
-        let roots = self
-            .workspace_roots
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        let lib_paths = build_lib_paths(&file_path, &roots);
-
-        let module_parts: Vec<&str> = module_name.split("::").collect();
-        let file_name = module_parts.last().unwrap_or(&module_name);
-
-        for lib_path in &lib_paths {
-            let mod_path = PathBuf::from(lib_path).join(format!("{}.gbl", file_name));
-            if mod_path.exists() {
-                if let Ok(source) = std::fs::read_to_string(&mod_path) {
-                    let mut lexer = Lexer::new(&source);
-                    let mut tokens: Vec<Token> = Vec::new();
-                    loop {
-                        let t = lexer.get_next_token();
-                        if t.r#type == TokenType::EndOfFile {
-                            break;
-                        }
-                        tokens.push(t);
-                    }
-                    let symbols = build_symbol_index(&tokens, &source);
-                    for sym in &symbols {
-                        if matches!(
-                            sym.kind,
-                            SymKind::Function
-                                | SymKind::Method
-                                | SymKind::ExternFn
-                                | SymKind::StaticFunc
-                                | SymKind::EnumVariant
-                                | SymKind::Struct
-                                | SymKind::Enum
-                                | SymKind::Trait
-                                | SymKind::TypeAlias
-                        ) {
-                            result.push((
-                                sym.name.clone(),
-                                sym.kind.label().to_string(),
-                                sym.type_info.clone(),
-                            ));
-                        }
-                    }
-                }
-                break;
-            }
-        }
-        result
+        self.index_imported_module_detailed(uri, module_name)
+            .into_iter()
+            .map(|(name, kind_label, type_info, _uri, _line, _col, _doc)| {
+                (name, kind_label, type_info)
+            })
+            .collect()
     }
 
-    /// Look up `name` among the modules imported by the document at `uri`.
-    /// Returns `(module, kind_label, type_info)` if the symbol is found in an
-    /// imported module (cross-file definition), else `None`.
-    async fn resolve_imported_symbol(
-        &self,
-        uri: &str,
-        name: &str,
-    ) -> Option<(String, String, Option<String>)> {
+    /// The module names imported by the document at `uri` (e.g. `io`,
+    /// `math`, or the module of a `from lib import ...` statement).
+    async fn imported_module_names(&self, uri: &str) -> Vec<String> {
         let imports: Vec<String> = {
             let state_guard = self.documents.read().await;
             state_guard
@@ -2309,10 +2461,130 @@ impl GobolLsp {
                 })
                 .unwrap_or_default()
         };
-        for module in imports {
-            for (sym_name, kind_label, ty) in self.index_imported_module(uri, &module) {
-                if sym_name == name {
-                    return Some((module, kind_label, ty));
+        // Dedup, preserving order.
+        let mut seen = std::collections::HashSet::new();
+        imports.into_iter().filter(|n| seen.insert(n.clone())).collect()
+    }
+
+    /// Index the exported symbols of an imported module, returning rich detail
+    /// per symbol: `(name, kind_label, type_info, file_uri, line, col,
+    /// doc_comment)` where `file_uri` + `line`/`col` point at the symbol's
+    /// definition in the module's source file (for cross-file
+    /// gotoDefinition/hover), and `doc_comment` carries the doc comment above
+    /// the definition. Supports both `<lib>/<mod>.gbl` and
+    /// `<lib>/<mod>/mod.gbl` layouts.
+    fn index_imported_module_detailed(
+        &self,
+        uri: &str,
+        module_name: &str,
+    ) -> Vec<(
+        String,
+        String,
+        Option<String>,
+        url::Url,
+        i32,
+        i32,
+        Option<String>,
+    )> {
+        let mut result = Vec::new();
+        let file_path = uri_to_path(uri);
+        let roots = self
+            .workspace_roots
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let lib_paths = build_lib_paths(&file_path, &roots);
+
+        let module_parts: Vec<&str> = module_name.split("::").collect();
+        let file_name = module_parts.last().unwrap_or(&module_name);
+
+        for lib_path in &lib_paths {
+            let mut mod_paths = Vec::new();
+            mod_paths.push(PathBuf::from(lib_path).join(format!("{}.gbl", file_name)));
+            // `<lib>/<mod>/mod.gbl` layout (e.g. std/mod.gbl for `import std;`).
+            mod_paths.push(PathBuf::from(lib_path).join(file_name).join("mod.gbl"));
+            let mut found = false;
+            for mod_path in mod_paths {
+                if mod_path.exists() {
+                    if let Ok(source) = std::fs::read_to_string(&mod_path) {
+                        let mut lexer = Lexer::new(&source);
+                        let mut mod_tokens: Vec<Token> = Vec::new();
+                        loop {
+                            let t = lexer.get_next_token();
+                            if t.r#type == TokenType::EndOfFile {
+                                break;
+                            }
+                            mod_tokens.push(t);
+                        }
+                        let symbols = build_symbol_index(&mod_tokens, &source);
+                        let mod_uri = path_to_uri(&mod_path.to_string_lossy());
+                        for sym in &symbols {
+                            if matches!(
+                                sym.kind,
+                                SymKind::Function
+                                    | SymKind::Method
+                                    | SymKind::ExternFn
+                                    | SymKind::StaticFunc
+                                    | SymKind::EnumVariant
+                                    | SymKind::Struct
+                                    | SymKind::Enum
+                                    | SymKind::Trait
+                                    | SymKind::TypeAlias
+                            ) {
+                                result.push((
+                                    sym.name.clone(),
+                                    sym.kind.label().to_string(),
+                                    sym.type_info.clone(),
+                                    mod_uri.clone(),
+                                    sym.line,
+                                    sym.col,
+                                    sym.doc_comment.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Look up `name` among the modules imported by the document at `uri`.
+    /// Returns `(name, module, kind_label, type_info, file_uri, line, col,
+    /// doc_comment)` if the symbol is found in an imported module (cross-file
+    /// definition), else `None`.
+    async fn resolve_imported_symbol(
+        &self,
+        uri: &str,
+        name: &str,
+    ) -> Option<(
+        String,
+        String,
+        String,
+        Option<String>,
+        url::Url,
+        i32,
+        i32,
+        Option<String>,
+    )> {
+        for module in self.imported_module_names(uri).await {
+            for def in self.index_imported_module_detailed(uri, &module) {
+                if def.0 == name {
+                    return Some((
+                        def.0.clone(),
+                        module,
+                        def.1,
+                        def.2,
+                        def.3,
+                        def.4,
+                        def.5,
+                        def.6,
+                    ));
                 }
             }
         }

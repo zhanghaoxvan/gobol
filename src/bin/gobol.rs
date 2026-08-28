@@ -168,7 +168,7 @@ fn main() {
         return;
     }
     if is_version {
-        println!("Gobol 0.1.0");
+        println!("Gobol 0.2.0");
         return;
     }
 
@@ -385,6 +385,11 @@ fn main() {
                 if let Some(pp) = exe_dir.parent().and_then(|d| d.to_str().map(|s| s.to_string())) {
                     lib_paths.push(pp);
                 }
+                // Installed layout with lib/: ~/.gobol/bin/gobol → ~/.gobol/lib
+                // (std/mod.gbl lives at <install>/lib/std/mod.gbl)
+                if let Some(p) = exe_dir.parent().map(|d| d.join("lib")).and_then(|d| d.to_str().map(|s| s.to_string())) {
+                    lib_paths.push(p);
+                }
             }
             // target/release/  →  <workspace>/std  (dev builds)
             if let Some(workspace) = exe_dir.parent().and_then(|d| d.parent()) {
@@ -402,12 +407,15 @@ fn main() {
     }
 
     if let Ok(install_dir) = env::var("GOBOL_INSTALL_DIR") {
-        let std_path = Path::new(&install_dir).join("lib").join("std");
-        if let Some(p) = std_path.to_str() {
+        // lib_paths entries must point at the *parent* of the std/ directory so
+        // that `import std;` resolves to <lib_path>/std/mod.gbl. The installed
+        // layout is <install>/lib/std/mod.gbl (also <install>/std/mod.gbl for
+        // legacy installs). See grape.rs find_std_path() for the same rule.
+        let install = Path::new(&install_dir);
+        if let Some(p) = install.join("lib").to_str() {
             lib_paths.push(p.to_string());
         }
-        let alt = Path::new(&install_dir).join("std");
-        if let Some(p) = alt.to_str() {
+        if let Some(p) = install.to_str() {
             lib_paths.push(p.to_string());
         }
     }

@@ -496,12 +496,12 @@ async function startClient() {
         );
 
         try {
+            // vscode-languageclient >= 9: `start()` returns a promise that
+            // resolves once the server is ready (the old `onReady()` API was
+            // removed in 9.x — calling it throws "client.onReady is not a
+            // function", which broke `Gobol: Restart Language Server`).
             await client.start();
-            client.onReady().then(() => {
-                setStatus('running', `Running via ${lspCfgCache.method} — ${lspCfgCache.path}`);
-            }).catch((e) => {
-                setStatus('error', `onReady failed: ${e?.message ?? e}`);
-            });
+            setStatus('running', `Running via ${lspCfgCache.method} — ${lspCfgCache.path}`);
             return client;
         } catch (err) {
             setStatus('error', err?.message ?? 'unknown error during start');

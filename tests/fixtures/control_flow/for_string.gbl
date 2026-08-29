@@ -2,7 +2,7 @@ import std;
 
 func main() {
     for ch in "Gobol" {
-        io::print(ch);
+        std::io::print(ch);
     }
-    io::print("\n");
+    std::io::print("\n");
 }

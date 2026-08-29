@@ -18,17 +18,17 @@ func main() {
 
     // add(x, y) expands to (x) + (y), evaluated at runtime → 15.
     var z = add(x, y)
-    io::println(@"z = {z}")
+    std::io::println(@"z = {z}")
 
     // add(x + 1, y * 2) expands to (x + 1) + (y * 2) → 6 + 20 = 26.
     var w = add(x + 1, y * 2)
-    io::println(@"w = {w}")
+    std::io::println(@"w = {w}")
 
     // dbl(x) expands to add(x, x) which recursively expands to (x) + (x) → 10.
     var d = dbl(x)
-    io::println(@"d = {d}")
+    std::io::println(@"d = {d}")
 
     // Literal args still constant-fold: add(3, 4) → 7 at compile time.
     var lit = add(3, 4)
-    io::println(@"lit = {lit}")
+    std::io::println(@"lit = {lit}")
 }

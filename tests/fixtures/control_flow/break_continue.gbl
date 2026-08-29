@@ -8,7 +8,7 @@ func main() {
         if i > 5 {
             break;
         }
-        io::print(i);
+        std::io::print(i);
     }
-    io::print("\n");
+    std::io::print("\n");
 }

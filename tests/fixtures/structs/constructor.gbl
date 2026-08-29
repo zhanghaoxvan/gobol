@@ -19,5 +19,5 @@ impl Rect {
 
 func main() {
     var r = Rect::new(10, 20);
-    io::println(@"area: {r.area()}");
+    std::io::println(@"area: {r.area()}");
 }

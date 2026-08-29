@@ -6,7 +6,7 @@ func main() {
     arr.add(20);
     arr.add(30);
     for i in arr {
-        io::print(i);
+        std::io::print(i);
     }
-    io::print("\n");
+    std::io::print("\n");
 }

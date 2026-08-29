@@ -1,5 +1,5 @@
 import std;
 
 func main() {
-    io::print("hello");
+    std::io::print("hello");
 }

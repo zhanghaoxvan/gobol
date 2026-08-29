@@ -6,5 +6,5 @@ func main() {
         90 => "A",
         _ => "B"
     };
-    io::println(@"grade: {grade}");
+    std::io::println(@"grade: {grade}");
 }

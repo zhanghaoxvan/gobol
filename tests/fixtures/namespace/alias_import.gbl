@@ -7,8 +7,8 @@ func main() {
     val result = calc(100, 200);
     val message = show("Aliases work!");
     
-    io::println(@"Result: {result}");
-    io::println(message);
+    std::io::println(@"Result: {result}");
+    std::io::println(message);
 }
 
 main();

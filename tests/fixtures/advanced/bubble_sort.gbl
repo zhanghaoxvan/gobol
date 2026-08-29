@@ -17,7 +17,7 @@ func main() {
     var arr: int[] = [5, 3, 8, 1, 9, 2];
     bubble_sort(arr);
     for i in arr {
-        io::print(i);
+        std::io::print(i);
     }
-    io::print("\n");
+    std::io::print("\n");
 }

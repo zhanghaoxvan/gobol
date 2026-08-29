@@ -3,10 +3,10 @@ import std;
 func main() {
     var x = 7;
     if x > 10 {
-        io::println(">10");
+        std::io::println(">10");
     } else if x > 5 {
-        io::println(">5");
+        std::io::println(">5");
     } else {
-        io::println("<=5");
+        std::io::println("<=5");
     }
 }

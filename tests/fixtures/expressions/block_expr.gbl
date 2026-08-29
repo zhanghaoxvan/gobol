@@ -5,5 +5,5 @@ func main() {
         var tmp = 10;
         tmp * 2
     };
-    io::println(@"doubled: {doubled}");
+    std::io::println(@"doubled: {doubled}");
 }

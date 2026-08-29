@@ -9,7 +9,7 @@ func fib(n: int): int {
 
 func main() {
     for i in 0..10 {
-        io::print(fib(i));
+        std::io::print(fib(i));
     }
-    io::print("\n");
+    std::io::print("\n");
 }

@@ -1,8 +1,8 @@
 # Gobol Language Documentation
 
-**Author**: zhanghaoxvan  
-**File Extension**: `.gbl`  
-**License**: GPL3  
+**Author**: zhanghaoxvan
+**File Extension**: `.gbl`
+**License**: MIT
 **Version**: 0.2.0
 
 ---
@@ -30,13 +30,24 @@ import io                    // Import module / 导入模块
 import math as m             // Import with alias / 带别名导入
 ```
 
-### 2.3 Export Statement / 导出语句
+### 2.3 Prelude / 预置导入
+
+The compiler automatically injects `import std::xxx`; for all standard library modules in the entry program. This means you can use `io::println`, `math::sqrt`, `Vec`, and other std modules without explicit imports.
+
+编译器会在入口程序中自动注入所有标准库模块的 `import std::xxx;`。这意味着你可以直接使用 `io::println`、`math::sqrt`、`Vec` 等标准库模块，无需显式导入。
+
+Note: This injection only applies to the main program file. Standard library modules and dependencies must declare their own imports explicitly.
+
+注意：此注入仅对主程序文件生效。标准库模块和依赖包必须显式声明自己的导入。
+
+
+### 2.4 Export Statement / 导出语句
 
 ```gobol
 export(add, multiply, Point) // Export multiple symbols / 导出多个符号
 ```
 
-### 2.4 Member Access: `.` vs `::` / 成员访问
+### 2.5 Member Access: `.` vs `::` / 成员访问
 
 Gobol uses two distinct operators for accessing members.
 
@@ -78,7 +89,7 @@ The dot operator accesses fields and methods on values (instances, not modules o
 
 **设计理念**: 将模块访问和实例访问在语法上分开（`::` vs `.`）使代码更易读——你可以立即判断一个调用是自由函数（`io::println`）还是值上的方法（`p.distance()`）。
 
-### 2.5 External C Functions / 外部 C 函数
+### 2.6 External C Functions / 外部 C 函数
 
 Gobol can call C runtime functions via `extern "C"` blocks. The `#[header("path.h")]` attribute points to the C header declaring these functions; the compiler validates that every function in the block is declared in that header.
 
@@ -98,7 +109,7 @@ The `builtins` module (`std/builtins.gbl`) declares the core I/O and memory runt
 
 `builtins` 模块（`std/builtins.gbl`）通过这种方式声明了核心 I/O 和内存运行时函数。编译器会自动加载它，以便 `io::print`、`panic` 等正确解析。
 
-### 2.6 Internal Attribute / 内部属性
+### 2.7 Internal Attribute / 内部属性
 
 ```gobol
 #[internal]

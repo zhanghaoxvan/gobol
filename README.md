@@ -18,6 +18,10 @@
 - Python (3.7+)
 - Git
 
+The installer (install.py) is a lightweight build and setup script — it compiles the Rust binaries and configures your environment. The compiler itself has no Python dependency at runtime.
+
+安装脚本（install.py）是一个轻量级的构建和设置脚本——它编译 Rust 二进制文件并配置环境。编译器本身不依赖 Python 运行时。
+
 ### Installation / 安装
 
 ```bash
@@ -159,10 +163,10 @@ Create a file `main.gbl`:
 创建文件 `main.gbl`：
 
 ```gobol
-import std;
+// import std::io; // we don't need to write it, because it has already preluded in compile-time.
 
 func main() {
-    io::println("Hello, Gobol!")
+    io::println("Hello, Gobol!");
 }
 ```
 

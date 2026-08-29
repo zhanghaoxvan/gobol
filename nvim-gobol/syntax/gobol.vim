@@ -28,9 +28,11 @@ syntax match gobolComment "//.*" contains=gobolTodo
 syntax region gobolBlockComment start="/\*" end="\*/" contains=gobolTodo
 syntax keyword gobolTodo contained TODO FIXME XXX NOTE
 
-" Strings
-syntax region gobolString start=+"+ skip=+\\\\\|\\"+ end=+"+
-syntax region gobolString start=+'+ skip=+\\\\\|\\'+ end=+'+
+" Strings — escape sequences (`\n`, `\t`, `\x41`, `\u{...}`) are highlighted
+" inside double-quoted and format (@") strings as well as char literals.
+syntax match gobolEscape /\\\(u{[0-9a-fA-F]*}\|x[0-9a-fA-F]\{2}\|.\)/ contained
+syntax region gobolString start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=gobolEscape
+syntax region gobolString start=+'+ skip=+\\\\\|\\'+ end=+'+ contains=gobolEscape
 
 " Numbers
 syntax match gobolNumber "\v<\d+>"
@@ -50,6 +52,7 @@ highlight default link gobolComment Comment
 highlight default link gobolBlockComment Comment
 highlight default link gobolTodo Todo
 highlight default link gobolString String
+highlight default link gobolEscape Special
 highlight default link gobolNumber Number
 highlight default link gobolOperator Operator
 highlight default link gobolAttribute PreProc

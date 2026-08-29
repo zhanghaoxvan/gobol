@@ -26,6 +26,9 @@ local defaults = {
         signature_help = "<C-k>",
         format = "<leader>gf",
     },
+    -- rust-analyzer-style inlay hints (type + parameter name hints). Requires
+    -- Neovim >= 0.10 (vim.lsp.inlay_hint).
+    inlay_hints = true,
     -- Diagnostic display options (merged with vim.diagnostic.config defaults).
     diagnostic = {
         virtual_text = true,

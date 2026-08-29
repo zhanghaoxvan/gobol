@@ -3,5 +3,5 @@ import std;
 
 func main() {
     var result = 1 + 2;
-    io::println(@"1 + 2 = {result}");
+    std::io::println(@"1 + 2 = {result}");
 }

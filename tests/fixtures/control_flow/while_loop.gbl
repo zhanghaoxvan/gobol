@@ -3,8 +3,8 @@ import std;
 func main() {
     var i = 0;
     while i < 5 {
-        io::print(i);
+        std::io::print(i);
         i += 1;
     }
-    io::print("\n");
+    std::io::print("\n");
 }

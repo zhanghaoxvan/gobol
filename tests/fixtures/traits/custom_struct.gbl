@@ -24,5 +24,5 @@ func main() {
     var p1 = Num::new(4);
     var p2 = Num::new(6);
     var r = p1 + p2;       // 4 + 6 = 10
-    io::println("p1 + p2 ok");
+    std::io::println("p1 + p2 ok");
 }

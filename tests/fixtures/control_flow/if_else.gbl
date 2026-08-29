@@ -3,8 +3,8 @@ import std;
 func main() {
     var x = 10;
     if x > 5 {
-        io::println("large");
+        std::io::println("large");
     } else {
-        io::println("small");
+        std::io::println("small");
     }
 }

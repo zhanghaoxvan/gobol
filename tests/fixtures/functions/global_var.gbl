@@ -13,7 +13,7 @@ func main() {
     bump();
     bump();
     bump();
-    io::print(@"after 3 bumps: {counter}\n");  // 3
+    std::io::print(@"after 3 bumps: {counter}\n");  // 3
     counter = counter + 10;
-    io::print(@"after +10: {counter}\n");      // 13
+    std::io::print(@"after +10: {counter}\n");      // 13
 }

@@ -23,5 +23,5 @@ func main() {
 
     // Use the return value
     var written = printf("printed\n");
-    io::println(@"printf returned {written}");
+    std::io::println(@"printf returned {written}");
 }

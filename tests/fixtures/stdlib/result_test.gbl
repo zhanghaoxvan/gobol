@@ -22,14 +22,14 @@ impl Point {
 func main(): int {
     // Constructor via :: syntax
     var p = Point::new(3, 4);
-    io::println(@"Point({p.x}, {p.y})");
+    std::io::println(@"Point({p.x}, {p.y})");
 
     // Instance method via . syntax
-    io::println(@"distance = {p.distance()}");
+    std::io::println(@"distance = {p.distance()}");
 
     // Constructor via :: with different args
     var p2 = Point::new(10, 20);
-    io::println(@"Point2({p2.x}, {p2.y})");
+    std::io::println(@"Point2({p2.x}, {p2.y})");
 
     0
 }

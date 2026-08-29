@@ -122,6 +122,15 @@ local function on_attach(client, bufnr)
 			vim.lsp.semantic_tokens.start(bufnr, client.id)
 		end
 	end
+	-- rust-analyzer-style inlay hints (type + parameter name hints). Opt-out
+	-- via `inlay_hints = false` in require("gobol").setup(). Needs nvim >= 0.10.
+	local conf = config.get()
+	if conf.inlay_hints and vim.lsp.inlay_hint then
+		local ok = pcall(vim.lsp.inlay_hint.enable, true, { bufnr = bufnr })
+		if not ok then
+			pcall(vim.lsp.inlay_hint.enable, bufnr, true)
+		end
+	end
 end
 
 --- Start (or reuse) the gobol language server for the given workspace root.

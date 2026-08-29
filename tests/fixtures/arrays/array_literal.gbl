@@ -3,7 +3,7 @@ import std;
 func main() {
     var arr: int[] = [1, 2, 3, 4, 5];
     for i, v in arr {
-        io::print(v);
+        std::io::print(v);
     }
-    io::print("\n");
+    std::io::print("\n");
 }

@@ -9,5 +9,5 @@ func factorial(n: int): int {
 
 func main() {
     var result = factorial(5);
-    io::println(@"5! = {result}");
+    std::io::println(@"5! = {result}");
 }

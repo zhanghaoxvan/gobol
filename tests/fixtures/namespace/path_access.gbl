@@ -3,5 +3,5 @@ import std;
 
 func main() {
     var x = 42;
-    io::print(@"x = {x}");
+    std::io::print(@"x = {x}");
 }

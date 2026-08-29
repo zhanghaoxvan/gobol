@@ -13,9 +13,9 @@ func double(n: int): int {
 func main() {
     // Pass a lambda as the function argument
     var a = apply(lambda(n: int): int { n + 1 }, 10);
-    io::println(@"lambda arg: {a}");
+    std::io::println(@"lambda arg: {a}");
 
     // Pass a named function by reference
     var b = apply(&double, 5);
-    io::println(@"named func arg: {b}");
+    std::io::println(@"named func arg: {b}");
 }

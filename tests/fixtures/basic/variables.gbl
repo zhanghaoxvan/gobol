@@ -5,5 +5,5 @@ func main() {
     val y: str = "hello";
     var z = x;
 
-    io::println(@"x = {x}, y = {y}, z = {z}");
+    std::io::println(@"x = {x}, y = {y}, z = {z}");
 }

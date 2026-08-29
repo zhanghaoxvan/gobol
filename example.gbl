@@ -22,24 +22,24 @@ func main() {
     var arr: int[10][10];
     arr[2][2] = 114514;
     var flag: bool = true;
-    io::print(@"Hello from {name}\n");
-    io::print(@"arr[2] is {arr[2][2]}!\n");
+    std::io::print(@"Hello from {name}\n");
+    std::io::print(@"arr[2] is {arr[2][2]}!\n");
 
     for i in 0..10 {
-        io::print(@"Number {i}\n");
+        std::io::print(@"Number {i}\n");
     }
 
     var p: Point = Point(1, 2);
     
-    io::print(@"Calc: {add(p)}\n");
+    std::io::print(@"Calc: {add(p)}\n");
 
     if arr[2][2] == 114514 {
-        io::print("Right!\n");
+        std::io::print("Right!\n");
     } else {
-        io::print("Wrong!\n");
+        std::io::print("Wrong!\n");
     }
     
-    io::print("End of Task!\n");
+    std::io::print("End of Task!\n");
 
     // New feature: match expression
     var grade = match 85 {
@@ -47,31 +47,31 @@ func main() {
         90 => "A",
         _ => "B"
     };
-    io::print(@"Grade: {grade}\n");
+    std::io::print(@"Grade: {grade}\n");
 
     // New feature: block expression
     var doubled = {
         var tmp = p.x + p.y;
         tmp * 2
     };
-    io::print(@"Doubled: {doubled}\n");
+    std::io::print(@"Doubled: {doubled}\n");
 
     // New feature: extended for (index + value)
     var items: Vec<int> = [10, 20, 30];
-    io::print("Items: ");
+    std::io::print("Items: ");
     for i, v in items {
-        io::print(i);
-        io::print(":");
-        io::print(v);
-        io::print(" ");
+        std::io::print(i);
+        std::io::print(":");
+        std::io::print(v);
+        std::io::print(" ");
     }
-    io::print("\n");
+    std::io::print("\n");
 
     // New feature: string iteration
-    io::print("Chars: ");
+    std::io::print("Chars: ");
     for ch in "Go" {
-        io::print(ch);
+        std::io::print(ch);
     }
-    io::print("\n");
+    std::io::print("\n");
 
 }

@@ -26,17 +26,17 @@ func source_file(): str {
 func main() {
     // square(7) is folded to 49 at compile time.
     var s = square(7);
-    io::println(@"square(7) = {s}");
+    std::io::println(@"square(7) = {s}");
 
     // const_add(3, 4) is folded to 7 at compile time.
     var sum = const_add(3, 4);
-    io::println(@"3 + 4 = {sum}");
+    std::io::println(@"3 + 4 = {sum}");
 
     // String concatenation also works at compile time.
     var msg = greet("world");
-    io::println(msg);
+    std::io::println(msg);
 
     // file() expands to the current source path.
     var f = source_file();
-    io::println(f);
+    std::io::println(f);
 }

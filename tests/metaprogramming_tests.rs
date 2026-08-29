@@ -49,9 +49,9 @@ func main() {
     var x = 5
     var y = 10
     var z = add(x, y)
-    io::println(@"z = {z}")
+    std::io::println(@"z = {z}")
     var w = add(x + 1, y * 2)
-    io::println(@"w = {w}")
+    std::io::println(@"w = {w}")
 }
 "#;
     let result = run_inline_test(src);
@@ -74,8 +74,8 @@ func dbl(a: int): int { return add(a, a) }
 
 func main() {
     var x = 5
-    io::println(@"d = {dbl(x)}")
-    io::println(@"q = {dbl(x + 1)}")
+    std::io::println(@"d = {dbl(x)}")
+    std::io::println(@"q = {dbl(x + 1)}")
 }
 "#;
     let result = run_inline_test(src);
@@ -94,7 +94,7 @@ func square(n: int): int { return n * n }
 
 func main() {
     var x = square(7)
-    io::println(@"x = {x}")
+    std::io::println(@"x = {x}")
 }
 "#;
     let result = run_inline_test(src);
@@ -115,9 +115,9 @@ func add(a: int, b: int): int { return a + b }
 func main() {
     var x = 5
     var y = 10
-    io::println(@"z = {add(x, y)}")
-    io::println(@"w = {add(x + 1, y * 2)}")
-    io::println(@"lit = {add(3, 4)}")
+    std::io::println(@"z = {add(x, y)}")
+    std::io::println(@"w = {add(x + 1, y * 2)}")
+    std::io::println(@"lit = {add(3, 4)}")
 }
 "#;
     let result = run_inline_test(src);
@@ -139,9 +139,9 @@ fn test_multiple_expression_statements_without_semicolons() {
     let src = r#"import std;
 
 func main() {
-    io::println("first")
-    io::println("second")
-    io::println("third")
+    std::io::println("first")
+    std::io::println("second")
+    std::io::println("third")
 }
 "#;
     let result = run_inline_test(src);
@@ -160,9 +160,9 @@ fn test_arithmetic_after_expression_statement() {
 func main() {
     var x = 5
     var y = 10
-    io::println("hello")
+    std::io::println("hello")
     var w = (x + 1) + (y * 2)
-    io::println(@"w = {w}")
+    std::io::println(@"w = {w}")
 }
 "#;
     let result = run_inline_test(src);
@@ -182,13 +182,13 @@ fn test_binary_operators_in_format_string() {
 func main() {
     var x = 5
     var y = 10
-    io::println(@"add = {x + y}")
-    io::println(@"sub = {y - x}")
-    io::println(@"mul = {x * y}")
-    io::println(@"grouped = {(x + 1) + (y * 2)}")
-    io::println(@"precedence = {x + y * 2}")
-    io::println(@"cmp = {x < y}")
-    io::println(@"unary = {x + -y}")
+    std::io::println(@"add = {x + y}")
+    std::io::println(@"sub = {y - x}")
+    std::io::println(@"mul = {x * y}")
+    std::io::println(@"grouped = {(x + 1) + (y * 2)}")
+    std::io::println(@"precedence = {x + y * 2}")
+    std::io::println(@"cmp = {x < y}")
+    std::io::println(@"unary = {x + -y}")
 }
 "#;
     let result = run_inline_test(src);
@@ -219,7 +219,7 @@ func main() {
     var f = identity(3.5)
     var s = identity("hi")
     var b = identity(true)
-    io::println(@"i={i} f={f} s={s} b={b}")
+    std::io::println(@"i={i} f={f} s={s} b={b}")
 }
 "#;
     let result = run_inline_test(src);
@@ -238,7 +238,7 @@ func identity<T>(x: T): T { return x }
 func main() {
     var i = identity(identity(7))
     var f = identity(identity(2.5))
-    io::println(@"i={i} f={f}")
+    std::io::println(@"i={i} f={f}")
 }
 "#;
     let result = run_inline_test(src);
@@ -259,7 +259,7 @@ func identity<T>(x: T): T { return x }
 func main() {
     var i = identity(5)
     var n = identity(null)
-    io::println(@"i={i}")
+    std::io::println(@"i={i}")
 }
 "#;
     let result = run_inline_test(src);

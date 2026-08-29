@@ -33,6 +33,14 @@ pub struct SemanticAnalyzer {
     loaded_programs: Vec<Box<Program>>,
     current_module_dir: Option<String>,
     module_aliases: HashMap<String, String>,
+    /// Per-module visibility: module-name → set of module names that the
+    /// module may address with a *bare* qualifier (`mod::fn`). Each loaded
+    /// module only gets the modules it explicitly imports (plus the compiler
+    /// auto-loaded ones: builtins/mem/trait). So `import std;` grants `std::`
+    /// but NOT bare `io::`; to use `io::println` you must `import io;` (or
+    /// `import std::io;`). Fully-qualified `std::io::...` remains valid via
+    /// the `std` visibility + prefix fallback.
+    visible_modules: HashMap<String, std::collections::HashSet<String>>,
     current_generic_params: Vec<String>,
     build_mode: BuildMode,
     /// Trait definitions: trait_name -> { name, methods, generic_params }
@@ -91,6 +99,7 @@ impl SemanticAnalyzer {
             loaded_programs: Vec::new(),
             current_module_dir: None,
             module_aliases: HashMap::new(),
+            visible_modules: HashMap::new(),
             current_generic_params: Vec::new(),
             build_mode: BuildMode::Debug,
             trait_defs: HashMap::new(),
@@ -209,6 +218,68 @@ impl SemanticAnalyzer {
         }
     }
 
+    /// The compiler auto-loads these modules for every compilation; treat them
+    /// as visible to every module so std internals (e.g. `builtins::`) keep
+    /// working even where the file does not re-import them.
+    fn auto_visible_modules() -> &'static [&'static str] {
+        &["builtins", "mem", "trait"]
+    }
+
+    /// Ensure a visibility set exists for `module` and seed it with the
+    /// auto-loaded modules.
+    fn ensure_visible(&mut self, module: &str) {
+        self.visible_modules
+            .entry(module.to_string())
+            .or_default();
+        let seed: std::collections::HashSet<String> =
+            Self::auto_visible_modules().iter().map(|s| s.to_string()).collect();
+        self.visible_modules
+            .get_mut(module)
+            .unwrap()
+            .extend(seed);
+    }
+
+    /// After `current_module` imports `mod`, register it (plus its short name
+    /// and alias) as visible there.
+    fn note_import(&mut self, imported: &str) {
+        let cur = self.current_module.clone();
+        self.ensure_visible(&cur);
+        let set = self.visible_modules.get_mut(&cur).unwrap();
+        set.insert(imported.to_string());
+        if let Some(short) = imported.rsplit("::").next() {
+            if !short.is_empty() {
+                set.insert(short.to_string());
+            }
+        }
+    }
+
+    /// Whether `module` may be used as a *bare* qualifier (`module::fn`) from
+    /// the current module. A module is visible if it is the current module
+    /// itself, one of its `::` prefixes is visible (e.g. `std` for
+    /// `std::io`), or its last path segment is visible (e.g. `io` when
+    /// `import std::io` was done).
+    fn module_visible(&self, module: &str) -> bool {
+        if module.is_empty() || module == self.current_module {
+            return true;
+        }
+        let Some(set) = self.visible_modules.get(&self.current_module) else {
+            // The main program (before any import processed) — no gate.
+            return true;
+        };
+        let segs: Vec<&str> = module.split("::").collect();
+        for i in 1..=segs.len() {
+            if set.contains(&segs[..i].join("::")) {
+                return true;
+            }
+        }
+        if let Some(short) = segs.last() {
+            if set.contains(*short) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn analyze(&mut self, program: &Program) -> bool {
         // Register compiler-level builtins (panic / exit — handled by codegen).
         self.env.declare_function("panic", &DataType::None_, &self.current_module);
@@ -217,6 +288,9 @@ impl SemanticAnalyzer {
         self.env.declare_function("gobol_array_elem_addr", &DataType::Int, &self.current_module);
         // Array allocation intrinsic used by std library (e.g. Vec::push)
         self.env.declare_function("__new_array", &DataType::Unknown, &self.current_module);
+        // Seed this program's module visibility for the bare-qualifier gate.
+        let cur_module = self.current_module.clone();
+        self.ensure_visible(&cur_module);
         // Register Ref as a built-in struct so Ref<T>::new resolves in std library
         if !self.struct_fields.contains_key("Ref") {
             let mut ref_fields = HashMap::new();
@@ -1016,7 +1090,8 @@ impl SemanticAnalyzer {
         let mut declared_funcs: Vec<(String, DataType)> = Vec::new();
         let mut declared_structs: Vec<String> = Vec::new();
         let mut declared_traits: Vec<String> = Vec::new();
-        // Imported module names so `export(mod)` can re-export modules.
+        // Imported module names so `export(mod)` / default-export can
+        // re-export submodules.
         let mut imported_mods: Vec<String> = Vec::new();
 
         // ---- Phase 2: Process declarations ----
@@ -1025,8 +1100,14 @@ impl SemanticAnalyzer {
                 let name = import_stmt.get_module_name();
                 imported_mods.push(name.clone());
                 self.load_module(&name);
+                self.note_import(&name);
                 if let Some(alias) = import_stmt.get_alias() {
-                    self.module_aliases.insert(alias.to_string(), name);
+                    self.module_aliases.insert(alias.to_string(), name.clone());
+                    // Also make the alias usable as a bare qualifier.
+                    self.ensure_visible(&self.current_module.clone());
+                    self.visible_modules
+                        .get_mut(&self.current_module)
+                        .map(|s| s.insert(alias.to_string()));
                 }
             } else if let Some(from_import) = stmt.as_any().downcast_ref::<FromImportStatement>() {
                 // `from module import member, ...` inside a loaded module.
@@ -1034,6 +1115,7 @@ impl SemanticAnalyzer {
                 // members as bare names in this module's namespace.
                 let mod_name = from_import.get_module();
                 self.load_module(mod_name);
+                self.note_import(mod_name);
 
                 // Handle wildcard import: `from module import *`
                 if from_import.is_wildcard() {
@@ -1233,12 +1315,38 @@ impl SemanticAnalyzer {
                 // symbol lets name-based resolution find them.
                 self.env.declare_module(name);
             }
-            // Also re-export every imported module into this module's
+            // Imported submodules are also re-exported into this module's
             // namespace so `from m import ...` style patterns keep working
-            // after we drop explicit `export(...)` lists.
+            // after explicit `export(...)` lists are dropped.
             for mod_name in &imported_mods {
                 let short = mod_name.rsplit("::").next().unwrap_or(mod_name);
                 self.env.declare_module(short);
+            }
+        }
+
+        // For `import a::b` / `import std::io` etc, additionally register the
+        // *short* module name as an alias for the exports, so both
+        // `std::io::println(...)` and the bare `io::println(...)` resolve.
+        // For the std library the legacy `io::` form is handy since the std
+        // layout keeps every submodule addressable, but the canonical path
+        // (`std::io::...`) always works. This mirrors how the environment
+        // registers module-scoped functions.
+        if module_name.contains("::") {
+            let short = module_name.rsplit("::").next().unwrap_or(&module_name).to_string();
+            if !short.is_empty() && short != module_name {
+                self.env.declare_module(&short);
+                for (name, ret) in &declared_funcs {
+                    // declare_function(<name>, ty, <module>) registers under
+                    // `<module>::<name>`, so passing the short module name here
+                    // makes `io::println` resolvable via the short alias.
+                    self.env.declare_function(name, ret, &short);
+                }
+                for name in &declared_structs {
+                    self.env.declare_module(&format!("{}::{}", short, name));
+                }
+                for name in &declared_traits {
+                    self.env.declare_module(&format!("{}::{}", short, name));
+                }
             }
         }
 
@@ -1534,8 +1642,14 @@ impl AstVisitor for SemanticAnalyzer {
         println!("  Import module: {} (alias: {:?})", module_name, node.get_alias());
 
         self.load_module(&module_name);
+        self.note_import(&module_name);
         if let Some(alias) = node.get_alias() {
-            self.module_aliases.insert(alias.to_string(), module_name);
+            self.module_aliases.insert(alias.to_string(), module_name.clone());
+            // Also make the alias usable as a bare qualifier.
+            self.ensure_visible(&self.current_module.clone());
+            self.visible_modules
+                .get_mut(&self.current_module)
+                .map(|s| s.insert(alias.to_string()));
         }
     }
 
@@ -1547,6 +1661,7 @@ impl AstVisitor for SemanticAnalyzer {
         // First, ensure the module is loaded (this registers all its
         // public symbols under `module::member` keys).
         self.load_module(module_name);
+        self.note_import(module_name);
 
         // Handle wildcard import: `from module import *`
         if node.is_wildcard() {
@@ -2668,10 +2783,63 @@ impl AstVisitor for SemanticAnalyzer {
             format!("{}::{}", resolved_module_bare, func_name)
         };
 
+        // ---- Module-scope isolation ----
+        // A bare `mod::fn` qualifier is only valid when `mod` is actually
+        // imported/visible at this call site. `import std;` grants `std::`
+        // but NOT bare `io::` — to use `io::println` you must `import io;` or
+        // `import std::io;` (which registers the `io` short name).
+        let is_module_qual = (resolved_module_bare.contains("::")
+            || self
+                .env
+                .lookup_symbol(&resolved_module_bare)
+                .map(|s| s.symbol_type == SymbolType::Module)
+                .unwrap_or(false))
+            // A locally-declared struct/enum name is not an "external module"
+            // qualifier at all (e.g. `Color::Red()`), so don't gate it.
+            && !self.struct_fields.contains_key(&resolved_module_bare);
+        if is_module_qual
+            && resolved_module_bare != self.current_module
+            && !self.module_visible(&resolved_module_bare)
+        {
+            self.error(&format!("Undeclared function: '{}'", full_name));
+            // Still visit arguments so nested expressions keep their types.
+            if let Some(args) = node.get_arguments() {
+                for arg in args {
+                    arg.accept(self);
+                    self.type_stack.pop();
+                }
+            }
+            self.type_stack.push(DataType::Unknown);
+            return;
+        }
+
         // Try qualified lookup, then short-name lookup
         let sym_data_type = self.env.lookup_symbol(&full_name)
             .or_else(|| self.env.lookup_symbol(&func_name))
             .map(|s| s.data_type.clone());
+
+        // `std::` prefix fallback: user code references `std::io::println(...)`.
+        // The module name is "std" and submodule "io" is loaded as its own
+        // module (`io::println`), so when the fully-qualified form is not found
+        // we retry against each progressively-shorter suffix of the module path.
+        let sym_data_type = sym_data_type.or_else(|| {
+            let mut candidates = Vec::new();
+            let parts: Vec<&str> = resolved_module_bare.split("::").collect();
+            if parts.len() >= 2 && parts.first() == Some(&"std") {
+                for cut in 1..parts.len() {
+                    let suffix = parts[cut..].join("::");
+                    candidates.push(format!("{}::{}", suffix, func_name));
+                }
+            } else if parts.len() == 1 && parts[0] == "std" {
+                // `std::foo(...)` where `foo` is a top-level std export (rare)
+                candidates.push(func_name.clone());
+            }
+            candidates
+                .into_iter()
+                .map(|c| self.env.lookup_symbol(&c).map(|s| s.data_type.clone()))
+                .find(|o| o.is_some())
+                .flatten()
+        });
 
         // If not found but it's a method call on a variable (e.g. arr.len, arr.add),
         // allow it with sensible return types

@@ -24,5 +24,7 @@ import cmp;
 import iterator;
 import option;
 
-// Re-export all submodules into the std root namespace.
-export(io, int, float, vec, range, new, trait, str, math, fs, net, debug, assert, ops, ref, result, thread, mem, cmp, iterator, option);
+// Submodules are referenced through their full `std::` path from user code,
+// e.g. `std::io::println(...)` / `std::math::abs(...)`. No unified re-export
+// list is maintained here, so each submodule is addressed by its `std::<name>`
+// prefix instead of a bare `<name>`.

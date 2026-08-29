@@ -8,9 +8,9 @@ func main() {
     val sum = add(10, 20);
     val product = multiply(5, 6);
     
-    io::println(greeting);
-    io::println(@"Sum: {sum}");
-    io::println(@"Product: {product}");
+    std::io::println(greeting);
+    std::io::println(@"Sum: {sum}");
+    std::io::println(@"Product: {product}");
 }
 
 main();

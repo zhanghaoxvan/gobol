@@ -146,13 +146,32 @@ struct SymbolEntry {
     doc_comment: Option<String>, // documentation comment above the declaration
 }
 
+/// Parsed signature of a callable, used by signature help and inlay hints.
+#[derive(Clone, Debug, Default)]
+struct FuncSignature {
+    name: String,
+    /// Parameter names in declaration order (e.g. `["x", "y"]`).
+    param_names: Vec<String>,
+    /// Declared types of each parameter, parallel to `param_names`.
+    param_types: Vec<Option<String>>,
+    /// Full parameter text list, `["x: int", "y: str"]`, for the printed label.
+    param_labels: Vec<String>,
+    /// Return type annotation, if present.
+    return_type: Option<String>,
+    /// Doc comment above the function declaration.
+    doc: Option<String>,
+}
+
 // ==================== Document State ====================
 
+#[derive(Clone)]
 struct DocState {
     source: String,
     tokens: Vec<Token>,
     symbols: Vec<SymbolEntry>,
     errors: Vec<(i32, i32, String)>,
+    /// Signatures of callables declared in this document, keyed by name.
+    signatures: std::collections::HashMap<String, FuncSignature>,
 }
 
 impl DocState {
@@ -232,6 +251,76 @@ impl DocState {
             .lines()
             .nth((line_1based - 1) as usize)
             .unwrap_or("")
+    }
+
+    /// Compute the brace nesting depth at a given (1-based line, 0-based col).
+    /// Only visible identifiers shut inside the same-or-outer scope chain are
+    /// offered for completion.
+    fn brace_depth_at(&self, line_1: i32, col: i32) -> i32 {
+        let mut depth = 0i32;
+        for t in &self.tokens {
+            // token's start position is before (line,col)
+            let before = t.line < line_1 || (t.line == line_1 && t.col <= col);
+            if !before {
+                break;
+            }
+            if t.value == "{" {
+                depth += 1;
+            } else if t.value == "}" {
+                depth -= 1;
+            }
+        }
+        depth.max(0)
+    }
+
+    /// Whether an identifier used at the cursor is a visible local (variable or
+    /// parameter) — i.e. declared earlier in source, at the same-or-outer brace
+    /// depth, and inside the same function.
+    fn local_visible_at(&self, sym: &SymbolEntry, line: u32, character: u32) -> bool {
+        let target_line = (line as i32) + 1;
+        let target_col = character as i32;
+        let sym_line = sym.line;
+        let sym_col = sym.col;
+
+        // 1. Parameters are visible anywhere after the function signature's
+        //    opening brace; i.e. anywhere inside their function body. We treat
+        //    them as visible if the cursor is after the parameter declaration.
+        // 2. Variables must be declared strictly before the cursor.
+        let declared_before = sym_line < target_line
+            || (sym_line == target_line && sym_col < target_col);
+        if !declared_before {
+            return false;
+        }
+
+        // Scope nesting: a local is visible if its brace depth is <= the
+        // cursor's brace depth (outer scope or same scope).  A deeper nested
+        // local (declared in an inner block that the cursor isn't inside yet)
+        // is not visible.
+        let sym_depth = self.brace_depth_at(sym_line, sym_col);
+        let cursor_depth = self.brace_depth_at(target_line, target_col);
+        sym_depth <= cursor_depth
+    }
+
+    /// Find the brace depth where the cursor currently sits, and the local
+    /// variables/parameters visible there. Returns owned clones.
+    fn visible_locals(&self, line: u32, character: u32) -> Vec<SymbolEntry> {
+        let target_line = (line as i32) + 1;
+        let target_col = character as i32;
+        let cursor_depth = self.brace_depth_at(target_line, target_col);
+        self.symbols
+            .iter()
+            .filter(|s| {
+                matches!(s.kind, SymKind::Variable | SymKind::Parameter)
+                    && self.local_visible_at(s, line, character)
+            })
+            .filter(|s| {
+                // Extra guard: parameter/variable must not be shadowing-hidden
+                // by being in a function that starts after the cursor.
+                let sym_depth = self.brace_depth_at(s.line, s.col);
+                sym_depth <= cursor_depth
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -332,6 +421,168 @@ fn is_capitalized(s: &str) -> bool {
     s.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
 }
 
+/// Extract `{name}` interpolation identifiers from a format-string literal
+/// value (e.g. `"@{value: {x}}"` → `[(9, "x")]`). Respects `{{`/`}}` escapes
+/// so brace pairs used as escaping do not produce dummy interpolation vars.
+/// Byte offsets are relative to the start of `value`.
+fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            i += 2; // escaped {{ — skip
+            continue;
+        }
+        if bytes[i] == b'}' && bytes[i + 1] == b'}' {
+            i += 2; // escaped }} — skip
+            continue;
+        }
+        if bytes[i] == b'{' {
+            // find matching close brace
+            let start = i + 1;
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b'}' {
+                j += 1;
+            }
+            if j < bytes.len() {
+                let inner = &value[start..j];
+                let name = inner.trim();
+                // Only simple identifier interpolation (no format spec like `{x:.2}`).
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':')
+                {
+                    // Take the segment before any `.`/`:` suffix to get the binding.
+                    let ident = name
+                        .split(|c| c == '.' || c == ':')
+                        .next()
+                        .unwrap_or(name)
+                        .trim();
+                    if !ident.is_empty()
+                        && ident.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                    {
+                        out.push((start, ident.to_string()));
+                    }
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Split the *literal* text of a string/format-string value into non-escape
+/// `(start_offset, length)` spans (byte offsets within `value`). Escape
+/// sequences (`\n`, `\t`, `\x41`, `\u{...}`, `\c`) are excluded so that the
+/// semantic `string` token does not paint over them — letting the client's
+/// syntax grammar (`constant.character.escape`) render them with their own
+/// colour (VS Code semantic tokens otherwise override the TextMate escape
+/// highlight, hiding `\n` & co).
+///
+/// When `skip_braces` is set (format strings), each `{ ... interp ... }` block
+/// is also excluded (the interpolation identifier gets its own semantic token
+/// in `build_semantic_tokens`).
+fn string_literal_segments(value: &str, skip_braces: bool) -> Vec<(usize, usize)> {
+    let bytes = value.as_bytes();
+    let n = bytes.len();
+    let mut segs: Vec<(usize, usize)> = Vec::new();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+
+    while i < n {
+        let is_escape = bytes[i] == b'\\';
+        let is_interp = skip_braces && bytes[i] == b'{';
+        if !is_escape && !is_interp {
+            i += 1;
+            continue;
+        }
+        // Flush the literal text accumulated before this special span.
+        if i > seg_start {
+            segs.push((seg_start, i - seg_start));
+        }
+        // Advance past the escape / interpolation span.
+        if is_escape {
+            let mut len = 2; // `\` + one char
+            if i + 1 < n {
+                match bytes[i + 1] {
+                    b'u' if i + 2 < n && bytes[i + 2] == b'{' => {
+                        let mut j = i + 3;
+                        while j < n && bytes[j] != b'}' {
+                            j += 1;
+                        }
+                        len = j - i + 1;
+                    }
+                    b'x' => {
+                        let mut j = i + 2;
+                        let mut hex = 0;
+                        while j < n && hex < 2 && bytes[j].is_ascii_hexdigit() {
+                            j += 1;
+                            hex += 1;
+                        }
+                        len = j - i;
+                    }
+                    _ => {}
+                }
+            }
+            i += len;
+        } else {
+            // `{` interpolation block (or escaped `{{`).
+            i += if i + 1 < n && bytes[i + 1] == b'{' {
+                2 // `{{` literal brace pair — skip both
+            } else {
+                let mut j = i + 1;
+                while j < n && bytes[j] != b'}' {
+                    j += 1;
+                }
+                if j < n {
+                    j - i + 1
+                } else {
+                    n - i
+                }
+            };
+        }
+        seg_start = i;
+    }
+    if n > seg_start {
+        segs.push((seg_start, n - seg_start));
+    }
+    segs
+}
+
+/// Append one delta-encoded semantic token, maintaining the running prev
+/// line/col bookkeeping for the relative encoding.
+#[allow(clippy::too_many_arguments)]
+fn push_sem(
+    out: &mut Vec<SemanticToken>,
+    prev_line: &mut u32,
+    prev_start: &mut u32,
+    line: u32,
+    start: u32,
+    length: u32,
+    type_idx: u32,
+    mods: u32,
+) {
+    let delta_line = line - *prev_line;
+    let delta_start = if delta_line == 0 {
+        start - *prev_start
+    } else {
+        start
+    };
+    out.push(SemanticToken {
+        delta_line,
+        delta_start,
+        length,
+        token_type: type_idx,
+        token_modifiers_bitset: mods,
+    });
+    *prev_line = line;
+    *prev_start = start;
+}
+
 /// Classify an identifier token's semantic type + modifiers based on the
 /// symbol index and surrounding context.
 fn classify_ident(
@@ -391,8 +642,71 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 _ => (type_index(SemanticTokenType::KEYWORD), 0),
             },
             TokenType::Number => (type_index(SemanticTokenType::NUMBER), 0),
-            TokenType::String | TokenType::FormatString => {
-                (type_index(SemanticTokenType::STRING), 0)
+            TokenType::String => {
+                // Emit `string` tokens only for the non-escape text so the
+                // client's TextMate `constant.character.escape` rendering of
+                // `\n` etc. is not overridden by the semantic token.
+                let line = (t.line as u32).saturating_sub(1);
+                let content_base = t.col.max(0) as u32 + 1; // after opening quote
+                for (off, len) in string_literal_segments(&t.value, false) {
+                    push_sem(
+                        &mut out,
+                        &mut prev_line,
+                        &mut prev_start,
+                        line,
+                        content_base + off as u32,
+                        len.max(1) as u32,
+                        type_index(SemanticTokenType::STRING),
+                        0,
+                    );
+                }
+                continue; // for-loop advances `i`
+            }
+            // Format string `@"...{var}..."`: colour literal (non-escape) text
+            // as a string, and emit a `variable`/`type` token for each
+            // interpolation identifier so `{var}` is typed as its binding.
+            TokenType::FormatString => {
+                let line = (t.line as u32).saturating_sub(1);
+                let start = t.col.max(0) as u32;
+                // String content begins after `@` and `"`.
+                let content_base = start + 2;
+
+                // Collect all sub-tokens for this literal (string segments and
+                // interpolation ids) and emit them in ascending column order so
+                // the delta encoding never has to go backwards.
+                let mut parts: Vec<(u32, u32, u32, u32)> = Vec::new(); // (col,len,type,mods)
+                for (off, len) in string_literal_segments(&t.value, true) {
+                    parts.push((
+                        content_base + off as u32,
+                        len.max(1) as u32,
+                        type_index(SemanticTokenType::STRING),
+                        0,
+                    ));
+                }
+                for (off, ident) in format_interpolation_spans(&t.value) {
+                    let var_col = content_base + off as u32;
+                    let (ity, imods) = if ident.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                        (type_index(SemanticTokenType::TYPE), 0)
+                    } else {
+                        // Prefer declared variable type when known via symbol table.
+                        let ty = symbols
+                            .iter()
+                            .find(|s| s.name == ident)
+                            .map(|s| s.type_info.is_some())
+                            .unwrap_or(false);
+                        if ty {
+                            (type_index(SemanticTokenType::TYPE), 0)
+                        } else {
+                            (type_index(SemanticTokenType::VARIABLE), 0)
+                        }
+                    };
+                    parts.push((var_col, ident.len() as u32, ity, imods));
+                }
+                parts.sort_by_key(|p| p.0);
+                for (col, len, ty, md) in parts {
+                    push_sem(&mut out, &mut prev_line, &mut prev_start, line, col, len, ty, md);
+                }
+                continue; // for-loop advances `i`
             }
             TokenType::Operator => (type_index(SemanticTokenType::OPERATOR), 0),
             TokenType::Identifier => classify_ident(tokens, i, symbols, &ns_set),
@@ -1168,6 +1482,528 @@ fn extract_parameters(tokens: &[Token], func_idx: usize, symbols: &mut Vec<Symbo
     }
 }
 
+/// Parse the signatures of all callables declared in a token stream.
+/// Returns a map keyed by function name. Handles `func name(...): Ret` and
+/// `static func name(...): Ret`.
+fn collect_signatures(tokens: &[Token], source: &str) -> std::collections::HashMap<String, FuncSignature> {
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = &tokens[i];
+        if tok.r#type != TokenType::Keyword || (tok.value != "func" && tok.value != "static") {
+            i += 1;
+            continue;
+        }
+        let mut func_idx = i;
+        if tok.value == "static" {
+            // `static func`
+            if let Some(n) = tokens.get(i + 1) {
+                if n.value == "func" {
+                    func_idx = i + 1;
+                } else {
+                    i += 1;
+                    continue;
+                }
+            } else {
+                i += 1;
+                continue;
+            }
+        }
+        let Some(name_tok) = tokens.get(func_idx + 1) else {
+            i += 1;
+            continue;
+        };
+        if name_tok.r#type != TokenType::Identifier {
+            i += 1;
+            continue;
+        }
+
+        let mut sig = FuncSignature {
+            name: name_tok.value.clone(),
+            ..Default::default()
+        };
+        sig.doc = extract_doc_comment(source, tok.line);
+
+        // Parse the parameter list `( ..., ... )`.
+        let mut j = func_idx + 2;
+        while j < tokens.len() && tokens[j].value != "(" {
+            j += 1;
+        }
+        let mut depth = 0i32;
+        j += 1;
+        while j < tokens.len() {
+            let t = &tokens[j];
+            if t.value == "(" || t.value == "[" {
+                depth += 1;
+                j += 1;
+                continue;
+            }
+            if t.value == ")" || t.value == "]" {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                j += 1;
+                continue;
+            }
+            if depth == 0 && t.r#type == TokenType::Identifier && t.value != "self" {
+                // Candidate: `name` or `name: type`
+                let is_param = j + 1 < tokens.len() && tokens[j + 1].value == ":";
+                if is_param {
+                    let mut k = j + 2;
+                    let mut ty = String::new();
+                    while k < tokens.len() {
+                        let tk = &tokens[k];
+                        if tk.value == "," || tk.value == ")" || tk.r#type == TokenType::EndOfLine {
+                            break;
+                        }
+                        if !ty.is_empty() && tk.r#type != TokenType::Operator && tk.value != "[" && tk.value != "]" {
+                            ty.push(' ');
+                        }
+                        ty.push_str(&tk.value);
+                        k += 1;
+                    }
+                    let name = t.value.clone();
+                    let ty = if ty.trim().is_empty() { None } else { Some(ty.trim().to_string()) };
+                    let label = match &ty {
+                        Some(t) => format!("{}: {}", name, t),
+                        None => name.clone(),
+                    };
+                    sig.param_names.push(name);
+                    sig.param_types.push(ty);
+                    sig.param_labels.push(label);
+                    j = k;
+                    continue;
+                }
+            }
+            j += 1;
+        }
+
+        // Return type after the closing paren: `): Ret {` or `): Ret` EOL.
+        let mut j2 = j + 1; // skip `)`
+        if j2 < tokens.len() && tokens[j2].value == ":" {
+            j2 += 1;
+            let mut rt = String::new();
+            let mut paren = 0i32;
+            while j2 < tokens.len() {
+                let t = &tokens[j2];
+                if t.value == "(" { paren += 1; }
+                if t.value == ")" {
+                    if paren == 0 { break; }
+                    paren -= 1;
+                }
+                if t.value == "{" || t.value == ";" || t.r#type == TokenType::EndOfLine { break; }
+                if !rt.is_empty() && t.r#type != TokenType::Operator && t.value != "[" && t.value != "]" {
+                    rt.push(' ');
+                }
+                rt.push_str(&t.value);
+                j2 += 1;
+            }
+            let rt = rt.trim().to_string();
+            if !rt.is_empty() {
+                sig.return_type = Some(rt);
+            }
+        }
+
+        sigs.insert(sig.name.clone(), sig);
+        i = func_idx + 1; // advance past the `func` keyword to avoid reprocessing
+    }
+    sigs
+}
+
+/// If the cursor lies inside a call argument list, return the called
+/// function's name (the identifier immediately before the enclosing `(`) and
+/// the 0-based active parameter index (count of top-level commas so far).
+/// Returns `None` when the cursor is not inside any call.
+fn call_at(tokens: &[Token], line: u32, character: u32) -> Option<(String, u32)> {
+    let tgt_line = (line as i32) + 1;
+    let tgt_col = character as i32;
+
+    // Enumerate every '(' .. ')' pair and pick the innermost one whose
+    // argument span contains the cursor.
+    let mut best: Option<(usize, usize)> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].value != "(" {
+            i += 1;
+            continue;
+        }
+        // Match this '(' to its ')'.
+        let mut depth = 0i32;
+        let mut j = i;
+        let mut steps = 0usize;
+        while j < tokens.len() {
+            if tokens[j].value == "(" {
+                depth += 1;
+            } else if tokens[j].value == ")" {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            j += 1;
+            steps += 1;
+            if steps > tokens.len() {
+                break;
+            }
+        }
+        if j >= tokens.len() {
+            i += 1;
+            continue;
+        }
+        let lp = &tokens[i];
+        let rp = &tokens[j];
+        // Cursor strictly between the parens (inclusive of the close paren
+        // column is handled by <= rp.col; the open paren itself is a call site).
+        let after_open = lp.line < tgt_line || (lp.line == tgt_line && lp.col <= tgt_col);
+        let before_close = rp.line > tgt_line || (rp.line == tgt_line && tgt_col <= rp.col);
+        if after_open && before_close {
+            // Prefer the innermost (largest lp index) qualifying pair.
+            if best.map(|(b, _)| i >= b).unwrap_or(true) {
+                best = Some((i, j));
+            }
+        }
+        i += 1;
+    }
+
+    let (lp_idx, rp_idx) = best?;
+
+    // Function name = nearest identifier before '(' skipping `::`/`.` prefixes.
+    let mut k = lp_idx;
+    let mut callee: Option<String> = None;
+    while k > 0 {
+        let prev = &tokens[k - 1];
+        match &prev.r#type {
+            TokenType::Identifier => {
+                callee = Some(prev.value.clone());
+                break;
+            }
+            TokenType::Operator => {
+                if prev.value == "::" || prev.value == "." {
+                    k -= 1;
+                    continue;
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    let callee = callee?;
+    Some((
+        callee,
+        count_top_commas(tokens, lp_idx, rp_idx, tgt_line, tgt_col),
+    ))
+}
+
+/// Count top-level commas between the enclosing parens that occur before the
+/// cursor — the 0-based active parameter index.
+fn count_top_commas(
+    tokens: &[Token],
+    lp_idx: usize,
+    rp_idx: usize,
+    tgt_line: i32,
+    tgt_col: i32,
+) -> u32 {
+    let mut depth = 0i32;
+    let mut count = 0u32;
+    let mut i = lp_idx + 1;
+    while i < rp_idx {
+        let t = &tokens[i];
+        if t.value == "(" || t.value == "[" {
+            depth += 1;
+        } else if t.value == ")" || t.value == "]" {
+            depth -= 1;
+        } else if depth == 0 && t.value == "," {
+            // Only count commas that are before the cursor position.
+            let before = t.line < tgt_line || (t.line == tgt_line && t.col <= tgt_col);
+            if before {
+                count += 1;
+            }
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Build signature-help response with the given active parameter index.
+fn signature_help_for(sig: &FuncSignature, active_param: u32) -> SignatureHelp {
+    let label = {
+        let mut l = format!("{}(", sig.name);
+        l.push_str(&sig.param_labels.join(", "));
+        l.push(')');
+        if let Some(rt) = &sig.return_type {
+            l.push_str(&format!(": {}", rt));
+        }
+        l
+    };
+
+    let parameters: Option<Vec<ParameterInformation>> = Some(
+        sig.param_labels
+            .iter()
+            .map(|pl| ParameterInformation {
+                label: ParameterLabel::Simple(pl.clone()),
+                documentation: None,
+            })
+            .collect(),
+    );
+
+    let info = SignatureInformation {
+        label,
+        documentation: sig.doc.as_ref().map(|d| {
+            Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: d.clone(),
+            })
+        }),
+        parameters,
+        active_parameter: Some(active_param),
+    };
+
+    SignatureHelp {
+        signatures: vec![info],
+        active_signature: Some(0),
+        active_parameter: Some(active_param),
+    }
+}
+
+/// Compute folding ranges from matching `{`/`}` pairs (multi-line only).
+fn mk_inlay_hint(position: Position, label: impl Into<InlayHintLabel>, kind: InlayHintKind) -> InlayHint {
+    InlayHint {
+        position,
+        label: label.into(),
+        kind: Some(kind),
+        text_edits: None,
+        tooltip: None,
+        padding_left: Some(true),
+        padding_right: None,
+        data: None,
+    }
+}
+
+fn brace_folding_ranges(tokens: &[Token]) -> Vec<FoldingRange> {
+    let mut ranges = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if t.value == "{" {
+            stack.push(i);
+        } else if t.value == "}" {
+            if let Some(open) = stack.pop() {
+                let open_tok = &tokens[open];
+                let start_line = (open_tok.line as u32).saturating_sub(1);
+                let end_line = (t.line as u32).saturating_sub(1);
+                if end_line > start_line {
+                    ranges.push(FoldingRange {
+                        start_line,
+                        start_character: Some(open_tok.col as u32),
+                        end_line,
+                        end_character: Some(t.col as u32),
+                        kind: None,
+                        collapsed_text: Some("…".to_string()),
+                    });
+                }
+            }
+        }
+        i += 1;
+    }
+    ranges
+}
+
+/// Best-effort inference of a simple expression's type, starting at
+/// `start_idx` of `tokens`. Returns a string type or `None`.
+fn infer_expr_type(
+    tokens: &[Token],
+    mut idx: usize,
+    state: &DocState,
+) -> Option<String> {
+    // Skip a leading reference/unary operator.
+    while idx < tokens.len() {
+        if let TokenType::Operator = tokens[idx].r#type {
+            if matches!(tokens[idx].value.as_str(), "&" | "!" | "*") {
+                idx += 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    let t = tokens.get(idx)?;
+    match t.r#type {
+        TokenType::String | TokenType::FormatString => return Some("str".to_string()),
+        TokenType::Number => return Some("int".to_string()),
+        _ => {}
+    }
+    match t.value.as_str() {
+        "true" | "false" => return Some("bool".to_string()),
+        "null" | "none" => return Some("null".to_string()),
+        "self" => return Some("self".to_string()),
+        _ => {}
+    }
+    if t.r#type == TokenType::Identifier {
+        let next = tokens.get(idx + 1).map(|n| n.value.as_str());
+        if next == Some("(") {
+            // Constructor / call `Type(...)` or `f(...)`.
+            return Some(t.value.clone());
+        }
+        if let Some(sym) = state.find_definition(&t.value) {
+            return sym.type_info.clone();
+        }
+        if t.value.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+            return Some(t.value.clone());
+        }
+        return None;
+    }
+    None
+}
+
+/// Whether the `(` following the identifier at `ident_idx` is a *declaration*
+/// parameter list rather than a call. This distinguishes `func add(a: int)`
+/// (a declaration — no call argument hints) from `add(x, 1)` (a real call).
+fn is_declaration_call_paren(tokens: &[Token], ident_idx: usize) -> bool {
+    let prev1 = tokens.get(ident_idx.wrapping_sub(1)).map(|x| x.value.as_str());
+    let prev2 = ident_idx >= 2
+        && tokens.get(ident_idx - 2).map(|x| x.value.as_str()) == Some("func");
+    matches!(
+        prev1,
+        Some("func") | Some("static") | Some("constructor") | Some("operator")
+    ) || prev2
+}
+
+/// Build per-argument inlay hints ("name:") for a call at `ident_idx`.
+/// Returns hints placed just before each top-level argument.
+fn argument_position_hints(
+    tokens: &[Token],
+    ident_idx: usize,
+    sig: &FuncSignature,
+) -> Vec<InlayHint> {
+    let mut hints = Vec::new();
+    let mut j = ident_idx + 1;
+    while j < tokens.len() && tokens[j].value != "(" {
+        j += 1;
+    }
+    if j >= tokens.len() {
+        return hints;
+    }
+    let mut depth = 0i32;
+    let mut param_idx = 0usize;
+    j += 1; // into args
+    while j < tokens.len() {
+        let t = &tokens[j];
+        if t.value == "(" || t.value == "[" {
+            depth += 1;
+            j += 1;
+            continue;
+        }
+        if t.value == ")" || t.value == "]" {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+            j += 1;
+            continue;
+        }
+        if depth == 0 {
+            // Skip punctuation (commas) and non-expression starts (operators).
+            if t.value == "," {
+                // next argument begins after comma
+            } else if t.value == ":" || t.value == "::" {
+                // labeled argument `name: expr` — skip
+            } else if !is_punctuation(&t.value) {
+                if let Some(pname) = sig.param_names.get(param_idx) {
+                    hints.push(mk_inlay_hint(
+                        Position::new(
+                            (t.line as u32).saturating_sub(1),
+                            t.col.max(0) as u32,
+                        ),
+                        InlayHintLabel::String(format!("{}:", pname)),
+                        InlayHintKind::PARAMETER,
+                    ));
+                }
+                param_idx += 1;
+            }
+        }
+        // Skip to end of current argument expression: stop at top-level comma/close.
+        if depth == 0 {
+            let is_arg_end = t.value == ","
+                || t.value == ")";
+            if is_arg_end {
+                j += 1;
+                continue;
+            }
+        }
+        j += 1;
+    }
+    hints
+}
+
+fn is_punctuation(v: &str) -> bool {
+    matches!(v, "(" | ")" | "[" | "]" | "," | ":" | "::" | "." | ";" | "{ " | "}")
+}
+
+/// Insert an `import <module>;` (or `from <module> import <name>;`) statement
+/// at the top of the file if not already present.
+fn build_import_action(uri: &url::Url, module: &str, state: &DocState) -> CodeAction {
+    if state
+        .symbols
+        .iter()
+        .any(|s| s.kind == SymKind::Import && s.name == module)
+    {
+        // Already imported; still offer for safety but title reflects nothing to do.
+    }
+    let text = format!("import {};\n", module);
+    let edit = TextEdit {
+        range: Range::new(insert_import_position(&state.source), insert_import_position(&state.source)),
+        new_text: text,
+    };
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    CodeAction {
+        title: format!("Import `{}`", module),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn build_import_from_action(
+    uri: &url::Url,
+    module: &str,
+    name: &str,
+    state: &DocState,
+) -> CodeAction {
+    let text = format!("from {} import {};\n", module, name);
+    let edit = TextEdit {
+        range: Range::new(insert_import_position(&state.source), insert_import_position(&state.source)),
+        new_text: text,
+    };
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    CodeAction {
+        title: format!("Import `{}` from `{}`", name, module),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn insert_import_position(source: &str) -> Position {
+    // Insert at line 0; safe for typical .gbl files (assuming no shebang line
+    // that must stay first). Could be refined to skip leading doc comments.
+    let _ = source;
+    Position::new(0, 0)
+}
+
 // ==================== Lib Paths ====================
 
 /// Build library search paths.
@@ -1292,12 +2128,14 @@ fn analyze_document(
 
     // 3. Build symbol index
     let symbols = build_symbol_index(&tokens, source);
+    let signatures = collect_signatures(&tokens, source);
 
     DocState {
         source: source.to_string(),
         tokens,
         symbols,
         errors,
+        signatures,
     }
 }
 
@@ -1524,6 +2362,23 @@ impl LanguageServer for GobolLsp {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: Some(vec![",".to_string()]),
+                    ..Default::default()
+                }),
+                rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(
+                    CodeActionProviderCapability::Options(CodeActionOptions {
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::REFACTOR,
+                        ]),
+                        ..Default::default()
+                    }),
+                ),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
                     trigger_characters: Some(vec![
@@ -1906,6 +2761,166 @@ impl LanguageServer for GobolLsp {
         ))
     }
 
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let pos = params.text_document_position_params.position;
+
+        let Some(state) = self.documents.read().await.get(&uri).cloned() else {
+            return Ok(None);
+        };
+
+        // Find the call the cursor is inside and the active parameter index.
+        let Some((callee, active_param)) =
+            call_at(&state.tokens, pos.line, pos.character)
+        else {
+            return Ok(None);
+        };
+
+        let sig = self.signature_for_name(&uri, &callee, &state).await;
+        Ok(sig.map(|s| signature_help_for(&s, active_param)))
+    }
+
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri.to_string();
+        let Some(state) = self.documents.read().await.get(&uri).cloned() else {
+            return Ok(None);
+        };
+        Ok(Some(self.inlay_hints_for(&uri, &state, params.range)))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri.to_string();
+        let Some(state) = self.documents.read().await.get(&uri).cloned() else {
+            return Ok(None);
+        };
+        let token = match state.token_at(params.position.line, params.position.character) {
+            Some(t) if t.r#type == TokenType::Identifier => t,
+            _ => return Ok(None),
+        };
+        let range = token_to_range(token);
+        Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+            range,
+            placeholder: token.value.clone(),
+        }))
+    }
+
+    async fn rename(
+        &self,
+        params: RenameParams,
+    ) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let pos = params.text_document_position.position;
+        let new_name = &params.new_name;
+
+        let Some(state) = self.documents.read().await.get(&uri).cloned() else {
+            return Ok(None);
+        };
+        let token = match state.token_at(pos.line, pos.character) {
+            Some(t) if t.r#type == TokenType::Identifier => t,
+            _ => return Ok(None),
+        };
+        let old = token.value.clone();
+
+        let mut changes: std::collections::HashMap<url::Url, Vec<TextEdit>> =
+            std::collections::HashMap::new();
+
+        // 1. All occurrences in this document.
+        let doc_uri = params.text_document_position.text_document.uri.clone();
+        let mut edits = Vec::new();
+        for t in &state.tokens {
+            if t.r#type == TokenType::Identifier && t.value == old {
+                edits.push(TextEdit {
+                    range: token_to_range(t),
+                    new_text: new_name.clone(),
+                });
+            }
+        }
+        if !edits.is_empty() {
+            changes.insert(doc_uri, edits);
+        }
+
+        // 2. If the rename target resolves to an imported module, apply the
+        // rename at the definition site there too (cross-file import rename).
+        if let Some((_name, _module, _k, _ty, file_uri, line, col, _doc)) = self
+            .resolve_imported_symbol(&uri, &old)
+            .await
+        {
+            let range = Range::new(
+                Position::new((line as u32).saturating_sub(1), col as u32),
+                Position::new(
+                    (line as u32).saturating_sub(1),
+                    col as u32 + old.len() as u32,
+                ),
+            );
+            let entry = changes.entry(file_uri).or_default();
+            entry.push(TextEdit {
+                range,
+                new_text: new_name.clone(),
+            });
+        }
+
+        if changes.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }))
+        }
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri.to_string();
+        let range = params.range;
+        let Some(state) = self.documents.read().await.get(&uri).cloned() else {
+            return Ok(None);
+        };
+        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
+
+        // Detect an unresolved qualified name directly under the cursor, e.g.
+        // `io::println(...)` where `io` is not imported.
+        if let Some(action) = self
+            .code_action_resolve_qualified(&uri, &state, range)
+        {
+            actions.push(CodeActionOrCommand::CodeAction(action));
+        }
+
+        // Detect an unresolved bare function call, e.g. `greet(...)` where
+        // `greet` exists in a module but is not imported.
+        if let Some(action) = self.code_action_import_bare(&uri, &state).await {
+            actions.push(CodeActionOrCommand::CodeAction(action));
+        }
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
+    }
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = params.text_document.uri.to_string();
+        let Some(state) = self.documents.read().await.get(&uri).cloned() else {
+            return Ok(None);
+        };
+        Ok(Some(brace_folding_ranges(&state.tokens)))
+    }
+
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.to_string();
         let pos = params.text_document_position.position;
@@ -1976,11 +2991,30 @@ impl LanguageServer for GobolLsp {
             }
         }
 
-        // Add symbols from the document
+        // Add symbols from the document. Globals (functions/types/traits/
+        // imports/enum variants) are offered regardless of position; local
+        // variables & parameters are offered only when visible in the current
+        // scope (declared earlier at the same-or-outer brace level — a
+        // rust-analyzer style scope-aware completion).
         {
             let state_guard = self.documents.read().await;
             if let Some(state) = state_guard.get(&uri) {
+                let locals = state.visible_locals(pos.line, pos.character);
+                // Emit visible locals first (they are the most contextually
+                // relevant), then the globals.
+                let mut ordered: Vec<&SymbolEntry> = Vec::new();
+                let mut global: Vec<&SymbolEntry> = Vec::new();
                 for sym in &state.symbols {
+                    if matches!(sym.kind, SymKind::Variable | SymKind::Parameter) {
+                        // locals handled via visible_locals
+                        continue;
+                    }
+                    global.push(sym);
+                }
+                ordered.extend(locals.iter());
+                ordered.extend(global);
+
+                for sym in ordered {
                     if !seen_labels.insert(sym.name.clone()) {
                         continue;
                     }
@@ -2008,43 +3042,11 @@ impl LanguageServer for GobolLsp {
             }
         }
 
-        // Cross-file: surface functions / types defined in modules that this
-        // document imports (`import lib;` / `from lib import ...;`).  This lets
-        // the user type a bare `greet` after `import lib;` and get completion
-        // for lib's `greet`, even though the definition lives in another file.
-        {
-            let state_guard = self.documents.read().await;
-            let imports: Vec<String> = state_guard
-                .get(&uri)
-                .map(|state| {
-                    state
-                        .symbols
-                        .iter()
-                        .filter(|s| s.kind == SymKind::Import)
-                        .map(|s| s.name.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            for module in imports {
-                for (name, kind_label, ty) in self.index_imported_module(&uri, &module) {
-                    if !seen_labels.insert(name.clone()) {
-                        continue;
-                    }
-                    let detail = if let Some(t) = ty {
-                        format!("{}::{} → {}", module, name, t)
-                    } else {
-                        format!("{}::{} ({})", module, name, kind_label)
-                    };
-                    items.push(CompletionItem {
-                        label: name.clone(),
-                        kind: Some(CompletionItemKind::FUNCTION),
-                        detail: Some(detail),
-                        sort_text: Some(format!("1_{}", name)),
-                        ..Default::default()
-                    });
-                }
-            }
-        }
+        // Module members are NOT offered as bare names: since the compiler
+        // enforces module scoping (`import mylib` does not let you call bare
+        // `add()` — only `mylib::add()`), the editor must not suggest them
+        // either. Members appear as completions only after `module::` via
+        // `complete_qualified`.
 
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -2174,6 +3176,252 @@ struct CrossFileHighlightForFile {
 }
 
 impl GobolLsp {
+    /// Resolve a callable's signature for `name`, preferring a local
+    /// declaration and falling back to an imported module definition.
+    async fn signature_for_name(
+        &self,
+        uri: &str,
+        name: &str,
+        state: &DocState,
+    ) -> Option<FuncSignature> {
+        if let Some(sig) = state.signatures.get(name) {
+            return Some(sig.clone());
+        }
+        // Cross-file: search the modules the document imports.
+        let modules = self.imported_module_names(uri).await;
+        for module in &modules {
+            if let Some(sig) = self.imported_signature(uri, module, name) {
+                return Some(sig);
+            }
+        }
+        None
+    }
+
+    /// Parse the signature of `name` from an imported module's source file.
+    fn imported_signature(&self, uri: &str, module: &str, name: &str) -> Option<FuncSignature> {
+        let file_path = uri_to_path(uri);
+        let roots = self
+            .workspace_roots
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let lib_paths = build_lib_paths(&file_path, &roots);
+        let file_name = module.split("::").last().unwrap_or(module);
+
+        for lib_path in &lib_paths {
+            for mod_path in [
+                PathBuf::from(lib_path).join(format!("{}.gbl", file_name)),
+                PathBuf::from(lib_path).join(file_name).join("mod.gbl"),
+            ] {
+                if mod_path.exists() {
+                    if let Ok(source) = std::fs::read_to_string(&mod_path) {
+                        let mut lexer = Lexer::new(&source);
+                        let mut toks = Vec::new();
+                        loop {
+                            let t = lexer.get_next_token();
+                            if t.r#type == TokenType::EndOfFile {
+                                break;
+                            }
+                            toks.push(t);
+                        }
+                        let sigs = collect_signatures(&toks, &source);
+                        if let Some(sig) = sigs.get(name) {
+                            return Some(sig.clone());
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// Compute inlay hints for a range: type hints after `var x =`, parameter
+    /// name hints in call arguments, and return-type hints for `func f() { e }`
+    /// single-expression bodies.
+    fn inlay_hints_for(
+        &self,
+        uri: &str,
+        state: &DocState,
+        range: Range,
+    ) -> Vec<InlayHint> {
+        let tokens = &state.tokens;
+        let mut hints = Vec::new();
+        let start_line = range.start.line;
+        let end_line = range.end.line;
+
+        let mut i = 0;
+        while i < tokens.len() {
+            let t = &tokens[i];
+            if (t.line as u32).saturating_sub(1) < start_line
+                || (t.line as u32).saturating_sub(1) > end_line
+            {
+                i += 1;
+                continue;
+            }
+
+            // `var name = expr` → type hint after `name`.
+            if t.r#type == TokenType::Keyword && (t.value == "var" || t.value == "val") {
+                if let Some(name_tok) = tokens.get(i + 1) {
+                    if name_tok.r#type == TokenType::Identifier {
+                        if let Some(eq) = tokens.get(i + 2) {
+                            if eq.value == "=" {
+                                // skip explicit type `var x: T =`
+                                let has_explicit = self.var_has_explicit_type(tokens, i);
+                                if !has_explicit {
+                                    if let Some(ty) = infer_expr_type(tokens, i + 3, state) {
+                                        hints.push(mk_inlay_hint(
+                                            Position::new(
+                                                (name_tok.line as u32).saturating_sub(1),
+                                                (name_tok.col as u32) + name_tok.value.len() as u32,
+                                            ),
+                                            InlayHintLabel::String(format!(": {}", ty)),
+                                            InlayHintKind::TYPE,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Call argument: `callee(arg, ...)` → parameter name hints.
+            // Skip when this identifier is a *declaration* name (function /
+            // method / constructor), whose `(` is a parameter list, not a call
+            // — otherwise `func add(a: int)` would wrongly get `a:`/`b:`
+            // parameter inlay hints.
+            if t.r#type == TokenType::Identifier {
+                let after = tokens.get(i + 1).map(|x| x.value.clone());
+                if after.as_deref() == Some("(") && !is_declaration_call_paren(tokens, i) {
+                    if let Some(sig) = self.signature_at_index(uri, state, i) {
+                        let arg_edits = argument_position_hints(tokens, i, &sig);
+                        hints.extend(arg_edits);
+                    }
+                }
+            }
+
+            i += 1;
+        }
+        hints
+    }
+
+    fn var_has_explicit_type(&self, tokens: &[Token], var_idx: usize) -> bool {
+        if let Some(colon) = tokens.get(var_idx + 2) {
+            return colon.value == ":";
+        }
+        false
+    }
+
+    fn signature_at_index(&self, uri: &str, state: &DocState, ident_idx: usize) -> Option<FuncSignature> {
+        let t = &state.tokens[ident_idx];
+        self.signature_for_name_blocking(uri, &t.value, state)
+    }
+
+    fn code_action_resolve_qualified(
+        &self,
+        uri: &str,
+        state: &DocState,
+        range: Range,
+    ) -> Option<CodeAction> {
+        let tokens = &state.tokens;
+        let line = range.start.line;
+        let col = range.start.character as i32;
+        let target_line = (line as i32) + 1;
+
+        // Look for the identifier at/near the cursor that is immediately
+        // followed by `::` (a module qualifier) and not already imported.
+        for i in 0..tokens.len() {
+            let t = &tokens[i];
+            if t.line != target_line {
+                continue;
+            }
+            if t.r#type != TokenType::Identifier {
+                continue;
+            }
+            let is_on_range = col >= t.col && col <= t.col + t.value.len() as i32;
+            if !is_on_range {
+                continue;
+            }
+            let qualifier = t.value.clone();
+            if state.module_imported(&qualifier).is_some() {
+                continue;
+            }
+            // Must be immediately followed by `::`.
+            let next = tokens.get(i + 1);
+            if !(next.map(|n| n.value.as_str() == "::").unwrap_or(false)) {
+                continue;
+            }
+            // Provide "import <qualifier>;" action.
+            let uri_u = url::Url::parse(&format!("file://{}", uri_to_path(uri)))
+                .unwrap_or_else(|_| path_to_uri(uri));
+            return Some(build_import_action(&uri_u, &qualifier, state));
+        }
+        None
+    }
+
+    async fn code_action_import_bare(
+        &self,
+        uri: &str,
+        state: &DocState,
+    ) -> Option<CodeAction> {
+        // Find a bare call `name(` whose `name` is not defined locally or
+        // imported, but is exported by a resolvable module.
+        let tokens = &state.tokens;
+        for i in 0..tokens.len() {
+            let t = &tokens[i];
+            if t.r#type != TokenType::Identifier {
+                continue;
+            }
+            let is_call = tokens
+                .get(i + 1)
+                .map(|n| n.value.as_str() == "(")
+                .unwrap_or(false);
+            if !is_call {
+                continue;
+            }
+            let name = t.value.clone();
+            if state.find_definition(&name).is_some() || state.module_imported(&name).is_some() {
+                continue;
+            }
+            // Is it exported by some importable module?
+            let modules = self.imported_module_names(uri).await;
+            for module in &modules {
+                let defs = self.index_imported_module_detailed(uri, module);
+                if defs.iter().any(|d| d.0 == name) {
+                    let uri_u = url::Url::parse(&format!("file://{}", uri_to_path(uri)))
+                        .unwrap_or_else(|_| path_to_uri(uri));
+                    return Some(build_import_from_action(&uri_u, &module, &name, state));
+                }
+            }
+        }
+        None
+    }
+
+    // Blocking wrapper used inside non-async scanning when locking the doc is
+    // already held (we clone the state so no lock is needed here).
+    fn signature_for_name_blocking(
+        &self,
+        uri: &str,
+        name: &str,
+        state: &DocState,
+    ) -> Option<FuncSignature> {
+        if let Some(sig) = state.signatures.get(name) {
+            return Some(sig.clone());
+        }
+        // Imported modules: use imported_module_names but we need sync — clone
+        // isn't async here; reuse imported_module_names_async via block_on not
+        // available. Instead scan symbols for Import names directly.
+        for sym in &state.symbols {
+            if sym.kind == SymKind::Import {
+                if let Some(sig) = self.imported_signature(uri, &sym.name, name) {
+                    return Some(sig);
+                }
+            }
+        }
+        None
+    }
+
     /// Resolve a module name (e.g. `lib` in `import lib;` / `from lib import`)
     /// to the source *file* of that module so Ctrl+Click jumps into it.
     /// Returns `None` if no module file can be located.
@@ -2350,9 +3598,35 @@ impl GobolLsp {
         qualifier: &str,
     ) -> Result<Option<CompletionResponse>> {
         let mut items: Vec<CompletionItem> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // `std::...` → complete the standard sub-modules (io, math, fs, …).
+        // Since export() was removed from std/mod.gbl, sub-modules are addressed
+        // via `std::<name>`, and typing `std::` should surface them.
+        if qualifier == "std" {
+            let std_modules = self.list_std_modules(uri);
+            for (name, _) in &std_modules {
+                if name == "mod" || name == "builtins" {
+                    continue;
+                }
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("std module".to_string()),
+                    sort_text: Some(format!("0_{}", name)),
+                    ..Default::default()
+                });
+            }
+        }
 
         let module_symbols = self.index_imported_module(uri, qualifier);
         for (name, kind_label, ty) in &module_symbols {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
             let detail = if let Some(t) = ty {
                 format!("{}::{} → {}", qualifier, name, t)
             } else {
@@ -2372,7 +3646,7 @@ impl GobolLsp {
             if let Some(state) = state_guard.get(uri) {
                 for sym in &state.symbols {
                     if let Some(ref parent) = sym.parent {
-                        if parent == qualifier {
+                        if parent == qualifier && seen.insert(sym.name.clone()) {
                             let detail = if let Some(ref ty) = sym.type_info {
                                 format!("{}::{} → {}", parent, sym.name, ty)
                             } else {
@@ -2396,6 +3670,11 @@ impl GobolLsp {
             Ok(Some(CompletionResponse::Array(items)))
         }
     }
+
+    /// List the standard sub-modules available under `std::`. This scans the
+    /// std library directories for `<name>.gbl` files. It reuses the module
+    /// discovery of `list_std_modules`, so each call recomputes lib paths from
+    /// the current document.
 
     fn list_std_modules(&self, uri: &str) -> Vec<(String, String)> {
         let mut result = Vec::new();
@@ -2591,6 +3870,8 @@ impl GobolLsp {
         None
     }
 
+    /// Re-analyse a document: run the (relatively fast) semantic analysis and
+    /// replace the stored document state + republish diagnostics.
     async fn reanalyze(&self, uri: &str, text: &str) {
         let uri_owned = uri.to_string();
         let text_owned = text.to_string();
@@ -2609,19 +3890,23 @@ impl GobolLsp {
             tokens: Vec::new(),
             symbols: Vec::new(),
             errors: vec![(0, 0, "Internal error: analysis panicked".to_string())],
+            signatures: std::collections::HashMap::new(),
         });
 
         let diagnostics: Vec<Diagnostic> = state
             .errors
             .iter()
-            .map(|(line, col, msg)| error_to_diagnostic(&state.source, &state.tokens, *line, *col, msg))
+            .map(|(line, col, msg)| {
+                error_to_diagnostic(&state.source, &state.tokens, *line, *col, msg)
+            })
             .collect();
 
-        // Atomically replace the document state — use write lock to ensure
-        // exclusive access and proper replacement of old symbols.
+        // Atomically replace the document state.
         let mut documents = self.documents.write().await;
         documents.insert(uri_owned.clone(), state);
+        drop(documents);
 
+        // Publish diagnostics without blocking the notification handler.
         if let Ok(url) = url::Url::parse(uri) {
             self.client
                 .publish_diagnostics(url, diagnostics, None)
@@ -2945,5 +4230,284 @@ fib(10) == 55
         let first = &data[0];
         assert_eq!(first.delta_line, 0);
         assert_eq!(first.delta_start, 0);
+    }
+}
+
+#[cfg(test)]
+mod unit_new {
+    use super::*;
+
+    fn lex(s: &str) -> Vec<Token> {
+        let mut l = Lexer::new(s);
+        let mut v = Vec::new();
+        loop {
+            let t = l.get_next_token();
+            if t.r#type == TokenType::EndOfFile { break; }
+            v.push(t);
+        }
+        v
+    }
+
+    #[test]
+    fn format_interpolation_parses_bindings() {
+        let v = format_interpolation_spans("value: {x}");
+        assert_eq!(v, vec![(8, "x".to_string())]);
+        // escaped braces are not bindings
+        let v2 = format_interpolation_spans("{{literal}} and {y}");
+        assert_eq!(v2, vec![(17, "y".to_string())]);
+        // format spec suffix still resolves to the binding name
+        let v3 = format_interpolation_spans("{n:04} and {p.x}");
+        assert_eq!(v3.len(), 2);
+        assert_eq!(v3[0], (1, "n".to_string()));
+        assert_eq!(v3[1], (12, "p".to_string()));
+    }
+
+    #[test]
+    fn string_escape_segments() {
+        // `\n` split into literal "hi" + "world".
+        let segs = string_literal_segments("hi\\nworld", false);
+        assert_eq!(segs, vec![(0usize, 2usize), (4usize, 5usize)], "got {:?}", segs);
+        // No escapes → single full segment.
+        let segs2 = string_literal_segments("plain", false);
+        assert_eq!(segs2, vec![(0usize, 5usize)]);
+        // Escape at start/end handled.
+        let segs3 = string_literal_segments("\\t x", false);
+        assert_eq!(segs3, vec![(2usize, 2usize)]);
+        // Format string: interpolation braces excluded, escapes too.
+        let segs4 = string_literal_segments("a {name} b", true);
+        // literal "a " (0-2) then " b" (after the {name} block ends at 8)
+        assert_eq!(segs4, vec![(0usize, 2usize), (8usize, 2usize)], "got {:?}", segs4);
+    }
+
+    #[test]
+    fn semantic_string_skips_escape_span() {
+        // `"hi\nworld"` — the `\n` (content offset 2..4) must NOT get a string
+        // semantic token, so the client's TextMate escape render shows through.
+        let source = "var s: str = \"hi\\nworld\";\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let data = build_semantic_tokens(&tokens, &symbols);
+
+        let mut line = 0; let mut col = 0;
+        let mut spans: Vec<(u32, u32, u32)> = Vec::new();
+        for st in data {
+            line += st.delta_line;
+            if st.delta_line == 0 { col += st.delta_start; } else { col = st.delta_start; }
+            spans.push((line, col, st.length));
+        }
+        // Only string tokens on line 1; none should cover the `\n` columns.
+        // source: var s: str = "hi\nworld";  -> string content base col = after opening quote.
+        // Opening quote col = 13 (count it below); content base = 14.
+        // Assert: no string token spans across the escape (content offsets 2..4 → cols 16..18).
+        let line1: Vec<_> = spans.iter().filter(|(l, _, _)| *l == 1).collect();
+        for (_, c, len) in &line1 {
+            let lo = *c;
+            let hi = lo + *len;
+            // escape occupies content cols 16..18 (hi=14,15; \n=16,17; world=18..)
+            assert!(
+                !(lo < 18 && hi > 16),
+                "a string token spans the escape region {}-{}: {:?}",
+                lo, hi, line1
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_format_string_marks_interpolation_variable() {
+        // `@"hello {name}"` with a local var `name` → interpolation is TYPE
+        // (declared variable) vs a plain undeclared `zzz` → VARIABLE.
+        let source = "var name: str = \"\";\nvar s: str = @\"hi {name} {zzz}\";\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let data = build_semantic_tokens(&tokens, &symbols);
+
+        // Decode to (line, col, typename).
+        let mut line = 0; let mut col = 0;
+        let mut out = Vec::new();
+        for st in data {
+            line += st.delta_line;
+            if st.delta_line == 0 { col += st.delta_start; } else { col = st.delta_start; }
+            out.push((line, col, SEMANTIC_TYPES[st.token_type as usize].as_str().to_string()));
+        }
+        // line2: `var s: str = @"hi {name} {zzz}";`
+        // name at content base col=?? content_base = @ col + 2. Find `name` token (TYPE).
+        // Both name(declared) and zzz(undeclared) should appear; assert presence + types.
+        let declared = out.iter().any(|(l, _c, t)| *l == 1 && t == "type");
+        assert!(declared, "expected a `type` token on interpolation of a declared var; got {:?}", out);
+        let has_var = out.iter().any(|(l, _, t)| *l == 1 && t == "variable");
+        assert!(has_var, "expected a `variable` token for undeclared interpolation; got {:?}", out);
+    }
+
+    #[test]
+    fn collect_signatures_basic() {
+        let toks = lex("func add(a: int, b: str): bool {\n    true\n}\n");
+        let sigs = collect_signatures(&toks, "");
+        let s = sigs.get("add").expect("add");
+        assert_eq!(s.param_names, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(s.param_types[0].as_deref(), Some("int"));
+        assert_eq!(s.param_types[1].as_deref(), Some("str"));
+        assert_eq!(s.return_type.as_deref(), Some("bool"));
+    }
+
+    #[test]
+    fn collect_signatures_static_and_no_parens() {
+        let toks = lex("static func make(): Point {\n    Point(0,0)\n}\n");
+        let sigs = collect_signatures(&toks, "");
+        assert!(sigs.contains_key("make"));
+        assert_eq!(sigs["make"].return_type.as_deref(), Some("Point"));
+    }
+
+    #[test]
+    fn call_at_basic() {
+        let toks = lex("foo(1, 2)");
+        // cursor inside second arg (after comma)
+        let (name, active) = call_at(&toks, 0, 6).expect("call_at should find the call");
+        assert_eq!(name, "foo");
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn call_at_qualified() {
+        let toks = lex("calc::double(2)");
+        // cursor inside the single argument `2` (after '(' at col 12)
+        let (name, active) = call_at(&toks, 0, 14).unwrap();
+        assert_eq!(name, "double");
+        assert_eq!(active, 0);
+    }
+
+    #[test]
+    fn signature_help_response_shape() {
+        let sig = FuncSignature {
+            name: "f".into(),
+            param_names: vec!["a".into(), "b".into()],
+            param_types: vec![Some("int".into()), Some("str".into())],
+            param_labels: vec!["a: int".into(), "b: str".into()],
+            return_type: Some("bool".into()),
+            doc: Some("doc".into()),
+        };
+        let h = signature_help_for(&sig, 1);
+        assert_eq!(h.signatures[0].label, "f(a: int, b: str): bool");
+        assert_eq!(h.active_parameter, Some(1));
+        assert_eq!(h.signatures[0].parameters.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn brace_folding_multi_line() {
+        let toks = lex("func f() {\n    x\n}\n");
+        let r = brace_folding_ranges(&toks);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].start_line, 0);
+        assert_eq!(r[0].end_line, 2);
+    }
+
+    #[test]
+    fn brace_folding_single_line_skipped() {
+        let toks = lex("func f() { x }\n");
+        let r = brace_folding_ranges(&toks);
+        assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn import_action_inserts_import() {
+        let uri = url::Url::parse("file:///tmp/x.gbl").unwrap();
+        let state = DocState { source: "func main() {}\n".into(), tokens: vec![], symbols: vec![], errors: vec![], signatures: Default::default() };
+        let a = build_import_action(&uri, "io", &state);
+        assert!(a.title.contains("io"));
+        assert!(a.edit.is_some());
+    }
+
+    #[test]
+    fn scope_local_visibility() {
+        let src = "func main() {\n    var a = 1;\n    if true {\n        var b = 2;\n    }\n    var c = a + b;\n}\n";
+        let toks = lex(src);
+        let syms = build_symbol_index(&toks, src);
+        let state = DocState { source: src.into(), tokens: toks, symbols: syms, errors: vec![], signatures: Default::default() };
+
+        // Inside `if` block after `var b`, both a (outer) and b visible.
+        let in_block = state.visible_locals(3, 16);
+        let names: Vec<&str> = in_block.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"a"), "outer `a` should be visible in inner block: {:?}", names);
+        assert!(names.contains(&"b"), "inner `b` should be visible: {:?}", names);
+
+        // On line 5 (`var c = a + b;`) after the if-block, `b` is NOT visible
+        // (declared in a sibling inner block), while `a` still is.
+        let after_block = state.visible_locals(5, 5);
+        let names2: Vec<&str> = after_block.iter().map(|s| s.name.as_str()).collect();
+        assert!(names2.contains(&"a"), "`a` visible after block: {:?}", names2);
+        assert!(!names2.contains(&"b"), "`b` should not be visible after inner block: {:?}", names2);
+    }
+
+    #[test]
+    fn declaration_vs_call_paren() {
+        // `func add(a: int, b: int)` → add's `(` is a declaration param list.
+        let decl = lex("func add(a: int, b: int): int { 0 }");
+        // token index of `add` is 1 (func=0, add=1)
+        assert!(is_declaration_call_paren(&decl, 1), "func decl name should be decl-paren");
+
+        // static func make() → decl
+        let sdecl = lex("static func make(): Point { Point(0) }");
+        // static=0 func=1 make=2
+        assert!(is_declaration_call_paren(&sdecl, 2), "static func name should be decl-paren");
+
+        // Real call `add(x, 1)` → NOT decl
+        let call = lex("add(x, 1)");
+        assert!(!is_declaration_call_paren(&call, 0), "call should not be decl-paren");
+    }
+
+    #[test]
+    fn argument_position_hints_labels_call_args() {
+        // `func add(a: int, b: int): int` signature, then a call `add(x, y)`.
+        let src_tok = lex("add(x, y)");
+        let mut sig = FuncSignature::default();
+        sig.name = "add".into();
+        sig.param_names = vec!["a".into(), "b".into()];
+        sig.param_types = vec![Some("int".into()), Some("int".into())];
+        sig.param_labels = vec!["a: int".into(), "b: int".into()];
+        let hints = argument_position_hints(&src_tok, 0, &sig);
+        // Two hints: `a:` before x, `b:` before y.
+        assert_eq!(hints.len(), 2, "expected 2 param hints, got {:?}", hints);
+        match &hints[0].label {
+            InlayHintLabel::String(s) => assert_eq!(s, "a:"),
+            _ => panic!("expected a: label"),
+        }
+        match &hints[1].label {
+            InlayHintLabel::String(s) => assert_eq!(s, "b:"),
+            _ => panic!("expected b: label"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod e2e_doc {
+    use super::*;
+    fn lexall(s: &str) -> Vec<Token> {
+        let mut l = Lexer::new(s);
+        let mut v=Vec::new();
+        loop { let t=l.get_next_token(); if t.r#type==TokenType::EndOfFile { break; } v.push(t); }
+        v
+    }
+    #[test]
+    fn analyze_and_signature_query() {
+        let src = "func add(a: int, b: int): int { a + b }\nfunc main(): int { add(1, 2) }\n";
+        let doc = analyze_document("file:///tmp/simple.gbl", src, &[]);
+        assert!(!doc.tokens.is_empty());
+        assert!(!doc.signatures.is_empty(), "signatures empty");
+        assert!(doc.signatures.contains_key("add"));
+        // call_at inside add(1,2) on line 1 (0-based): cursor in `2` (col 26)
+        let toks = doc.tokens.clone();
+        let (callee, active) = call_at(&toks, 1, 26).expect("call_at in main");
+        assert_eq!(callee, "add");
+        assert_eq!(active, 1);
+        // signature_help shape
+        let sig = &doc.signatures["add"];
+        let h = signature_help_for(sig, active);
+        assert_eq!(h.signatures[0].label, "add(a: int, b: int): int");
+        assert_eq!(h.active_parameter, Some(1));
+        // inlay type hints for `var x = 10` style
+        let var_src = "func f() {\n    var x = 10;\n}\n";
+        let doc2 = analyze_document("file:///tmp/var.gbl", var_src, &[]);
+        // infer call expr type = int
+        let toks2 = lexall("var x = 10;");
+        assert_eq!(infer_expr_type(&toks2, 3, &doc2).as_deref(), Some("int")); // index3 is `10`
     }
 }

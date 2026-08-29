@@ -32,5 +32,5 @@ func main() {
     var b = Multi::new(7);
     var c = a + b;          // 3 + 7 = 10 (via trait impl)
     var d = c.double();     // 10 * 2 = 20 (via method in second impl)
-    io::println("multiple impl blocks ok");
+    std::io::println("multiple impl blocks ok");
 }

@@ -2,5 +2,5 @@
 import std;
 
 func main() {
-    io::println("Hello from :: namespace path");
+    std::io::println("Hello from :: namespace path");
 }

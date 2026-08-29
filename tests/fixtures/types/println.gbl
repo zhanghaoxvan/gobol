@@ -1,7 +1,7 @@
 import std;
 
 func main() {
-    io::println("This is println!");
-    io::print("This is print without newline");
-    io::print("... with continuation\n");
+    std::io::println("This is println!");
+    std::io::print("This is print without newline");
+    std::io::print("... with continuation\n");
 }

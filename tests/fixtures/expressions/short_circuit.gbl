@@ -4,7 +4,7 @@ import std;
 /// evaluated when needed. Each call prints its tag, so the presence of the
 /// EVAL line reflects whether the right side was evaluated.
 func probe(tag: str): bool {
-    io::println(@"EVAL {tag}");
+    std::io::println(@"EVAL {tag}");
     true
 }
 
@@ -24,10 +24,10 @@ func main() {
     var r4: bool = false || true;
     var r5: bool = false || false;
     var r6: bool = true || false;
-    io::print(@"r1 = {r1}\n");
-    io::print(@"r2 = {r2}\n");
-    io::print(@"r3 = {r3}\n");
-    io::print(@"r4 = {r4}\n");
-    io::print(@"r5 = {r5}\n");
-    io::print(@"r6 = {r6}\n");
+    std::io::print(@"r1 = {r1}\n");
+    std::io::print(@"r2 = {r2}\n");
+    std::io::print(@"r3 = {r3}\n");
+    std::io::print(@"r4 = {r4}\n");
+    std::io::print(@"r5 = {r5}\n");
+    std::io::print(@"r6 = {r6}\n");
 }

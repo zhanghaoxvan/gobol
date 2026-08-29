@@ -436,7 +436,7 @@ impl Type for GenericType {
 // ==================== Program ====================
 
 pub struct Program {
-    statements: Vec<Box<dyn Statement>>,
+    pub statements: Vec<Box<dyn Statement>>,
     /// File-level attributes (`#![attr]`). These propagate to every
     /// top-level statement in the program unless a statement overrides
     /// them with its own `#[attr]`.
@@ -2196,87 +2196,101 @@ pub struct FormatString {
 impl FormatString {
     pub fn new(value: impl Into<String>) -> Self {
         let value: String = value.into();
+
+        // Build the final (escape-processed) string `res` AND record every
+        // interpolation `{var}` position *in `res` itself*, so that
+        // `VariablePosition.pos_in_value` matches the string returned by
+        // `get_value()`. Before this fix, positions were recorded against the
+        // raw source while the value was the escape-processed string; any
+        // multi-char escape (e.g. `\n`) earlier than an interpolation shifted
+        // every `pos_in_value` by one, corrupting the concatenation in
+        // `IRBuilder::visit_format_string` (e.g. `{result}` → `{3esult}`).
+        let mut res = String::new();
         let mut variables = Vec::new();
-        let mut var_name = String::new();
-        let mut in_brace = false;
-        let mut start_pos: i32 = 0;
         let chars: Vec<char> = value.chars().collect();
         let mut i = 0;
         while i < chars.len() {
             let c = chars[i];
-            // `{{` / `}}` — literal brace escape in format strings:
-            // `"Hello {{}}"` ⇒ `"Hello {}"`. These are consumed as a pair
-            // and never open or close a variable interpolation slot.
-            if c == '{' && i + 1 < chars.len() && chars[i + 1] == '{' {
-                i += 2;
-                continue;
-            }
-            if c == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
-                i += 2;
-                continue;
-            }
-            if c == '{' && !in_brace {
-                in_brace = true;
-                var_name.clear();
-                start_pos = i as i32;
-            } else if c == '}' && in_brace {
-                in_brace = false;
-                if !var_name.is_empty() {
-                    let expr = FormatString::parse_value(&var_name);
-                    if let Some(e) = expr {
-                        variables.push(VariablePosition {
-                            pos_in_value: start_pos,
-                            value: Some(e),
-                            attributes: Vec::new(),
-                        });
-                    }
-                }
-            } else if in_brace {
-                var_name.push(c);
-            }
-            i += 1;
-        }
-
-        let mut res = String::new();
-        let chars: Vec<char> = value.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
             // `{{` → `{`, `}}` → `}` (format-string literal brace escape).
-            // Checked *before* the backslash branch so @"{{}}" produces the
-            // final string "Hello {}" even though the braces are doubled.
-            if i + 1 < chars.len() && chars[i] == '{' && chars[i + 1] == '{' {
+            if c == '{' && i + 1 < chars.len() && chars[i + 1] == '{' {
                 res.push('{');
                 i += 2;
                 continue;
             }
-            if i + 1 < chars.len() && chars[i] == '}' && chars[i + 1] == '}' {
+            if c == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
                 res.push('}');
                 i += 2;
                 continue;
             }
-            if chars[i] == '\\' && i + 1 < chars.len() {
+            // Escapes turn multiple physical chars into one output char, so
+            // they keep exactly one slot in `res`. Consume both `\` and its
+            // target (`i += 2`) — consuming only `\` would let the following
+            // `'n'` be appended again as a plain character.
+            if c == '\\' && i + 1 < chars.len() {
                 match chars[i + 1] {
-                    'n' => {
-                        res.push('\n');
+                    'n' => res.push('\n'),
+                    't' => res.push('\t'),
+                    '\\' => res.push('\\'),
+                    '"' => res.push('"'),
+                    // Unknown escape: keep the backslash; the following char is
+                    // handled by the next iteration (matches prior behaviour).
+                    _ => {
+                        res.push(c);
                         i += 1;
+                        continue;
                     }
-                    't' => {
-                        res.push('\t');
-                        i += 1;
-                    }
-                    '\\' => {
-                        res.push('\\');
-                        i += 1;
-                    }
-                    '"' => {
-                        res.push('"');
-                        i += 1;
-                    }
-                    _ => res.push(chars[i]),
                 }
-            } else {
-                res.push(chars[i]);
+                i += 2;
+                continue;
             }
+            if c == '{' {
+                // Open an interpolation slot. Push the brace into `res` first
+                // so `pos_in_value` indexes into `res`.
+                let start = res.len();
+                res.push('{');
+                let mut var_name = String::new();
+                let mut closed = false;
+                i += 1;
+                // Consume until the matching close brace, counting nested
+                // braces so `{(a) + (b)}` works.
+                let mut depth = 1;
+                while i < chars.len() {
+                    let cc = chars[i];
+                    if cc == '{' {
+                        depth += 1;
+                        res.push(cc);
+                        var_name.push(cc);
+                    } else if cc == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            res.push(cc);
+                            closed = true;
+                            i += 1;
+                            break;
+                        }
+                        res.push(cc);
+                        var_name.push(cc);
+                    } else {
+                        res.push(cc);
+                        var_name.push(cc);
+                    }
+                    i += 1;
+                }
+                if closed {
+                    let var_name = var_name.trim();
+                    if !var_name.is_empty() {
+                        if let Some(e) = FormatString::parse_value(var_name) {
+                            variables.push(VariablePosition {
+                                pos_in_value: start as i32,
+                                value: Some(e),
+                                attributes: Vec::new(),
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+            res.push(c);
             i += 1;
         }
 

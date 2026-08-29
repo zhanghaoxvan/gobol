@@ -1,26 +1,24 @@
-import std;
-
 func main() {
     // Simple immediate invocation: no capture
     var a = lambda(x: int): int { x + 1 }(10);
-    std::io::println(@"no capture: {a}");
+    io::println(@"no capture: {a}");
 
     // Capture a var from the enclosing scope
     var base = 100;
     var b = lambda(x: int): int { x + base }(5);
-    std::io::println(@"captured base: {b}");
+    io::println(@"captured base: {b}");
 
     // Capture multiple vars
     var m = 3;
     var n = 7;
     var c = lambda(x: int): int { x * m + n }(2);
-    std::io::println(@"captured m and n: {c}");
+    io::println(@"captured m and n: {c}");
 
     // Lambda with no parameters
     var d = lambda(): int { 42 }();
-    std::io::println(@"no params: {d}");
+    io::println(@"no params: {d}");
 
     // Generic lambda
     var e = lambda<T>(x: int): int { x }(9);
-    std::io::println(@"generic: {e}");
+    io::println(@"generic: {e}");
 }

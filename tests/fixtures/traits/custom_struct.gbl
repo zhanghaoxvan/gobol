@@ -1,7 +1,5 @@
 // Test: custom struct operator overloading via `impl Trait for Type`
 // p1 + p2 is desugared to p1.add(p2) and must return 10
-import std;
-
 struct Num {
     value: int,
 };
@@ -24,5 +22,5 @@ func main() {
     var p1 = Num::new(4);
     var p2 = Num::new(6);
     var r = p1 + p2;       // 4 + 6 = 10
-    std::io::println("p1 + p2 ok");
+    io::println("p1 + p2 ok");
 }

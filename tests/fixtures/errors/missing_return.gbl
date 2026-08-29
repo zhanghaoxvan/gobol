@@ -1,7 +1,5 @@
-import std;
-
 func bad(): int {
-    std::io::println("missing return");
+    io::println("missing return");
     // error: function must return a value
 }
 

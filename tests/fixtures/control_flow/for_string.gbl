@@ -1,8 +1,6 @@
-import std;
-
 func main() {
     for ch in "Gobol" {
-        std::io::print(ch);
+        io::print(ch);
     }
-    std::io::print("\n");
+    io::print("\n");
 }

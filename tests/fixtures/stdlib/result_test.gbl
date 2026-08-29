@@ -1,5 +1,3 @@
-import std;
-
 struct Point {
     x: int,
     y: int,
@@ -22,14 +20,14 @@ impl Point {
 func main(): int {
     // Constructor via :: syntax
     var p = Point::new(3, 4);
-    std::io::println(@"Point({p.x}, {p.y})");
+    io::println(@"Point({p.x}, {p.y})");
 
     // Instance method via . syntax
-    std::io::println(@"distance = {p.distance()}");
+    io::println(@"distance = {p.distance()}");
 
     // Constructor via :: with different args
     var p2 = Point::new(10, 20);
-    std::io::println(@"Point2({p2.x}, {p2.y})");
+    io::println(@"Point2({p2.x}, {p2.y})");
 
     0
 }

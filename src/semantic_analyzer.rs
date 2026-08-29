@@ -175,12 +175,56 @@ impl SemanticAnalyzer {
         }
     }
 
+    /// Resolve a trait name as it appears in an `impl Trait for Type` block
+    /// (e.g. `New<T>`, `ops::Add`, `cmp::Eq`, `Iterator<T>`, `std::ops::Add`)
+    /// to a registered trait definition.
+    ///
+    /// Trait definitions are stored under a bare name (`New`, `Add`, `Eq`,
+    /// ...) and, for the std built-ins, also a fully-qualified form
+    /// (`std::ops::Add`).  Impl blocks may reference the trait with optional
+    /// generic params or a module prefix, so we canonicalize before lookup:
+    ///   • `New<T>`/`Iterator<T>`  → strip generic args → `New`/`Iterator`
+    ///   • `ops::Add`  → strip the `std::` prefix → `ops::Add`, then fall
+    ///     back to the bare suffix `Add`
+    ///   • `std::ops::Add` → matches the reserved `std::`-form directly
+    fn lookup_trait(&self, name: &str) -> Option<TraitDefInfo> {
+        // 1. Strip any trailing generic arguments: `New<T>` → `New`.
+        let base = match name.find('<') {
+            Some(i) => &name[..i],
+            None => name,
+        };
+        if base.is_empty() {
+            return None;
+        }
+
+        let mut candidates: Vec<String> = Vec::new();
+        // Prefer the exact form used by the impl block.
+        candidates.push(base.to_string());
+        // Then without the `std::` prefix: `std::ops::Add` → `ops::Add`.
+        if let Some(rest) = base.strip_prefix("std::") {
+            candidates.push(rest.to_string());
+        }
+        // Finally the bare trailing segment: `ops::Add` → `Add`,
+        // `cmp::Eq` → `Eq`.
+        if let Some((_, last)) = base.rsplit_once("::") {
+            candidates.push(last.to_string());
+        }
+
+        // Try each candidate; the trait is registered under the first match.
+        for candidate in &candidates {
+            if let Some(info) = self.trait_defs.get(candidate) {
+                return Some(info.clone());
+            }
+        }
+        None
+    }
+
     /// After all modules are loaded, validate that `impl Trait for Type` blocks
     /// provide all required trait methods.
     fn validate_trait_impls(&mut self) {
         let pending: Vec<_> = std::mem::take(&mut self.pending_trait_impls);
         for (struct_name, trait_name, impl_methods) in &pending {
-            let trait_info = match self.trait_defs.get(trait_name).cloned() {
+            let trait_info = match self.lookup_trait(trait_name) {
                 Some(t) => t,
                 None => {
                     self.error(&format!(
@@ -1442,7 +1486,7 @@ impl AstVisitor for SemanticAnalyzer {
         // which runs after all modules are loaded (the first pass already
         // queued this block in pending_trait_impls).
         if let Some(trait_name) = node.get_trait_name() {
-            if let Some(trait_info) = self.trait_defs.get(trait_name).cloned() {
+            if let Some(trait_info) = self.lookup_trait(trait_name) {
                 let impl_methods: HashMap<String, Vec<usize>> = node.get_items().iter()
                     .filter_map(|item| {
                         match item {

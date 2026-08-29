@@ -1,5 +1,3 @@
-import std;
-
 func main() {
     var x: int = "hello";  // error: type mismatch
 }

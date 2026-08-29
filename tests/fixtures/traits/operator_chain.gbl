@@ -1,9 +1,7 @@
 // Test operator precedence: 1 + 2 * 3 returns 7
 // 2 * 3 = 6 (via mul intrinsic)
 // 1 + 6 = 7 (via add intrinsic)
-import std;
-
 func main() {
     var result = 1 + 2 * 3;
-    std::io::println(@"1 + 2 * 3 = {result}");
+    io::println(@"1 + 2 * 3 = {result}");
 }

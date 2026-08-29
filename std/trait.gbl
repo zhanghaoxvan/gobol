@@ -1,6 +1,0 @@
-// std/trait.gbl — Re-export module for std::ops and std::cmp traits.
-//
-// Semantic analyzer auto-loads this file via `load_module("trait")` so that
-// `impl std::ops::Add for int` style impl blocks in int.gbl resolve correctly.
-import ops;
-import cmp;

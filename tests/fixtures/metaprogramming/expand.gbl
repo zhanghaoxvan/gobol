@@ -1,5 +1,3 @@
-import std;
-
 // #[expand] functions are evaluated at compile time when all arguments
 // are literals. The call site is replaced with the resulting constant.
 #[expand]
@@ -26,17 +24,17 @@ func source_file(): str {
 func main() {
     // square(7) is folded to 49 at compile time.
     var s = square(7);
-    std::io::println(@"square(7) = {s}");
+    io::println(@"square(7) = {s}");
 
     // const_add(3, 4) is folded to 7 at compile time.
     var sum = const_add(3, 4);
-    std::io::println(@"3 + 4 = {sum}");
+    io::println(@"3 + 4 = {sum}");
 
     // String concatenation also works at compile time.
     var msg = greet("world");
-    std::io::println(msg);
+    io::println(msg);
 
     // file() expands to the current source path.
     var f = source_file();
-    std::io::println(f);
+    io::println(f);
 }

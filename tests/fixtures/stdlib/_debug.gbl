@@ -1,5 +1,3 @@
-import std;
-
 func main() {
-    std::io::print("hello");
+    io::print("hello");
 }

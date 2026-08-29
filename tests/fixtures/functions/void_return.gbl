@@ -1,7 +1,5 @@
-import std;
-
 func greet(name: str) {
-    std::io::println(@"Hello, {name}!");
+    io::println(@"Hello, {name}!");
 }
 
 func main() {

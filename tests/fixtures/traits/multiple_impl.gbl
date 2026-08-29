@@ -1,7 +1,5 @@
 // Test: multiple impl blocks for the same struct are correctly merged
 // Two separate impl blocks and one trait impl should all work together
-import std;
-
 struct Multi {
     value: int,
 };
@@ -32,5 +30,5 @@ func main() {
     var b = Multi::new(7);
     var c = a + b;          // 3 + 7 = 10 (via trait impl)
     var d = c.double();     // 10 * 2 = 20 (via method in second impl)
-    std::io::println("multiple impl blocks ok");
+    io::println("multiple impl blocks ok");
 }

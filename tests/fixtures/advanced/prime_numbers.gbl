@@ -1,5 +1,3 @@
-import std;
-
 func is_prime(n: int): bool {
     if n < 2 {
         return false;
@@ -15,8 +13,8 @@ func is_prime(n: int): bool {
 func main() {
     for i in 0..20 {
         if is_prime(i) {
-            std::io::print(i);
+            io::print(i);
         }
     }
-    std::io::print("\n");
+    io::print("\n");
 }

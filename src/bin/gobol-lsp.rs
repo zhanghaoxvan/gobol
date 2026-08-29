@@ -144,6 +144,8 @@ struct SymbolEntry {
     type_info: Option<String>,
     parent: Option<String>, // struct/trait/enum name for methods/variants
     doc_comment: Option<String>, // documentation comment above the declaration
+    /// `#[deprecated("msg")]` attribute message, when the symbol is deprecated.
+    deprecated_msg: Option<String>,
 }
 
 /// Parsed signature of a callable, used by signature help and inlay hints.
@@ -172,6 +174,9 @@ struct DocState {
     errors: Vec<(i32, i32, String)>,
     /// Signatures of callables declared in this document, keyed by name.
     signatures: std::collections::HashMap<String, FuncSignature>,
+    /// Function name → return type string (from declared signatures). Used by
+    /// `infer_expr_type` so `var z = add(x, y)` hints `z: int` instead of `z: add`.
+    func_types: std::collections::HashMap<String, String>,
 }
 
 impl DocState {
@@ -901,6 +906,78 @@ fn extract_doc_comment(source: &str, symbol_line_1based: i32) -> Option<String> 
 
 /// Build a symbol index by scanning the token stream.
 /// `source` is the original source text, used to extract doc comments.
+/// Scan backwards from the declaration keyword at `decl_idx` for a `#[<attr>]`
+/// attribute block. If it contains `deprecated`, return the message string
+/// from `#[deprecated("msg")]` (or `Some("")` when no message is quoted).
+fn find_deprecated_before(tokens: &[Token], decl_idx: usize) -> Option<String> {
+    if decl_idx == 0 {
+        return None;
+    }
+    let get = |i: usize| -> Option<&Token> {
+        if i < tokens.len() {
+            Some(&tokens[i])
+        } else {
+            None
+        }
+    };
+    // The declaration may be preceded by `]` (end of an attribute list).
+    // Walk back collecting attribute content until a `#[` opener.
+    let mut k = decl_idx - 1;
+    // Skip blank / newline tokens between the decl and its attribute(s).
+    while k > 0 && matches!(get(k).map(|t| &t.r#type), Some(TokenType::EndOfLine)) {
+        k -= 1;
+    }
+    if k == 0 {
+        return None;
+    }
+    // Expect the decl to directly follow `]` (attributes) or the keyword itself.
+    if get(k).map(|t| t.value.as_str()) == Some("]") {
+        // Walk back to the matching `#[`.
+        let mut start = k;
+        let mut depth = 1i32;
+        let mut msg: Option<String> = None;
+        let mut has_deprecated = false;
+        while start > 0 {
+            start -= 1;
+            match get(start).map(|t| t.value.as_str()) {
+                Some("]") => depth += 1,
+                Some("#[") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 {
+            return None;
+        }
+        // Scan the attribute block tokens for `deprecated` and a string message.
+        let mut j = start + 1;
+        while j <= k {
+            let Some(t) = get(j) else { break };
+            if t.r#type == TokenType::Identifier && t.value == "deprecated" {
+                has_deprecated = true;
+            }
+            if t.r#type == TokenType::String {
+                msg = Some(trim_quotes(&t.value));
+            }
+            j += 1;
+        }
+        return if has_deprecated {
+            Some(msg.unwrap_or_default())
+        } else {
+            None
+        };
+    }
+    None
+}
+
+fn trim_quotes(s: &str) -> String {
+    s.trim_matches('"').to_string()
+}
+
 fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
     let mut symbols = Vec::new();
     let mut i = 0;
@@ -943,6 +1020,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 type_info,
                                 parent: None,
                                 doc_comment: None,
+                                deprecated_msg: find_deprecated_before(tokens, i),
                             });
                             extract_parameters(tokens, j, &mut symbols);
                         }
@@ -960,6 +1038,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 type_info: None,
                                 parent: None,
                                 doc_comment: None,
+                                deprecated_msg: find_deprecated_before(tokens, i),
                             });
                         }
                     }
@@ -977,6 +1056,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 type_info: None,
                                 parent: None,
                                 doc_comment: None,
+                                deprecated_msg: find_deprecated_before(tokens, i),
                             });
                             // Scan enum body for variants
                             scan_enum_variants(tokens, i, &enum_name, &mut symbols);
@@ -996,6 +1076,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 type_info,
                                 parent: None,
                                 doc_comment: None,
+                                deprecated_msg: None,
                             });
                         }
                     }
@@ -1013,6 +1094,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 type_info,
                                 parent: None,
                                 doc_comment: None,
+                                deprecated_msg: None,
                             });
                         }
                     }
@@ -1029,6 +1111,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 type_info: None,
                                 parent: None,
                                 doc_comment: None,
+                                deprecated_msg: None,
                             });
                         }
                     }
@@ -1047,6 +1130,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 type_info: None,
                                 parent: None,
                                 doc_comment: None,
+                                deprecated_msg: None,
                             });
                             // Scan for `import` keyword, then collect member names
                             let mut j = i + 2;
@@ -1070,6 +1154,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                         type_info: None,
                                         parent: Some(name_tok.value.clone()),
                                         doc_comment: None,
+                                        deprecated_msg: None,
                                     });
                                 }
                                 if mt.value == ";" || mt.line != name_tok.line {
@@ -1100,6 +1185,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                         type_info: None,
                         parent: None,
                         doc_comment: None,
+                        deprecated_msg: find_deprecated_before(tokens, i),
                     });
                 }
             }
@@ -1153,6 +1239,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                                     type_info,
                                                     parent: Some(sname.clone()),
                                                     doc_comment: None,
+                                                    deprecated_msg: None,
                                                 });
                                                 extract_parameters(tokens, k + 1, &mut symbols);
                                             }
@@ -1174,6 +1261,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                             type_info,
                                             parent: Some(sname.clone()),
                                             doc_comment: None,
+                                            deprecated_msg: None,
                                         });
                                         extract_parameters(tokens, k, &mut symbols);
                                     }
@@ -1249,6 +1337,7 @@ fn scan_enum_variants(
                     type_info: Some(enum_name.to_string()),
                     parent: Some(enum_name.to_string()),
                     doc_comment: None,
+                    deprecated_msg: None,
                 });
             }
         }
@@ -1300,6 +1389,7 @@ fn scan_extern_block(tokens: &[Token], extern_idx: usize, symbols: &mut Vec<Symb
                         type_info,
                         parent: None,
                         doc_comment: None,
+                        deprecated_msg: None,
                     });
                     extract_parameters(tokens, j, symbols);
                 }
@@ -1473,6 +1563,7 @@ fn extract_parameters(tokens: &[Token], func_idx: usize, symbols: &mut Vec<Symbo
                     },
                     parent: None,
                     doc_comment: None,
+                    deprecated_msg: None,
                 });
                 j = k;
                 continue;
@@ -1491,16 +1582,53 @@ fn collect_signatures(tokens: &[Token], source: &str) -> std::collections::HashM
     let mut i = 0;
     while i < tokens.len() {
         let tok = &tokens[i];
-        if tok.r#type != TokenType::Keyword || (tok.value != "func" && tok.value != "static") {
+        // Skip a `#[...]` attribute prefix (e.g. `#[expand]`) so macro
+        // functions are collected like ordinary functions.
+        let mut base = i;
+        if tok.r#type == TokenType::Operator && tok.value == "#[" {
+            // Scan ahead for the matching `]`.
+            let mut k = i;
+            let mut attr_name: Option<String> = None;
+            while k < tokens.len() {
+                if tokens[k].value == "#[" {
+                    k += 1;
+                    continue;
+                }
+                if tokens[k].value == "]" {
+                    break;
+                }
+                if tokens[k].r#type == TokenType::Identifier && attr_name.is_none() {
+                    attr_name = Some(tokens[k].value.clone());
+                }
+                k += 1;
+            }
+            if k >= tokens.len() {
+                i += 1;
+                continue;
+            }
+            // The attribute must still precede a `func` (optionally after a
+            // `static`) to be a function declaration attribute.
+            let next1 = tokens.get(k + 1).map(|n| n.value.as_str());
+            let next2 = tokens.get(k + 2).map(|n| n.value.as_str());
+            if next1 != Some("func") && !(next1 == Some("static") && next2 == Some("func")) {
+                i += 1;
+                continue;
+            }
+            base = k + 1; // position of `func` (or `static`)
+        }
+        let cursor = &tokens[base];
+        if cursor.r#type != TokenType::Keyword
+            || (cursor.value != "func" && cursor.value != "static")
+        {
             i += 1;
             continue;
         }
-        let mut func_idx = i;
-        if tok.value == "static" {
+        let mut func_idx = base;
+        if cursor.value == "static" {
             // `static func`
-            if let Some(n) = tokens.get(i + 1) {
+            if let Some(n) = tokens.get(base + 1) {
                 if n.value == "func" {
-                    func_idx = i + 1;
+                    func_idx = base + 1;
                 } else {
                     i += 1;
                     continue;
@@ -1813,10 +1941,18 @@ fn brace_folding_ranges(tokens: &[Token]) -> Vec<FoldingRange> {
 
 /// Best-effort inference of a simple expression's type, starting at
 /// `start_idx` of `tokens`. Returns a string type or `None`.
+///
+/// `lsp`/`uri` enable cross-module resolution of function return types (e.g.
+/// `math::add(...)`); when `None` (e.g. in isolated tests) only the current
+/// document's `signatures`/`func_types` are consulted. Function calls always
+/// resolve to their declared return type — the bare function name is never
+/// used as a type.
 fn infer_expr_type(
     tokens: &[Token],
     mut idx: usize,
     state: &DocState,
+    lsp: Option<&GobolLsp>,
+    uri: Option<&str>,
 ) -> Option<String> {
     // Skip a leading reference/unary operator.
     while idx < tokens.len() {
@@ -1843,11 +1979,60 @@ fn infer_expr_type(
         _ => {}
     }
     if t.r#type == TokenType::Identifier {
-        let next = tokens.get(idx + 1).map(|n| n.value.as_str());
-        if next == Some("(") {
-            // Constructor / call `Type(...)` or `f(...)`.
-            return Some(t.value.clone());
+        // Return type of a call — current-document signatures/func_types
+        // first, then (when a backend is supplied) imported modules.
+        let ret_type = |func_name: &str| -> Option<String> {
+            if let Some(sig) = state.signatures.get(func_name) {
+                if let Some(rt) = &sig.return_type {
+                    return Some(rt.clone());
+                }
+            }
+            if let Some(rt) = state.func_types.get(func_name) {
+                return Some(rt.clone());
+            }
+            if let (Some(lsp), Some(uri)) = (lsp, uri) {
+                return lsp
+                    .signature_for_name_blocking(uri, func_name, state)
+                    .and_then(|s| s.return_type);
+            }
+            None
+        };
+
+        // `module::member(...)` — cross-module qualified call.
+        if tokens.get(idx + 1).map(|n| n.value.as_str()) == Some("::") {
+            let module = t.value.clone();
+            let member = tokens.get(idx + 2).map(|n| n.value.clone());
+            let is_call = tokens.get(idx + 3).map(|n| n.value.as_str()) == Some("(");
+            if let Some(ref m) = member {
+                let rt = ret_type(m);
+                if rt.is_some() {
+                    return rt;
+                }
+                if is_call {
+                    if let (Some(lsp), Some(uri)) = (lsp, uri) {
+                        if let Some(sig) = lsp.imported_signature(uri, &module, m) {
+                            return sig.return_type.or(Some("unknown".to_string()));
+                        }
+                    }
+                    return Some("unknown".to_string());
+                }
+            }
+            return None;
         }
+
+        // Plain call `name(...)`.
+        if tokens.get(idx + 1).map(|n| n.value.as_str()) == Some("(") {
+            // Constructor / function call `f(...)`. Resolve the return type.
+            return Some(ret_type(&t.value).unwrap_or_else(|| {
+                // Known uppercase type constructor (e.g. `Range(...)`) → itself.
+                if t.value.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                    t.value.clone()
+                } else {
+                    "unknown".to_string()
+                }
+            }));
+        }
+
         if let Some(sym) = state.find_definition(&t.value) {
             return sym.type_info.clone();
         }
@@ -1941,6 +2126,99 @@ fn argument_position_hints(
 
 fn is_punctuation(v: &str) -> bool {
     matches!(v, "(" | ")" | "[" | "]" | "," | ":" | "::" | "." | ";" | "{ " | "}")
+}
+
+/// True when the source position (`line` 0-based, `col` 0-based) lies inside a
+/// comment: a line comment (`//`, `///`) or a block comment (`/* ... */`).
+/// `//` inside a URL (`http://`) or a string literal is not a comment start.
+fn source_in_comment(source: &str, line: usize, col: usize) -> bool {
+    let lines: Vec<&str> = source.lines().collect();
+    if line >= lines.len() {
+        return false;
+    }
+    // Scan for line-comment starts and block-comment spans, ignoring `//`
+    // inside string literals and URLs.
+    // block ranges: (sline, scol, eline, ecol); ecol is exclusive (after `*/`)
+    let mut blocks: Vec<(usize, usize, usize, usize)> = Vec::new();
+    // line comment start cols, keyed by line.
+    let mut line_cmts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut in_block = false;
+    let mut block_start: (usize, usize) = (0, 0);
+    for (li, text) in lines.iter().enumerate() {
+        let bytes = text.as_bytes();
+        let mut i = 0usize;
+        let mut in_string = false;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if in_block {
+                if c == '*' && i + 1 < bytes.len() && (bytes[i + 1] as char) == '/' {
+                    blocks.push((block_start.0, block_start.1, li, i + 2));
+                    in_block = false;
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            if in_string {
+                if c == '"' {
+                    in_string = false;
+                } else if c == '\\' {
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '/' if i + 1 < bytes.len() && (bytes[i + 1] as char) == '/' => {
+                    // Line comment. Reject a preceding `:` (URL like https://).
+                    let is_url = i > 0 && bytes[i - 1] as char == ':';
+                    if !is_url {
+                        line_cmts.insert(li, i);
+                        break; // rest of the line is comment
+                    }
+                    i += 1;
+                }
+                '/' if i + 1 < bytes.len() && (bytes[i + 1] as char) == '*' => {
+                    in_block = true;
+                    block_start = (li, i);
+                    i += 2;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if in_block {
+            // An unterminated block comment swallowed the rest of this line
+            // and carries into the next; it is finalized when `*/` is found
+            // (or recorded spanning to EOF above).
+        }
+    }
+    // Unterminated block comment at EOF: treat as spanning to end of last line.
+    if in_block {
+        blocks.push((block_start.0, block_start.1, lines.len() - 1, lines[lines.len() - 1].len()));
+    }
+    // Check the target position.
+    for &(sl, sc, el, ec) in &blocks {
+        let inside = if sl == el {
+            line == sl && col >= sc && col < ec
+        } else {
+            (line > sl && line < el)
+                || (line == sl && col >= sc)
+                || (line == el && col < ec)
+        };
+        if inside {
+            return true;
+        }
+    }
+    if let Some(sc) = line_cmts.get(&line) {
+        if col >= *sc {
+            return true;
+        }
+    }
+    false
 }
 
 /// Insert an `import <module>;` (or `from <module> import <name>;`) statement
@@ -2110,6 +2388,7 @@ fn analyze_document(
     let lexer = Lexer::new(source);
     let mut builder = AstBuilder::new(lexer);
     builder.set_error_formatter(error_fmt.clone());
+    builder.set_inject_prelude(true);
     let prog = builder.build();
 
     let tokens: Vec<Token> = builder.get_tokens().to_vec();
@@ -2129,6 +2408,14 @@ fn analyze_document(
     // 3. Build symbol index
     let symbols = build_symbol_index(&tokens, source);
     let signatures = collect_signatures(&tokens, source);
+    let func_types = signatures
+        .iter()
+        .filter_map(|(name, sig)| {
+            sig.return_type
+                .clone()
+                .map(|rt| (name.clone(), rt))
+        })
+        .collect();
 
     DocState {
         source: source.to_string(),
@@ -2136,6 +2423,7 @@ fn analyze_document(
         symbols,
         errors,
         signatures,
+        func_types,
     }
 }
 
@@ -2833,27 +3121,39 @@ impl LanguageServer for GobolLsp {
         let mut changes: std::collections::HashMap<url::Url, Vec<TextEdit>> =
             std::collections::HashMap::new();
 
-        // 1. All occurrences in this document.
-        let doc_uri = params.text_document_position.text_document.uri.clone();
-        let mut edits = Vec::new();
-        for t in &state.tokens {
-            if t.r#type == TokenType::Identifier && t.value == old {
-                edits.push(TextEdit {
+        // Helper: collect every occurrence of `old` in a token stream.
+        let collect = |toks: &[Token]| -> Vec<TextEdit> {
+            toks.iter()
+                .filter(|t| t.r#type == TokenType::Identifier && t.value == old)
+                .map(|t| TextEdit {
                     range: token_to_range(t),
                     new_text: new_name.clone(),
-                });
+                })
+                .collect()
+        };
+
+        // 1. All occurrences in every open document (not just the current one),
+        // so a rename updates the whole workspace, not a single file.
+        let documents = self.documents.read().await;
+        for (doc_uri, doc_state) in documents.iter() {
+            if doc_state.tokens.is_empty() {
+                continue;
+            }
+            let edits = collect(&doc_state.tokens);
+            if !edits.is_empty() {
+                let entry = changes.entry(url::Url::parse(doc_uri).unwrap_or_else(|_| url::Url::parse("file:///").unwrap())).or_default();
+                entry.extend(edits);
             }
         }
-        if !edits.is_empty() {
-            changes.insert(doc_uri, edits);
-        }
-
+        drop(documents); // release the read lock before resolving imported symbols
         // 2. If the rename target resolves to an imported module, apply the
-        // rename at the definition site there too (cross-file import rename).
+        // rename at the definition site there too (cross-file import rename),
+        // and sweep the module's whole source for other references of the name.
         if let Some((_name, _module, _k, _ty, file_uri, line, col, _doc)) = self
             .resolve_imported_symbol(&uri, &old)
             .await
         {
+            // Definition site.
             let range = Range::new(
                 Position::new((line as u32).saturating_sub(1), col as u32),
                 Position::new(
@@ -2861,11 +3161,30 @@ impl LanguageServer for GobolLsp {
                     col as u32 + old.len() as u32,
                 ),
             );
-            let entry = changes.entry(file_uri).or_default();
+            let entry = changes.entry(file_uri.clone()).or_default();
             entry.push(TextEdit {
                 range,
                 new_text: new_name.clone(),
             });
+
+            // All references of `old` inside the module file (if it isn't an
+            // open document already covered by pass 1). Add them when absent.
+            let file_path = uri_to_path(&file_uri.to_string());
+            if !self.documents.read().await.contains_key(file_uri.as_str()) {
+                if let Ok(src) = std::fs::read_to_string(&file_path) {
+                    let mut lexer = Lexer::new(&src);
+                    let mut toks: Vec<Token> = Vec::new();
+                    loop {
+                        let t = lexer.get_next_token();
+                        if t.r#type == TokenType::EndOfFile {
+                            break;
+                        }
+                        toks.push(t);
+                    }
+                    let entry = changes.entry(file_uri).or_default();
+                    entry.extend(collect(&toks));
+                }
+            }
         }
 
         if changes.is_empty() {
@@ -2924,6 +3243,14 @@ impl LanguageServer for GobolLsp {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.to_string();
         let pos = params.text_document_position.position;
+
+        // Don't trigger code completion inside a comment (line `//` or block
+        // `/* ... */`) — it would disturb the user while writing prose.
+        if let Some(state) = self.documents.read().await.get(&uri) {
+            if self.is_in_comment(state, pos) {
+                return Ok(None);
+            }
+        }
 
         // Check for `::` qualifier (e.g., `io::` or `Point::`)
         let qualifier = self.find_qualifier_before_colon_colon(&uri, pos).await;
@@ -3024,18 +3351,35 @@ impl LanguageServer for GobolLsp {
                     } else {
                         detail = format!("{}: {}", sym.kind.label(), detail);
                     }
+                    // Mark deprecated symbols so editors render a strikethrough.
+                    let tags = sym.deprecated_msg.as_ref().map(|_| vec![CompletionItemTag::DEPRECATED]);
+                    let documentation = match (&sym.doc_comment, &sym.deprecated_msg) {
+                        (Some(doc), Some(msg)) => Some(tower_lsp::lsp_types::Documentation::MarkupContent(
+                            tower_lsp::lsp_types::MarkupContent {
+                                kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                value: format!("**Deprecated:** {}\n\n{}", if msg.is_empty() { "this item is deprecated".to_string() } else { msg.clone() }, doc),
+                            },
+                        )),
+                        (Some(doc), None) => Some(tower_lsp::lsp_types::Documentation::MarkupContent(
+                            tower_lsp::lsp_types::MarkupContent {
+                                kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                value: doc.clone(),
+                            },
+                        )),
+                        (None, Some(msg)) => Some(tower_lsp::lsp_types::Documentation::MarkupContent(
+                            tower_lsp::lsp_types::MarkupContent {
+                                kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                value: format!("**Deprecated:** {}", if msg.is_empty() { "this item is deprecated".to_string() } else { msg.clone() }),
+                            },
+                        )),
+                        (None, None) => None,
+                    };
                     items.push(CompletionItem {
                         label: sym.name.clone(),
                         kind: Some(sym.kind.completion_kind()),
                         detail: Some(detail),
-                        documentation: sym.doc_comment.as_ref().map(|doc| {
-                            tower_lsp::lsp_types::Documentation::MarkupContent(
-                                tower_lsp::lsp_types::MarkupContent {
-                                    kind: tower_lsp::lsp_types::MarkupKind::Markdown,
-                                    value: doc.clone(),
-                                },
-                            )
-                        }),
+                        documentation,
+                        tags,
                         ..Default::default()
                     });
                 }
@@ -3176,6 +3520,15 @@ struct CrossFileHighlightForFile {
 }
 
 impl GobolLsp {
+    /// True when the cursor position lies inside a comment. Line comments
+    /// (`//`, `///` — including doc comments, which are intentionally treated
+    /// as "no code completion") and block comments (`/* ... */`) are detected
+    /// from the raw source. `//` inside a URL (`http://`) or a string literal
+    /// is not treated as a comment start.
+    fn is_in_comment(&self, state: &DocState, pos: Position) -> bool {
+        source_in_comment(&state.source, pos.line as usize, pos.character as usize)
+    }
+
     /// Resolve a callable's signature for `name`, preferring a local
     /// declaration and falling back to an imported module definition.
     async fn signature_for_name(
@@ -3269,7 +3622,7 @@ impl GobolLsp {
                                 // skip explicit type `var x: T =`
                                 let has_explicit = self.var_has_explicit_type(tokens, i);
                                 if !has_explicit {
-                                    if let Some(ty) = infer_expr_type(tokens, i + 3, state) {
+                                    if let Some(ty) = infer_expr_type(tokens, i + 3, state, Some(self), Some(uri)) {
                                         hints.push(mk_inlay_hint(
                                             Position::new(
                                                 (name_tok.line as u32).saturating_sub(1),
@@ -3891,6 +4244,7 @@ impl GobolLsp {
             symbols: Vec::new(),
             errors: vec![(0, 0, "Internal error: analysis panicked".to_string())],
             signatures: std::collections::HashMap::new(),
+            func_types: std::collections::HashMap::new(),
         });
 
         let diagnostics: Vec<Diagnostic> = state
@@ -4410,7 +4764,7 @@ mod unit_new {
     #[test]
     fn import_action_inserts_import() {
         let uri = url::Url::parse("file:///tmp/x.gbl").unwrap();
-        let state = DocState { source: "func main() {}\n".into(), tokens: vec![], symbols: vec![], errors: vec![], signatures: Default::default() };
+        let state = DocState { source: "func main() {}\n".into(), tokens: vec![], symbols: vec![], errors: vec![], signatures: Default::default(), func_types: Default::default() };
         let a = build_import_action(&uri, "io", &state);
         assert!(a.title.contains("io"));
         assert!(a.edit.is_some());
@@ -4421,7 +4775,7 @@ mod unit_new {
         let src = "func main() {\n    var a = 1;\n    if true {\n        var b = 2;\n    }\n    var c = a + b;\n}\n";
         let toks = lex(src);
         let syms = build_symbol_index(&toks, src);
-        let state = DocState { source: src.into(), tokens: toks, symbols: syms, errors: vec![], signatures: Default::default() };
+        let state = DocState { source: src.into(), tokens: toks, symbols: syms, errors: vec![], signatures: Default::default(), func_types: Default::default() };
 
         // Inside `if` block after `var b`, both a (outer) and b visible.
         let in_block = state.visible_locals(3, 16);
@@ -4452,6 +4806,59 @@ mod unit_new {
         // Real call `add(x, 1)` → NOT decl
         let call = lex("add(x, 1)");
         assert!(!is_declaration_call_paren(&call, 0), "call should not be decl-paren");
+    }
+
+    #[test]
+    fn deprecated_attribute_is_captured() {
+        // Function marked #[deprecated("use newer()")].
+        let src = "#[deprecated(\"use new_api()\")]\nfunc legacy(): int { 0 }\n";
+        let toks = lex(src);
+        let syms = build_symbol_index(&toks, src);
+        let legacy = syms.iter().find(|s| s.name == "legacy").expect("legacy symbol");
+        assert_eq!(legacy.deprecated_msg.as_deref(), Some("use new_api()"));
+
+        // Struct deprecated without a message string.
+        let src2 = "#[deprecated]\nstruct OldThing {}\n";
+        let toks2 = lex(src2);
+        let syms2 = build_symbol_index(&toks2, src2);
+        let old = syms2.iter().find(|s| s.name == "OldThing").expect("OldThing symbol");
+        assert_eq!(old.deprecated_msg.as_deref(), Some(""));
+
+        // Normal (non-deprecated) function is not flagged.
+        let src3 = "func fresh(): int { 0 }\n";
+        let toks3 = lex(src3);
+        let syms3 = build_symbol_index(&toks3, src3);
+        assert_eq!(syms3.iter().find(|s| s.name == "fresh").unwrap().deprecated_msg, None);
+    }
+
+    #[test]
+    fn source_comment_detection() {
+        // Inside a line comment, including doc comment `///`.
+        assert!(source_in_comment("// a comment\n", 0, 5));
+        assert!(source_in_comment("/// doc of func\n", 0, 4));
+        assert!(source_in_comment("// a comment\n", 0, 1)); // at/after `//`
+
+        // Block comment single-line.
+        let src1 = "/* block */ let x = 1; // tail\n";
+        assert!(source_in_comment(src1, 0, 4));
+        assert!(!source_in_comment(src1, 0, 19)); // after `*/`, in code
+
+        // Multi-line block comment: cursor on later inside line.
+        let multi = "/* open\ntext inside\n*/\ncode\n";
+        assert!(source_in_comment(multi, 1, 3));
+
+        // URL `//` is NOT a comment.
+        let url = "let u = \"https://x\";\n";
+        assert!(!source_in_comment(url, 0, 10));
+
+        // `//` inside a string literal is not a comment.
+        let s = "io::print(\"a//b\");\n";
+        assert!(!source_in_comment(s, 0, 16));
+
+        // trailing line comment after code.
+        let code = "var x = 1; // note\n";
+        assert!(source_in_comment(code, 0, 13));
+        assert!(!source_in_comment(code, 0, 2)); // before `//`, in code
     }
 
     #[test]
@@ -4508,6 +4915,42 @@ mod e2e_doc {
         let doc2 = analyze_document("file:///tmp/var.gbl", var_src, &[]);
         // infer call expr type = int
         let toks2 = lexall("var x = 10;");
-        assert_eq!(infer_expr_type(&toks2, 3, &doc2).as_deref(), Some("int")); // index3 is `10`
+        assert_eq!(infer_expr_type(&toks2, 3, &doc2, None, None).as_deref(), Some("int")); // index3 is `10`
+    }
+
+    #[test]
+    fn infer_func_call_return_type() {
+        // `var z = add(x, y)` must infer `z: int`, NOT `z: add`.
+        let src = "func add(a: int, b: int): int { a + b }\n";
+        let doc = analyze_document("file:///tmp/f.gbl", src, &[]);
+        let call = lexall("add(1, 2)");
+        // token index 0 is `add`, and the `(` follows.
+        assert_eq!(infer_expr_type(&call, 0, &doc, None, None).as_deref(), Some("int"));
+        // func_types cache holds add -> int.
+        assert_eq!(doc.func_types.get("add").map(|s| s.as_str()), Some("int"));
+        // Unknown call (no signature) must never fall back to the bare name.
+        let unk = lexall("mystery(1)");
+        assert_eq!(infer_expr_type(&unk, 0, &doc, None, None).as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn expand_macro_signature_and_type() {
+        // `#[expand]` macro functions must be collected like ordinary funcs.
+        let src = "#[expand]\nfunc dbl(x: int): int { x * 2 }\n";
+        let toks = lexall(src);
+        let sigs = collect_signatures(&toks, src);
+        assert!(sigs.contains_key("dbl"), "expand macro signature missing");
+        let sig = &sigs["dbl"];
+        assert_eq!(sig.return_type.as_deref(), Some("int"));
+        assert!(sig.param_names.contains(&"x".to_string()));
+
+        // Analyze the document: func_types and symbols carry the macro too.
+        let doc = analyze_document("file:///tmp/exp.gbl", src, &[]);
+        assert_eq!(doc.func_types.get("dbl").map(|s| s.as_str()), Some("int"));
+        assert!(doc.symbols.iter().any(|s| s.name == "dbl"));
+
+        // A call to it infers its return type.
+        let call = lexall("dbl(21)");
+        assert_eq!(infer_expr_type(&call, 0, &doc, None, None).as_deref(), Some("int"));
     }
 }

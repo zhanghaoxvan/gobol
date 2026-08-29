@@ -11,6 +11,7 @@
 //            compiler is responsible for inserting a call to `drop(self)`
 //            so any heap-allocated resources are released.
 
+#[library_features(hidden = true)]
 // Re-export the constructor trait previously defined in `new.gbl`.
 // #[dynamic_args] signals to the semantic analyser that implementers are
 // free to define their own parameter list for `new` (e.g.

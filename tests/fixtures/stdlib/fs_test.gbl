@@ -1,23 +1,21 @@
-import std;
-
 func main() {
     // Write a file
     std::fs::write_file("/tmp/gobol_test.txt", "Hello from Gobol FS!");
 
     // Check existence
     if std::fs::exists("/tmp/gobol_test.txt") {
-        std::io::println("exists: yes");
+        io::println("exists: yes");
     } else {
-        std::io::println("exists: no");
+        io::println("exists: no");
     }
 
     // Read it back
     var content = std::fs::read_to_string("/tmp/gobol_test.txt");
-    std::io::println(@"content: {content}");
+    io::println(@"content: {content}");
 
     // Use File struct directly
     var f = File::open("/tmp/gobol_test.txt", "r");
     var data = f.read_all();
-    std::io::println(@"file_data: {data}");
+    io::println(@"file_data: {data}");
     f.close();
 }

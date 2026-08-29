@@ -1,27 +1,25 @@
-import std;
-
 func main() {
     var x = 3.0;
     var y = 4.0;
 
     var a = std::math::abs(-5.0);
-    std::io::println(@"abs(-5): {a}");
+    io::println(@"abs(-5): {a}");
 
     var mx = std::math::max(x, y);
-    std::io::println(@"max(3, 4): {mx}");
+    io::println(@"max(3, 4): {mx}");
 
     var mn = std::math::min(x, y);
-    std::io::println(@"min(3, 4): {mn}");
+    io::println(@"min(3, 4): {mn}");
 
     var sq = std::math::sqrt(16.0);
-    std::io::println(@"sqrt(16): {sq}");
+    io::println(@"sqrt(16): {sq}");
 
     var p = std::math::pow(2.0, 10.0);
-    std::io::println(@"pow(2, 10): {p}");
+    io::println(@"pow(2, 10): {p}");
 
     var s = std::math::sin(0.0);
-    std::io::println(@"sin(0): {s}");
+    io::println(@"sin(0): {s}");
 
     var c = std::math::cos(0.0);
-    std::io::println(@"cos(0): {c}");
+    io::println(@"cos(0): {c}");
 }

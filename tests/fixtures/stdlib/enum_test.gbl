@@ -1,5 +1,3 @@
-import io;
-
 // Simple unit enum — lowered to tagged struct
 enum Color {
     Red,

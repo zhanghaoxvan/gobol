@@ -1,9 +1,7 @@
-import std;
-
 func main() {
     var doubled = {
         var tmp = 10;
         tmp * 2
     };
-    std::io::println(@"doubled: {doubled}");
+    io::println(@"doubled: {doubled}");
 }

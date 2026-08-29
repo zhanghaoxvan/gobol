@@ -1,8 +1,6 @@
-import std;
-
 func main() {
     for i in 0..10 {
-        std::io::print(i);
+        io::print(i);
     }
-    std::io::print("\n");
+    io::print("\n");
 }

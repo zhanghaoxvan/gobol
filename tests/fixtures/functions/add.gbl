@@ -1,10 +1,8 @@
-import std;
-
 func add(a: int, b: int): int {
     a + b
 }
 
 func main() {
     var result = add(3, 5);
-    std::io::println(@"3 + 5 = {result}");
+    io::println(@"3 + 5 = {result}");
 }

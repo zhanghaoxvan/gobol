@@ -1,10 +1,8 @@
-import std;
-
 func main() {
     var i = 0;
     while i < 5 {
-        std::io::print(i);
+        io::print(i);
         i += 1;
     }
-    std::io::print("\n");
+    io::print("\n");
 }

@@ -1,18 +1,16 @@
-import std;
-
 func main() {
     var s = "  Hello, Gobol!  ";
-    std::io::println(@"len: {s.len()}");
+    io::println(@"len: {s.len()}");
 
     var trimmed = s.trim();
-    std::io::println(@"trimmed: '{trimmed}'");
+    io::println(@"trimmed: '{trimmed}'");
 
     if s.contains("Gobol") {
-        std::io::println("contains: yes");
+        io::println("contains: yes");
     } else {
-        std::io::println("contains: no");
+        io::println("contains: no");
     }
 
     var replaced = s.replace("Gobol", "World");
-    std::io::println(@"replaced: '{replaced}'");
+    io::println(@"replaced: '{replaced}'");
 }

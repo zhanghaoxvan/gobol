@@ -1,9 +1,7 @@
-import std;
-
 func main() {
     var x: int = 10;
     val y: str = "hello";
     var z = x;
 
-    std::io::println(@"x = {x}, y = {y}, z = {z}");
+    io::println(@"x = {x}, y = {y}, z = {z}");
 }

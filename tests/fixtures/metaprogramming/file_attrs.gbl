@@ -1,5 +1,3 @@
-import std;
-
 // File-level attribute: disables GC for the whole module.
 #![no_gc]
 
@@ -12,13 +10,13 @@ func early_return(n: int): int {
 
 func main() {
     var x = early_return(42);
-    std::io::println(@"file-level #![no_gc] propagated, x = {x}");
+    io::println(@"file-level #![no_gc] propagated, x = {x}");
 
     // Local attribute overrides file-level: this function is NOT no_gc
     // because it re-declares... actually no_gc has no opposite, so it stays.
     // The closest-wins rule is about *same-named* attributes.
     var y = add(3, 4);
-    std::io::println(@"y = {y}");
+    io::println(@"y = {y}");
 }
 
 func add(a: int, b: int): int {

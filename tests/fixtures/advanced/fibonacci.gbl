@@ -1,5 +1,3 @@
-import std;
-
 func fib(n: int): int {
     if n <= 1 {
         return n;
@@ -9,7 +7,7 @@ func fib(n: int): int {
 
 func main() {
     for i in 0..10 {
-        std::io::print(fib(i));
+        io::print(fib(i));
     }
-    std::io::print("\n");
+    io::print("\n");
 }

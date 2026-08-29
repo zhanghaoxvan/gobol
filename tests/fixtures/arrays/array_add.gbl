@@ -1,12 +1,10 @@
-import std;
-
 func main() {
     var arr: int[] = [];
     arr.add(10);
     arr.add(20);
     arr.add(30);
     for i in arr {
-        std::io::print(i);
+        io::print(i);
     }
-    std::io::print("\n");
+    io::print("\n");
 }

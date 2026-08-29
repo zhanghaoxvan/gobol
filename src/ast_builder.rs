@@ -20,6 +20,13 @@ pub struct AstBuilder {
     /// a statement's local attribute with the same name overrides the
     /// file-level one).
     file_attributes: Vec<Attribute>,
+    /// When enabled, the std prelude (`import std::xxx`) is auto-injected at
+    /// the top of the built program. This is intended for the *entry* program
+    /// only — standard-library modules (and any module loaded by the semantic
+    /// analyser) declare their own imports explicitly, so they must not have
+    /// the prelude injected (it would create recursive / self imports that
+    /// defeat relative resolution).
+    inject_prelude: bool,
 }
 
 impl AstBuilder {
@@ -40,6 +47,7 @@ impl AstBuilder {
             error_formatter: None,
             structured_errors: Vec::new(),
             file_attributes: Vec::new(),
+            inject_prelude: false,
         }
     }
 
@@ -47,9 +55,19 @@ impl AstBuilder {
         self.error_formatter = Some(f);
     }
 
+    /// Enable/disable injection of the std prelude for this build.
+    /// The entry program should opt in; std-library / loaded modules
+    /// must not (see the field docs).
+    pub fn set_inject_prelude(&mut self, enabled: bool) {
+        self.inject_prelude = enabled;
+    }
+
     pub fn build(&mut self) -> Option<Box<Program>> {
         self.root = None;
-        let program = self.parse_program();
+        let mut program = self.parse_program();
+        if self.inject_prelude {
+            self.inject_std_prelude(&mut program);
+        }
         self.root = Some(Box::new(program));
         self.root.take()
     }
@@ -580,6 +598,46 @@ impl AstBuilder {
         self.consume_end_of_line();
 
         Some(Box::new(ImportStatement::new(path, alias)))
+    }
+
+    fn inject_std_prelude(&mut self, program: &mut Program) {
+        let prelude_modules = vec![
+            "assert",
+            "builtins",
+            "cmp",
+            "debug",
+            "float",
+            "fs",
+            "int",
+            "io",
+            "iterator",
+            "math",
+            "mem",
+            "net",
+            "ops",
+            "option",
+            "range",
+            "ref",
+            "result",
+            "str",
+            "thread",
+            "vec",
+        ];
+
+        let mut imported: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in program.get_statements() {
+            if let Some(import) = stmt.as_any().downcast_ref::<ImportStatement>() {
+                imported.insert(import.get_module_name());
+            }
+        }
+
+        // 从后往前插入，保持顺序
+        for &name in prelude_modules.iter().rev() {
+            if !imported.contains(name) {
+                let import_stmt = ImportStatement::new(vec!["std".to_string(), name.to_string()], None);
+                program.statements.insert(0, Box::new(import_stmt));
+            }
+        }
     }
 
     fn parse_from_import(&mut self) -> Option<Box<dyn Statement>> {

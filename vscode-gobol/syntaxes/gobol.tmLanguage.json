@@ -315,6 +315,10 @@
         {
           "name": "punctuation.separator.comma.gobol",
           "match": ","
+        },
+        {
+          "name": "punctuation.definition.bracket.square.gobol",
+          "match": "\\[|\\]"
         }
       ]
     }

@@ -262,8 +262,8 @@ The `New<T>` trait (defined in `std/mem.gbl`) documents the constructor contract
 
 ```gobol
 // std/mem.gbl
-#[dynamic_args]
 trait New<T> {
+    #[dynamic]
     func new(): T
 }
 

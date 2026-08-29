@@ -306,7 +306,7 @@ fn cmd_init() -> Result<()> {
     println!(" Project initialized successfully");
 
     if !Path::new("main.gbl").exists() {
-        let content = r#"import std;
+        let content = r#"import std::io;
 
 func main() {
     io::println("Hello, World!");

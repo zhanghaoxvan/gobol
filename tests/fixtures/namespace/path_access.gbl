@@ -1,7 +1,5 @@
 // Test :: path access for function calls
-import std;
-
 func main() {
     var x = 42;
-    std::io::print(@"x = {x}");
+    io::print(@"x = {x}");
 }

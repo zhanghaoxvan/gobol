@@ -1,5 +1,3 @@
-import std;
-
 // Module-level mutable `var`: shared storage visible to every function.
 var counter: int = 0;
 
@@ -13,7 +11,7 @@ func main() {
     bump();
     bump();
     bump();
-    std::io::print(@"after 3 bumps: {counter}\n");  // 3
+    io::print(@"after 3 bumps: {counter}\n");  // 3
     counter = counter + 10;
-    std::io::print(@"after +10: {counter}\n");      // 13
+    io::print(@"after +10: {counter}\n");      // 13
 }

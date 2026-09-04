@@ -92,6 +92,7 @@ pub trait AstVisitor {
     #[allow(dead_code)]
     fn visit_type(&mut self, _node: &dyn Type) {}
     fn visit_array_type(&mut self, _node: &ArrayType) {}
+    fn visit_pointer_type(&mut self, _node: &PointerType) {}
     #[allow(dead_code)]
     fn visit_function_type(&mut self, _node: &FunctionType) {}
     fn visit_if_statement(&mut self, _node: &IfStatement) {}
@@ -300,6 +301,50 @@ impl Type for ArrayType {
 }
 
 impl_attributable!(ArrayType);
+
+// ==================== PointerType ====================
+
+pub struct PointerType {
+    pub pointee: Box<dyn Type>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl PointerType {
+    pub fn new(pointee: Box<dyn Type>) -> Self {
+        PointerType {
+            pointee,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn get_pointee(&self) -> &dyn Type {
+        &*self.pointee
+    }
+}
+
+
+impl AstNode for PointerType {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_pointer_type(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Type for PointerType {
+    fn get_name(&self) -> &str {
+        self.pointee.get_name()
+    }
+    fn as_type(&self) -> &dyn Type {
+        self
+    }
+    fn as_type_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl_attributable!(PointerType);
 
 // ==================== NullableType ====================
 
@@ -2790,6 +2835,12 @@ pub enum MatchPattern {
     Literal(RtValueSimple),
     Wildcard,
     Variable(String),
+    EnumVariant {
+        enum_name: String,
+        variant_name: String,
+        variant_index: i32,
+        payload: Option<Box<MatchPattern>>,
+    },
 }
 
 #[derive(Debug, Clone)]

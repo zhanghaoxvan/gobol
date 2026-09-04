@@ -14,6 +14,33 @@ use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{HashMap, HashSet};
 
+/// How a net struct-intrinsic should be lowered: either building a
+/// `Result<_, str>` value in code, exposing a raw loaded payload value, or
+/// calling the C function directly as a plain primitive-returning intrinsic.
+#[derive(Clone, Copy, PartialEq)]
+enum NetIntrinsicKind {
+    /// Returns a `Result<OkPayload, str>` to be constructed here.
+    Result_(OkPayload),
+    /// Returns a raw value that is a struct instance (used when the gobol
+    /// signature already returns the struct directly rather than a Result).
+    ValuePayload(OkPayload),
+    /// Plain primitive return (int/str/bool) — call the C func directly.
+    Plain,
+}
+
+/// The type of the Ok payload inside a net-returned `Result<_, str>`.
+#[derive(Clone, Copy, PartialEq)]
+enum OkPayload {
+    /// A TcpStream/TcpListener handle (an i64 file descriptor).
+    Struct,
+    /// A string / byte buffer pointer.
+    Str,
+    /// An integer count (bytes written, etc.).
+    Int,
+    /// Unit (no payload) — `Result<(), str>`.
+    Unit,
+}
+
 // ==================== TypeResolver ====================
 
 /// Centralised type inference and layout calculation.
@@ -149,13 +176,15 @@ impl TypeResolver {
         match ty {
             DataType::None_ => 0,
             DataType::Float => 8,
-            DataType::Bool => 8,
+            DataType::Bool => 1,
+            DataType::Byte => 1,
             DataType::Int
             | DataType::Str
             | DataType::Unknown
             | DataType::Struct(_) => 8,
             DataType::Nullable(inner) => self.type_size(inner),
             DataType::Array(_) => 8, // array pointer
+            DataType::Pointer(_) => 8,
         }
     }
 
@@ -216,7 +245,7 @@ impl TypeResolver {
     /// These methods (add, sub, mul, div, rem, eq, ne, lt, gt, le, ge) are the
     /// trait-based operator implementations for built-in numeric types.
     fn intrinsic_method_return_type(&self, method: &str, obj_ty: &DataType) -> Option<DataType> {
-        let is_int = matches!(obj_ty, DataType::Int);
+        let is_int = matches!(obj_ty, DataType::Int | DataType::Byte);
         let is_float = matches!(obj_ty, DataType::Float);
         if !is_int && !is_float {
             return None;
@@ -256,6 +285,7 @@ impl TypeResolver {
             IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
+            IRExpr::Literal(LitValue::Byte(_)) => DataType::Byte,
             IRExpr::Variable(name) => self.var_type(name),
             IRExpr::StructLiteral { name, .. } => DataType::Struct(name.clone()),
             IRExpr::ArrayLiteral(elems) => {
@@ -400,11 +430,13 @@ impl VariadicStub {
             DataType::Float => "double",
             DataType::Bool => "int",
             DataType::None_ => "void",
+            DataType::Byte => "unsigned char", 
             DataType::Int
             | DataType::Str
             | DataType::Unknown
             | DataType::Struct(_)
             | DataType::Nullable(_)
+            | DataType::Pointer(_)
             | DataType::Array(_) => "long",
         }
     }
@@ -843,44 +875,120 @@ impl CraneliftBackend {
         self.declare_import("gobol_fs_exists", sig);
 
         // ---- net intrinsics ----
-        // i64 gobol_tcp_connect(const char*, i64)
+        // i64 gobol_tcp_bind(const char*, i64, i64, i8, char**)
         let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I8));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_bind", sig);
+
+        // i64 gobol_tcp_connect(const char*, i64, i64, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
         self.declare_import("gobol_tcp_connect", sig);
 
-        // i64 gobol_tcp_send(i64, const char*)
+        // i64 gobol_tcp_send_str(i64, const char*, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_send_str", sig);
+
+        // i64 gobol_tcp_send_bytes(i64, const unsigned char*, i64, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_send_bytes", sig);
+
+        // unsigned char* gobol_tcp_recv_bytes(i64, i64, i64*, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_recv_bytes", sig);
+
+        // unsigned char* gobol_tcp_recv_exact(i64, i64, i64*, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_recv_exact", sig);
+
+        // i64 gobol_tcp_close(i64, char**)
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
-        self.declare_import("gobol_tcp_send", sig);
-
-        // char* gobol_tcp_recv(i64, i64)
-        let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        self.declare_import("gobol_tcp_recv", sig);
-
-        // void gobol_tcp_close(i64)
-        let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
         self.declare_import("gobol_tcp_close", sig);
 
-        // i64 gobol_tcp_bind(const char*, i64)
+        // i64 gobol_tcp_set_read_timeout(i64, i64, char**)
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
-        self.declare_import("gobol_tcp_bind", sig);
+        self.declare_import("gobol_tcp_set_read_timeout", sig);
 
-        // i64 gobol_tcp_accept(i64)
+        // i64 gobol_tcp_set_write_timeout(i64, i64, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_set_write_timeout", sig);
+
+        // i64 gobol_tcp_set_keepalive(i64, i64, i64, i64, i64, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_set_keepalive", sig);
+
+        // char* gobol_tcp_local_addr(i64, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_local_addr", sig);
+
+        // char* gobol_tcp_remote_addr(i64, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_remote_addr", sig);
+
+        // i64 gobol_tcp_is_alive(i64)
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
-        self.declare_import("gobol_tcp_accept", sig);
+        self.declare_import("gobol_tcp_is_alive", sig);
+
+        // i64 gobol_tcp_listener_close(i64, char**)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_tcp_listener_close", sig);
 
         // ---- thread / channel concurrency runtime ----
 
@@ -1118,7 +1226,17 @@ impl CraneliftBackend {
                 // responsible for all control flow (used for entry points
                 // and interrupt handlers that must not get a synthesized
                 // return).
-                if !self.diverged && !self.current_func_has_attr("naked") {
+                let current_block = bcx.current_block();
+                let last_inst = current_block
+                    .and_then(|block| bcx.func.layout.last_inst(block))
+                    ;
+                let current_terminated = last_inst
+                    .map_or(false, |inst| {
+                        let opcode = bcx.func.dfg.insts[inst].opcode();
+                        opcode.is_terminator() || format!("{:?}", opcode).contains("return")
+                    });
+                if !self.diverged && !current_terminated
+                    && !bcx.is_unreachable() && !self.current_func_has_attr("naked") {
                     self.emit_default_return(&mut bcx);
                 }
                 bcx.seal_all_blocks();
@@ -1127,10 +1245,14 @@ impl CraneliftBackend {
             self.fn_ctx = fn_ctx;
         }
 
+        if let Err(e) = ctx.verify(self.module.isa().flags()) {
+            eprintln!("=== Detailed verifier error in {} ===\n{}", sym, e);
+        }
+
         self.module
             .define_function(func_id, &mut ctx)
             .map_err(|e| {
-                eprintln!("=== Verifier error in {} ===\n{:?}", sym, ctx.func);
+                eprintln!("=== Verifier error in {} ===\n{}\n{:?}", sym, e, ctx.func);
                 format!("define {} failed: {}", sym, e)
             })?;
         self.module.clear_context(&mut ctx);
@@ -1167,12 +1289,17 @@ impl CraneliftBackend {
                 // Initialize module-level mutable `var` globals before running
                 // any user code in main.
                 self.translate_global_inits(&mut bcx)?;
+                self.diverged = false;
 
                 if let Some(body) = &ir_func.body {
                     self.translate_block(&mut bcx, body)?;
                 }
                 // main defaults to return 0 if no explicit return.
-                if !self.diverged {
+                let current_block = bcx.current_block();
+                let current_terminated = current_block
+                    .and_then(|block| bcx.func.layout.last_inst(block))
+                    .map_or(false, |inst| bcx.func.dfg.insts[inst].opcode().is_terminator());
+                if current_block.is_some() && !current_terminated {
                     let zero = bcx.ins().iconst(types::I64, 0);
                     bcx.ins().return_(&[zero]);
                 }
@@ -1181,7 +1308,6 @@ impl CraneliftBackend {
             }
             self.fn_ctx = fn_ctx;
         }
-
         self.module
             .define_function(func_id, &mut ctx)
             .map_err(|e| {
@@ -1229,6 +1355,10 @@ impl CraneliftBackend {
                 let z = bcx.ins().f64const(0.0);
                 bcx.ins().return_(&[z]);
             }
+            DataType::Bool => {
+                let z = bcx.ins().iconst(types::I8, 0);
+                bcx.ins().return_(&[z]);
+            }
             _ => {
                 let z = bcx.ins().iconst(types::I64, 0);
                 bcx.ins().return_(&[z]);
@@ -1244,6 +1374,13 @@ impl CraneliftBackend {
         block: &IRBlock,
     ) -> Result<(), String> {
         for stmt in &block.statements {
+            let current_terminated = bcx
+                .current_block()
+                .and_then(|block| bcx.func.layout.last_inst(block))
+                .map_or(false, |inst| bcx.func.dfg.insts[inst].opcode().is_terminator());
+            if current_terminated {
+                break;
+            }
             self.translate_stmt(bcx, stmt)?;
         }
         Ok(())
@@ -1365,13 +1502,15 @@ impl CraneliftBackend {
         if !else_diverged {
             bcx.ins().jump(merge_b, &[]);
         }
-        bcx.seal_block(merge_b);
         // If both branches diverged (e.g. both return), the merge block is
         // unreachable — propagate divergence so the caller doesn't emit
         // dead code after the if. Otherwise switch to merge_b.
         if then_diverged && else_diverged {
+            // Neither branch references the merge block, and it has not been
+            // inserted into the layout because we never switched to it.
             self.diverged = true;
         } else {
+            bcx.seal_block(merge_b);
             bcx.switch_to_block(merge_b);
             self.diverged = false;
         }
@@ -1746,6 +1885,8 @@ impl CraneliftBackend {
             if let Some(var) = self.variables.get(name) {
                 let var_ty = self.type_resolver.var_type(name);
                 let v = self.coerce(bcx, val, &self.type_resolver.infer_type(value), &var_ty)?;
+                let target_ty = self.data_type_to_clif(&var_ty).unwrap_or(types::I64);
+                let v = self.bitcast_to(bcx, v, target_ty);
                 bcx.def_var(*var, v);
                 return Ok(());
             }
@@ -1779,7 +1920,10 @@ impl CraneliftBackend {
                     let v = bcx.use_var(*var);
                     Ok(v)
                 } else {
-                    Ok(bcx.ins().iconst(types::I64, 0))
+                    match self.translate_func_ref(bcx, name) {
+                        Ok(v) => Ok(v),
+                        Err(_) => Ok(bcx.ins().iconst(types::I64, 0)),
+                    }
                 }
             }
             IRExpr::Binary { op, left, right } => {
@@ -1837,6 +1981,7 @@ impl CraneliftBackend {
             LitValue::Int(n) => bcx.ins().iconst(types::I64, *n),
             LitValue::Float(f) => bcx.ins().f64const(*f),
             LitValue::Bool(b) => bcx.ins().iconst(types::I8, *b as i64),
+            LitValue::Byte(n) => bcx.ins().iconst(types::I8, *n as i64),
             LitValue::Str(s) => self.intern_string(bcx, s),
             LitValue::None => bcx.ins().iconst(types::I64, 0),
         }
@@ -2115,12 +2260,19 @@ impl CraneliftBackend {
 
         let callee_val = self.translate_expr(bcx, callee)?;
 
-        // Build a signature: all params are i64, return is i64.
+        // Function values currently carry no return-type metadata. Zero-arg
+        // callbacks in the standard library are boolean functions, whose ABI
+        // return type is i8; use that signature and widen the result for the
+        // universal IR value representation.
         let mut sig = self.module.make_signature();
         for _ in &arg_vals {
             sig.params.push(AbiParam::new(types::I64));
         }
-        sig.returns.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(if arg_vals.is_empty() {
+            types::I8
+        } else {
+            types::I64
+        }));
         let sig_ref = bcx.import_signature(sig);
 
         let call = bcx.ins().call_indirect(sig_ref, callee_val, &arg_vals);
@@ -2128,7 +2280,12 @@ impl CraneliftBackend {
         if results.is_empty() {
             Ok(bcx.ins().iconst(types::I64, 0))
         } else {
-            Ok(results[0])
+            let result = results[0];
+            if bcx.func.dfg.value_type(result) == types::I8 {
+                Ok(bcx.ins().uextend(types::I64, result))
+            } else {
+                Ok(result)
+            }
         }
     }
 
@@ -2223,6 +2380,11 @@ impl CraneliftBackend {
         if let Some((struct_name, method)) = func.split_once("::") {
             if let Some(rt) = self.struct_intrinsic_runtime(struct_name, method) {
                 let fret = self.type_resolver.func_return_type(func);
+                if struct_name == "TcpStream" || struct_name == "TcpListener" {
+                    if let Some(kind) = self.net_intrinsic_kind(method, &fret) {
+                        return self.translate_net_intrinsic(bcx, rt, kind, None, arg_vals);
+                    }
+                }
                 if matches!(fret, DataType::None_) {
                     self.call_runtime(bcx, rt, arg_vals);
                     return Ok(bcx.ins().iconst(types::I64, 0));
@@ -2301,9 +2463,81 @@ impl CraneliftBackend {
             }
         }
 
+        // Match expressions currently erase the concrete type of an enum
+        // payload. Dispatch networking methods before the primitive/string
+        // fallbacks so a TcpStream extracted from Result<T, E> still reaches
+        // the C runtime.
+        if matches!(
+            method,
+            "local_addr"
+                | "remote_addr"
+                | "send_str"
+                | "send_bytes"
+                | "recv_bytes"
+                | "recv_exact"
+                | "set_read_timeout"
+                | "set_write_timeout"
+                | "set_keepalive"
+        ) {
+            let obj_val = self.translate_expr(bcx, object)?;
+            let arg_vals = self.translate_args(bcx, args)?;
+            let rt = self
+                .struct_intrinsic_runtime("TcpStream", method)
+                .ok_or_else(|| format!("unknown TcpStream intrinsic '{}'", method))?;
+            let payload = match method {
+                "local_addr" | "remote_addr" => OkPayload::Str,
+                "send_str" | "send_bytes" => OkPayload::Int,
+                "recv_bytes" | "recv_exact" => OkPayload::Str,
+                _ => OkPayload::Unit,
+            };
+            return self.translate_net_intrinsic(
+                bcx,
+                rt,
+                NetIntrinsicKind::Result_(payload),
+                Some(obj_val),
+                &arg_vals,
+            );
+        }
+
         // Intrinsic arithmetic methods on primitive types (int, float)
         if let Some(result) = self.try_intrinsic_method(bcx, object, method, args, &obj_ty)? {
             return Ok(result);
+        }
+
+        if method == "is_alive" {
+            let obj_val = self.translate_expr(bcx, object)?;
+            let arg_vals = self.translate_args(bcx, args)?;
+            return self.translate_net_intrinsic(
+                bcx,
+                "gobol_tcp_is_alive",
+                NetIntrinsicKind::Plain,
+                Some(obj_val),
+                &arg_vals,
+            );
+        }
+
+        // Match-derived handles may not retain their concrete struct type in
+        // the IR type resolver.  Still dispatch the unambiguous TcpStream
+        // methods here rather than treating them as unknown method calls.
+        if matches!(
+            method,
+            "local_addr"
+                | "remote_addr"
+                | "send_str"
+                | "send_bytes"
+                | "recv_bytes"
+                | "recv_exact"
+                | "set_read_timeout"
+                | "set_write_timeout"
+                | "set_keepalive"
+        ) {
+            let obj_val = self.translate_expr(bcx, object)?;
+            let arg_vals = self.translate_args(bcx, args)?;
+            let rt = self
+                .struct_intrinsic_runtime("TcpStream", method)
+                .ok_or_else(|| format!("unknown TcpStream intrinsic '{}'", method))?;
+            let kind = NetIntrinsicKind::Result_(OkPayload::Str);
+            return self.translate_net_intrinsic(bcx, rt, kind, Some(obj_val), &arg_vals);
         }
 
         // Array methods: arr.add(x), arr.len(), arr.get(i)
@@ -2382,9 +2616,15 @@ impl CraneliftBackend {
         if let DataType::Struct(sname) = &obj_ty {
             if let Some(rt) = self.struct_intrinsic_runtime(sname, method) {
                 let obj_val = self.translate_expr(bcx, object)?;
-                let mut vals = vec![obj_val];
-                vals.append(&mut self.translate_args(bcx, args)?);
+                let arg_vals = self.translate_args(bcx, args)?;
                 let ret_ty = self.type_resolver.func_return_type(&format!("{}::{}", sname, method));
+                if sname == "TcpStream" || sname == "TcpListener" {
+                    if let Some(kind) = self.net_intrinsic_kind(method, &ret_ty) {
+                        return self.translate_net_intrinsic(bcx, rt, kind, Some(obj_val), &arg_vals);
+                    }
+                }
+                let mut vals = vec![obj_val];
+                vals.extend(arg_vals);
                 if matches!(ret_ty, DataType::None_) {
                     self.call_runtime(bcx, rt, &vals);
                     return Ok(bcx.ins().iconst(types::I64, 0));
@@ -2431,13 +2671,163 @@ impl CraneliftBackend {
             ("File", "write") => Some("gobol_fs_write"),
             ("File", "close") => Some("gobol_fs_close"),
             ("TcpStream", "connect") => Some("gobol_tcp_connect"),
-            ("TcpStream", "send") => Some("gobol_tcp_send"),
-            ("TcpStream", "recv") => Some("gobol_tcp_recv"),
+            ("TcpStream", "send_str") => Some("gobol_tcp_send_str"),
+            ("TcpStream", "send_bytes") => Some("gobol_tcp_send_bytes"),
+            ("TcpStream", "recv_bytes") => Some("gobol_tcp_recv_bytes"),
+            ("TcpStream", "recv_exact") => Some("gobol_tcp_recv_exact"),
             ("TcpStream", "close") => Some("gobol_tcp_close"),
+            ("TcpStream", "set_read_timeout") => Some("gobol_tcp_set_read_timeout"),
+            ("TcpStream", "set_write_timeout") => Some("gobol_tcp_set_write_timeout"),
+            ("TcpStream", "set_keepalive") => Some("gobol_tcp_set_keepalive"),
+            ("TcpStream", "local_addr") => Some("gobol_tcp_local_addr"),
+            ("TcpStream", "remote_addr") => Some("gobol_tcp_remote_addr"),
+            ("TcpStream", "is_alive") => Some("gobol_tcp_is_alive"),
             ("TcpListener", "bind") => Some("gobol_tcp_bind"),
             ("TcpListener", "accept") => Some("gobol_tcp_accept"),
+            ("TcpListener", "close") => Some("gobol_tcp_listener_close"),
             _ => None,
         }
+    }
+
+    /// Which net struct-intrinsic methods return a `Result<_, str>` that needs
+    /// to be constructed in code, vs. a plain value.
+    fn net_intrinsic_kind(&self, method: &str, ret_ty: &DataType) -> Option<NetIntrinsicKind> {
+        use NetIntrinsicKind::*;
+        match ret_ty {
+            DataType::Struct(s) if s == "Result" => {
+                let ok = match method {
+                    "connect" | "bind" | "accept" => OkPayload::Struct,
+                    "local_addr" | "remote_addr" | "recv_bytes" | "recv_exact" => OkPayload::Str,
+                    "send_str" | "send_bytes" => OkPayload::Int,
+                    _ => OkPayload::Unit,
+                };
+                Some(Result_(ok))
+            }
+            DataType::Struct(s) if s == "TcpStream" || s == "TcpListener" => {
+                Some(ValuePayload(OkPayload::Struct))
+            }
+            DataType::Str | DataType::Int | DataType::Bool => Some(Plain),
+            _ => None,
+        }
+    }
+
+    /// Lower a net struct-intrinsic call.
+    ///
+    /// `self_val` is the receiver (for instance methods) or `None` for static
+    /// methods (connect/bind).  `arg_vals` are the already-translated explicit
+    /// arguments.  Every net C function takes a trailing `char **err_msg`
+    /// out-param; we allocate a scratch slot, call the C function, and then
+    /// wrap the raw result into a `Result<_, str>` value when the gobol
+    /// signature asks for one.
+    fn translate_net_intrinsic(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        rt: &str,
+        kind: NetIntrinsicKind,
+        self_val: Option<ir::Value>,
+        arg_vals: &[ir::Value],
+    ) -> Result<ir::Value, String> {
+        use NetIntrinsicKind::*;
+        match kind {
+            Plain | ValuePayload(..) => {
+                let mut vals: Vec<ir::Value> = Vec::new();
+                if let Some(s) = self_val {
+                    // Instance methods receive a pointer to the wrapper
+                    // struct, while the C networking API expects its `_fd`
+                    // field value.
+                    let fd = self.call_runtime(bcx, "gobol_mem_load", &[s]);
+                    vals.push(fd);
+                }
+                vals.extend_from_slice(arg_vals);
+                return Ok(self.call_runtime(bcx, rt, &vals));
+            }
+            Result_(_payload) => {
+                // Allocate a scratch slot for the C `char **err_msg` out-param.
+                let eight = bcx.ins().iconst(types::I64, 8);
+                let slot = self.call_runtime(bcx, "gobol_gc_alloc", &[eight]);
+                let zero0 = bcx.ins().iconst(types::I64, 0);
+                self.call_runtime(bcx, "gobol_mem_store", &[slot, zero0]);
+
+                let mut vals: Vec<ir::Value> = Vec::new();
+                if let Some(s) = self_val {
+                    // Instance methods receive the wrapper pointer in Gobol,
+                    // but the runtime APIs operate on the stored file
+                    // descriptor.
+                    let fd = self.call_runtime(bcx, "gobol_mem_load", &[s]);
+                    vals.push(fd);
+                }
+                vals.extend_from_slice(arg_vals);
+                vals.push(slot);
+                let raw = self.call_runtime(bcx, rt, &vals);
+
+                // Read the error message (a GC'd char*, or 0 / null).
+                let err_val = self.call_runtime(bcx, "gobol_mem_load", &[slot]);
+
+                // Allocate the Result<T, str> struct and write _tag/_0/_1.
+                let rsize = self.type_resolver.struct_size("Result").max(24);
+                let rsize_val = bcx.ins().iconst(types::I64, rsize);
+                let res = self.call_runtime(bcx, "gobol_gc_alloc", &[rsize_val]);
+
+                // tag offset 0, _0 offset 8, _1 offset 16 (ir.rs enum lowering).
+                let zero = bcx.ins().iconst(types::I64, 0);
+                let one = bcx.ins().iconst(types::I64, 1);
+                let success = bcx.ins().icmp(IntCC::SignedGreaterThanOrEqual, raw, zero);
+
+                let join = bcx.create_block();
+                let join_param = bcx.append_block_param(join, types::I64);
+                let okb = bcx.create_block();
+                let errb = bcx.create_block();
+                bcx.ins().brif(success, okb, &[], errb, &[]);
+                bcx.seal_block(okb);
+                bcx.seal_block(errb);
+
+                // Ok branch: _tag = 0, _0 = payload, _1 = null.
+                bcx.switch_to_block(okb);
+                self.store_result_field(bcx, res, 0, zero);
+                let ok_payload = match _payload {
+                    OkPayload::Struct => {
+                        let size = bcx.ins().iconst(types::I64, 8);
+                        let wrapper = self.call_runtime(bcx, "gobol_gc_alloc", &[size]);
+                        self.store_result_field(bcx, wrapper, 0, raw);
+                        wrapper
+                    }
+                    _ => raw,
+                };
+                self.store_result_field(bcx, res, 8, ok_payload);
+                let ok_null = bcx.ins().iconst(types::I64, 0);
+                self.store_result_field(bcx, res, 16, ok_null);
+                bcx.ins().jump(join, &[BlockArg::Value(res)]);
+
+                // Err branch: _tag = 1, _0 = null, _1 = error message.
+                bcx.switch_to_block(errb);
+                self.store_result_field(bcx, res, 0, one);
+                let err_null = bcx.ins().iconst(types::I64, 0);
+                self.store_result_field(bcx, res, 8, err_null);
+                self.store_result_field(bcx, res, 16, err_val);
+                bcx.ins().jump(join, &[BlockArg::Value(res)]);
+
+                bcx.seal_block(join);
+                bcx.switch_to_block(join);
+                Ok(join_param)
+            }
+        }
+    }
+
+    /// Store a value into a GC struct field at the given byte offset.
+    fn store_result_field(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        base: ir::Value,
+        offset: i64,
+        val: ir::Value,
+    ) {
+        let addr = self.field_addr(bcx, base, offset);
+        let val = if bcx.func.dfg.value_type(val) == types::I8 {
+            bcx.ins().uextend(types::I64, val)
+        } else {
+            val
+        };
+        self.call_runtime(bcx, "gobol_mem_store", &[addr, val]);
     }
 
     /// Try to handle an intrinsic arithmetic method call (add, sub, mul, etc.)
@@ -2450,7 +2840,7 @@ impl CraneliftBackend {
         args: &[IRExpr],
         obj_ty: &DataType,
     ) -> Result<Option<ir::Value>, String> {
-        let is_int = matches!(obj_ty, DataType::Int);
+        let is_int = matches!(obj_ty, DataType::Int | DataType::Byte);
         let is_float = matches!(obj_ty, DataType::Float);
         if !is_int && !is_float {
             return Ok(None);
@@ -2479,7 +2869,7 @@ impl CraneliftBackend {
                 _ => return Ok(None),
             }))
         } else {
-            Ok(Some(match method {
+            let result = match method {
                 "add" => bcx.ins().iadd(l, r),
                 "sub" => bcx.ins().isub(l, r),
                 "mul" => bcx.ins().imul(l, r),
@@ -2492,7 +2882,17 @@ impl CraneliftBackend {
                 "le" => bcx.ins().icmp(IntCC::SignedLessThanOrEqual, l, r),
                 "ge" => bcx.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r),
                 _ => return Ok(None),
-            }))
+            };
+            if matches!(obj_ty, DataType::Byte) {
+                if matches!(method, "eq" | "ne" | "lt" | "gt" | "le" | "ge") {
+                    Ok(Some(result))
+                } else {
+                    // 算术运算截断到 8 位
+                    Ok(Some(bcx.ins().ireduce(types::I8, result)))
+                }
+            } else {
+                Ok(Some(result))
+            }
         }
     }
 
@@ -2503,6 +2903,21 @@ impl CraneliftBackend {
         member: &str,
     ) -> Result<ir::Value, String> {
         let obj_ty = self.type_resolver.infer_type(object);
+        if member == "_tag" || member.starts_with('_') && member[1..].parse::<i64>().is_ok() {
+            let obj_val = self.translate_expr(bcx, object)?;
+            let offset = if member == "_tag" {
+                0
+            } else {
+                member[1..].parse::<i64>().unwrap_or(0) * 8 + 8
+            };
+            let addr = self.field_addr(bcx, obj_val, offset);
+            return Ok(self.call_runtime(bcx, "gobol_mem_load", &[addr]));
+        }
+        if let Ok(index) = member.parse::<i64>() {
+            let arr = self.translate_expr(bcx, object)?;
+            let idx = bcx.ins().iconst(types::I64, index);
+            return Ok(self.call_runtime(bcx, "gobol_array_get", &[arr, idx]));
+        }
         if let DataType::Struct(sname) = &obj_ty {
             let obj_val = self.translate_expr(bcx, object)?;
             if let Some(off) = self.type_resolver.field_offset(sname, member) {
@@ -2644,7 +3059,17 @@ impl CraneliftBackend {
     ) -> ir::Value {
         let fid = self.func_ids[name];
         let fref = self.module.declare_func_in_func(fid, &mut bcx.func);
-        let call = bcx.ins().call(fref, args);
+        let mut word_args = Vec::with_capacity(args.len());
+        for (index, &arg) in args.iter().enumerate() {
+            let expects_i8 = (name == "gobol_tcp_bind" && index == 3)
+                || (name == "gobol_str_bool" && index == 0);
+            if !expects_i8 && bcx.func.dfg.value_type(arg) == types::I8 {
+                word_args.push(bcx.ins().uextend(types::I64, arg));
+            } else {
+                word_args.push(arg);
+            }
+        }
+        let call = bcx.ins().call(fref, &word_args);
         let results = bcx.inst_results(call);
         if results.is_empty() {
             // Runtime call with void return — use 0 placeholder so the caller
@@ -2848,17 +3273,30 @@ impl CraneliftBackend {
             return Ok(v);
         }
         Ok(match (from, to) {
+            (DataType::Byte, DataType::Int) => bcx.ins().uextend(types::I64, v),
+            (DataType::Int, DataType::Byte) => bcx.ins().ireduce(types::I8, v),
+            (DataType::Byte, DataType::Bool) => v,
+            (DataType::Bool, DataType::Byte) => v,
             (DataType::Int, DataType::Float) => bcx.ins().fcvt_from_sint(types::F64, v),
             (DataType::Float, DataType::Int) => bcx.ins().fcvt_to_sint(types::I64, v),
             (DataType::Bool, DataType::Int) => bcx.ins().uextend(types::I64, v),
-            (DataType::Int, DataType::Bool) => v,
+            (DataType::Int, DataType::Bool) => bcx.ins().ireduce(types::I8, v),
             _ => v,
         })
     }
 
-    fn bitcast_to(&self, _bcx: &mut FunctionBuilder, v: ir::Value, ty: ir::Type) -> ir::Value {
-        let cur = ty;
-        let _ = cur;
+    fn bitcast_to(&self, bcx: &mut FunctionBuilder, v: ir::Value, ty: ir::Type) -> ir::Value {
+        let from = bcx.func.dfg.value_type(v);
+        if from == ty {
+            return v;
+        }
+        if from.is_int() && ty.is_int() {
+            return if from.bits() > ty.bits() {
+                bcx.ins().ireduce(ty, v)
+            } else {
+                bcx.ins().uextend(ty, v)
+            };
+        }
         v
     }
 
@@ -2866,6 +3304,7 @@ impl CraneliftBackend {
         match ty {
             DataType::Float => bcx.ins().f64const(0.0),
             DataType::Bool => bcx.ins().iconst(types::I8, 0),
+            DataType::Byte => bcx.ins().iconst(types::I8, 0),  
             DataType::Unknown => {
                 // array: allocate an empty one
                 let fid = self.func_ids["gobol_array_new"];
@@ -2930,11 +3369,13 @@ impl CraneliftBackend {
             DataType::Bool => types::I8,
             DataType::Float => types::F64,
             DataType::Str => types::I64,
+            DataType::Byte => types::I8,
             DataType::None_ => types::INVALID,
             DataType::Unknown => types::I64, // array pointer
             DataType::Struct(_) => types::I64, // struct pointer
             DataType::Nullable(inner) => self.data_type_to_clif(inner)?,
             DataType::Array(_) => types::I64, // array pointer
+            DataType::Pointer(_) => types::I64,
         })
     }
 

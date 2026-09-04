@@ -1,0 +1,51 @@
+// std/byte.gbl — Byte type.
+
+import ops;
+import cmp;
+
+#[builtin("int8")]
+struct byte {}
+
+impl ops::Add for byte {
+    #[intrinsic("i8_add")]
+    func add(self, other: byte): byte;
+}
+
+impl ops::Sub for byte {
+    #[intrinsic("i8_sub")]
+    func sub(self, other: byte): byte;
+}
+
+impl ops::Mul for byte {
+    #[intrinsic("i8_mul")]
+    func mul(self, other: byte): byte;
+}
+
+impl ops::Div for byte {
+    #[intrinsic("i8_div")]
+    func div(self, other: byte): byte;
+}
+
+impl ops::Rem for byte {
+    #[intrinsic("i8_rem")]
+    func rem(self, other: byte): byte;
+}
+
+impl cmp::Eq for byte {
+    #[intrinsic("i8_eq")]
+    func eq(self, other: byte): bool;
+}
+
+impl cmp::Cmp for byte {
+    #[intrinsic("i8_lt")]
+    func lt(self, other: byte): bool;
+
+    #[intrinsic("i8_le")]
+    func le(self, other: byte): bool;
+
+    #[intrinsic("i8_gt")]
+    func gt(self, other: byte): bool;
+
+    #[intrinsic("i8_ge")]
+    func ge(self, other: byte): bool;
+}

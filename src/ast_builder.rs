@@ -604,6 +604,7 @@ impl AstBuilder {
         let prelude_modules = vec![
             "assert",
             "builtins",
+            "byte",
             "cmp",
             "debug",
             "float",
@@ -1471,7 +1472,57 @@ impl AstBuilder {
             return self.parse_function_type();
         }
 
+        // Byte pointer type: `*byte` (a pointer into a byte buffer). Lowered to
+        // the same representation as `str` (a GC'd byte buffer) by the IR.
+        if self.match_value("*") {
+            self.advance(); // consume '*'
+            if !self.match_type(&TokenType::Keyword) && !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected type name after '*'");
+                return None;
+            }
+            let pointee = self.parse_type()?;
+            return Some(Box::new(PointerType::new(pointee)));
+        }
+
+        // Byte array type: `[byte]` (an unsized array of bytes). Lowered to the
+        // same representation as `str` by the IR.
+        if self.match_value("[") {
+            self.advance(); // consume '['
+        if self.match_value("(") {
+            self.advance();
+            let mut args = Vec::new();
+            while !self.match_value(")") && !self.error_occurred {
+                args.push(self.parse_type()?);
+                if self.match_value(",") {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume_value(")", "Expected ')' after tuple type");
+            self.consume_value("]", "Expected ']' after tuple type");
+            return Some(Box::new(GenericType::new("tuple", args)));
+        }
         if !self.match_type(&TokenType::Keyword) && !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected type name after '['");
+                return None;
+            }
+            let name = self.current_token().value.clone();
+            self.advance();
+            self.consume_value("]", "Expected ']' after array element type");
+            return Some(Box::new(ArrayType::new_nested(
+                Box::new(BasicType::new(name)),
+                Box::new(NumberLiteral::new(0.0)),
+            )));
+        }
+
+        if !self.match_type(&TokenType::Keyword) && !self.match_type(&TokenType::Identifier) {
+            // Unit type: `()` — maps to None_ (the null/void type).
+            if self.match_value("(") && self.peek_next_token().value == ")" {
+                self.advance(); // '('
+                self.advance(); // ')'
+                return Some(Box::new(BasicType::new("()")));
+            }
             self.log_error("Expected type name");
             return None;
         }
@@ -2101,7 +2152,10 @@ impl AstBuilder {
         loop {
             if self.match_value(".") {
                 self.advance();
-                if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+                if !self.match_type(&TokenType::Identifier)
+                    && !self.match_type(&TokenType::Keyword)
+                    && !self.match_type(&TokenType::Number)
+                {
                     self.log_error("Expected identifier after '.'");
                     return Some(expr);
                 }
@@ -2267,8 +2321,20 @@ impl AstBuilder {
         // 括号表达式: (1 + 2)
         if self.match_value("(") {
             self.advance();
-            let expr = self.parse_expression()?;
-            // 处理元组（简单地跳过额外的表达式）
+            let first = self.parse_expression()?;
+            if self.match_value(",") {
+                let mut elements = vec![first];
+                while self.match_value(",") {
+                    self.advance();
+                    if self.match_value(")") {
+                        break;
+                    }
+                    elements.push(self.parse_expression()?);
+                }
+                self.consume_value(")", "Expected ')' after tuple expression");
+                return Some(Box::new(ArrayLiteral::new(elements)));
+            }
+            let expr = first;
             while self.match_value(",") {
                 self.advance();
                 self.parse_expression();
@@ -2375,12 +2441,18 @@ impl AstBuilder {
 
     fn parse_array_literal(&mut self) -> Option<Box<dyn Expression>> {
         self.advance(); // consume '['
+        self.consume_end_of_line();
 
         let mut elements: Vec<Box<dyn Expression>> = Vec::new();
 
         while !self.match_value("]") && !self.error_occurred {
+            self.consume_end_of_line();
+            if self.match_value("]") {
+                break;
+            }
             if self.match_value(",") {
                 self.advance();
+                self.consume_end_of_line();
                 continue;
             }
             let elem = match self.parse_expression() {
@@ -2395,6 +2467,7 @@ impl AstBuilder {
 
             if self.match_value(",") {
                 self.advance();
+                self.consume_end_of_line();
             } else {
                 break;
             }
@@ -2449,6 +2522,76 @@ impl AstBuilder {
         Some(Box::new(block))
     }
 
+    /// Parse a match pattern (supports literals, wildcard, variables, and enum variants)
+    /// 
+    /// Examples:
+    ///   - `_` → Wildcard
+    ///   - `42` → Literal(Int(42))
+    ///   - `"hello"` → Literal(Str("hello"))
+    ///   - `x` → Variable("x")
+    ///   - `None` → Variable("None") (语义分析时判断是否为枚举变体)
+    ///   - `Some(x)` → EnumVariant { variant_name: "Some", payload: Some(Variable("x")) }
+    ///   - `Ok(value)` → EnumVariant { variant_name: "Ok", payload: Some(Variable("value")) }
+    ///   - `Err(e)` → EnumVariant { variant_name: "Err", payload: Some(Variable("e")) }
+    ///   - `Some(Ok(x))` → EnumVariant { variant_name: "Some", payload: Some(EnumVariant { ... }) }
+    fn parse_match_pattern(&mut self) -> Option<MatchPattern> {
+        if self.match_value("_") {
+            self.advance();
+            return Some(MatchPattern::Wildcard);
+        }
+
+        if self.match_type(&TokenType::Number) {
+            let val = self.current_token().value.clone();
+            self.advance();
+            if val.contains('.') {
+                return Some(MatchPattern::Literal(RtValueSimple::FloatStr(val)));
+            } else {
+                return Some(MatchPattern::Literal(RtValueSimple::Int(val.parse().unwrap_or(0))));
+            }
+        }
+
+        if self.match_type(&TokenType::String) {
+            let val = self.current_token().value.clone();
+            self.advance();
+            return Some(MatchPattern::Literal(RtValueSimple::Str(val)));
+        }
+
+        if self.match_type(&TokenType::Keyword) && (self.current_token().value == "true" || self.current_token().value == "false") {
+            let val = self.current_token().value == "true";
+            self.advance();
+            return Some(MatchPattern::Literal(RtValueSimple::Bool(val)));
+        }
+
+        if self.match_type(&TokenType::Identifier) {
+            let name = self.current_token().value.clone();
+            self.advance();
+
+            // 枚举变体带负载: VariantName(payload)
+            if self.match_value("(") {
+                self.advance(); // consume '('
+
+                // 解析负载模式（递归调用自己）
+                let payload = self.parse_match_pattern()?;
+
+                self.consume_value(")", "Expected ')' after enum variant payload");
+
+                return Some(MatchPattern::EnumVariant {
+                    enum_name: String::new(), // 语义分析时填充
+                    variant_name: name,
+                    variant_index: 0,
+                    payload: Some(Box::new(payload)),
+                });
+            }
+
+            // 普通变量绑定（语义分析时会判断是否为无负载枚举变体）
+            return Some(MatchPattern::Variable(name));
+        }
+
+        self.log_error("Expected pattern in match arm");
+        None
+    }
+
+    /// Parse a match expression
     fn parse_match_expression(&mut self) -> Option<Box<dyn Expression>> {
         self.advance(); // consume 'match'
 
@@ -2464,33 +2607,10 @@ impl AstBuilder {
             self.consume_end_of_line();
             if self.match_value("}") { break; }
 
-            // Parse pattern
-            let pattern = if self.match_value("_") {
-                self.advance();
-                MatchPattern::Wildcard
-            } else if self.match_type(&TokenType::Number) {
-                let val = self.current_token().value.clone();
-                self.advance();
-                if val.contains('.') {
-                    MatchPattern::Literal(RtValueSimple::FloatStr(val))
-                } else {
-                    MatchPattern::Literal(RtValueSimple::Int(val.parse().unwrap_or(0)))
-                }
-            } else if self.match_type(&TokenType::String) {
-                let val = self.current_token().value.clone();
-                self.advance();
-                MatchPattern::Literal(RtValueSimple::Str(val))
-            } else if self.match_type(&TokenType::Keyword) && (self.current_token().value == "true" || self.current_token().value == "false") {
-                let val = self.current_token().value == "true";
-                self.advance();
-                MatchPattern::Literal(RtValueSimple::Bool(val))
-            } else if self.match_type(&TokenType::Identifier) {
-                let name = self.current_token().value.clone();
-                self.advance();
-                MatchPattern::Variable(name)
-            } else {
-                self.log_error("Expected pattern in match arm");
-                return None;
+            // ---- 使用提取出的 parse_match_pattern ----
+            let pattern = match self.parse_match_pattern() {
+                Some(p) => p,
+                None => return None,
             };
 
             // Expect '=>' (tokenized as '=' then '>')
@@ -2504,6 +2624,13 @@ impl AstBuilder {
                 let b = self.parse_block();
                 self.consume_value("}", "Expected '}' after match arm block");
                 b.map(|b| b as Box<dyn Statement>)
+            } else if self.match_type(&TokenType::Keyword)
+                && self.current_token().value == "return"
+            {
+                let stmt = self.parse_return_statement()?;
+                let mut block = Block::new();
+                block.add_statement(stmt);
+                Some(Box::new(block))
             } else {
                 let expr = self.parse_expression()?;
                 let mut block = Block::new();

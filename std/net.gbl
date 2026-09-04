@@ -1,35 +1,102 @@
 // std/net.gbl — Networking module.
 //
-// Provides TCP client and server primitives via `TcpStream` and
-// `TcpListener` structs. All low-level operations are `#[intrinsic]`
-// and dispatched to the C runtime (runtime.c).
+// Provides TCP client and server primitives via TcpStream and TcpListener.
+// Supports IPv4/IPv6 + DNS resolution, timeouts, keepalive, binary-safe I/O,
+// and automatic cleanup via Drop.
 
 struct TcpStream {
     _fd: int
 };
 
+impl Drop for TcpStream {
+    func drop(self) {
+        if self._fd > 0 {
+            self.close();
+        }
+    }
+}
+
 impl TcpStream {
+    /// Connect to a server. Supports IPv4/IPv6 addresses and domain names.
+    /// timeout_ms: 0 = no timeout (blocking), >0 = milliseconds.
     #[intrinsic("tcp_connect")]
-    func connect(addr: str, port: int): TcpStream;
+    func connect(addr: str, port: int, timeout_ms: int): Result<TcpStream, str>;
 
-    #[intrinsic("tcp_send")]
-    func send(self, data: str): int;
+    /// Send a string. Binary data with \0 will be truncated — use send_bytes for binary.
+    #[intrinsic("tcp_send_str")]
+    func send_str(self, data: str): Result<int, str>;
 
-    #[intrinsic("tcp_recv")]
-    func recv(self, len: int): str;
+    /// Send raw bytes (binary-safe).
+    #[intrinsic("tcp_send_bytes")]
+    func send_bytes(self, buf: *byte, len: int): Result<int, str>;
 
+    /// Receive up to max_len bytes (may return fewer).
+    #[intrinsic("tcp_recv_bytes")]
+    func recv_bytes(self, max_len: int): Result<[byte], str>;
+
+    /// Receive exactly len bytes (blocks until all received or error/EOF).
+    #[intrinsic("tcp_recv_exact")]
+    func recv_exact(self, len: int): Result<[byte], str>;
+
+    /// Explicitly close the connection. Also called automatically via Drop.
     #[intrinsic("tcp_close")]
-    func close(self);
+    func close(self): Result<(), str>;
+
+    /// Set read timeout for subsequent recv calls.
+    #[intrinsic("tcp_set_read_timeout")]
+    func set_read_timeout(self, timeout_ms: int): Result<(), str>;
+
+    /// Set write timeout for subsequent send calls.
+    #[intrinsic("tcp_set_write_timeout")]
+    func set_write_timeout(self, timeout_ms: int): Result<(), str>;
+
+    /// Enable TCP keepalive with configurable parameters.
+    /// idle_secs: seconds of idle time before sending probes (default 7200).
+    /// interval_secs: seconds between probes (default 75).
+    /// probes: number of failed probes before declaring dead (default 9).
+    #[intrinsic("tcp_set_keepalive")]
+    func set_keepalive(self, enable: bool, idle_secs: int, interval_secs: int, probes: int): Result<(), str>;
+
+    /// Get local address as string.
+    #[intrinsic("tcp_local_addr")]
+    func local_addr(self): Result<str, str>;
+
+    /// Get remote address as string.
+    #[intrinsic("tcp_remote_addr")]
+    func remote_addr(self): Result<str, str>;
+
+    /// Quick check if connection appears alive.
+    /// Note: this only detects peer-initiated close, not network timeouts.
+    /// Use set_keepalive for robust dead-connection detection.
+    #[intrinsic("tcp_is_alive")]
+    func is_alive(self): bool;
 };
 
 struct TcpListener {
     _fd: int
 };
 
-impl TcpListener {
-    #[intrinsic("tcp_bind")]
-    func bind(addr: str, port: int): TcpListener;
+impl Drop for TcpListener {
+    func drop(self) {
+        if self._fd > 0 {
+            self.close();
+        }
+    }
+}
 
+impl TcpListener {
+    /// Bind to an address and start listening.
+    /// backlog: max pending connections (default 128 if <=0).
+    /// ipv6_only: if true, IPv6 only; if false, dual-stack (IPv4 + IPv6) on systems that support it.
+    #[intrinsic("tcp_bind")]
+    func bind(addr: str, port: int, backlog: int, ipv6_only: bool): Result<TcpListener, str>;
+
+    /// Accept an incoming connection.
+    /// timeout_ms: 0 = blocking (wait forever), -1 = non-blocking, >0 = milliseconds.
     #[intrinsic("tcp_accept")]
-    func accept(self): TcpStream;
+    func accept(self, timeout_ms: int): Result<TcpStream, str>;
+
+    /// Explicitly close the listener. Also called automatically via Drop.
+    #[intrinsic("tcp_listener_close")]
+    func close(self): Result<(), str>;
 };

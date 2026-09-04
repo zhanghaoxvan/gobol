@@ -20,5 +20,6 @@ vscode-gobol/node_modules/
 vscode-gobol/.marscode/
 vscode-gobol/out/
 vscode-gobol/out/extension.js
+vscode-gobol/*.vsix
 
 __pycache__/

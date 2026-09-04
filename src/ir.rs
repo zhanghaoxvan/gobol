@@ -104,6 +104,7 @@ pub enum IRExpr {
 #[derive(Debug, Clone)]
 pub enum LitValue {
     Int(i64),
+    Byte(u8),
     Float(f64),
     Bool(bool),
     Str(String),
@@ -136,6 +137,9 @@ pub struct IRBuilder {
     
     // 错误收集
     errors: Vec<String>,
+
+    /// 枚举变体索引: (enum_name, variant_name) -> variant_index
+    variant_indices: HashMap<(String, String), i32>,
 
     // #[expand] functions: name → (param names, body IR)
     expand_functions: HashMap<String, (Vec<String>, IRBlock)>,
@@ -175,6 +179,7 @@ impl IRBuilder {
             structs: HashMap::new(),
             methods: HashMap::new(),
             errors: Vec::new(),
+            variant_indices: HashMap::new(),
             expand_functions: HashMap::new(),
             current_file: String::new(),
             tmp_counter: 0,
@@ -328,6 +333,12 @@ impl IRBuilder {
             return binding;
         }
 
+        // Pointer type
+        if let Some(ptr) = ty.as_type_any().downcast_ref::<PointerType>() {
+            let inner = self.ast_type_to_data_type(Some(ptr.get_pointee()));
+            return DataType::Pointer(Box::new(inner));
+        }
+
         // 检查数组类型 → return Array with element type
         if let Some(arr) = ty.as_type_any().downcast_ref::<ArrayType>() {
             let elem = self.ast_type_to_data_type(Some(arr.get_element_type()));
@@ -347,6 +358,9 @@ impl IRBuilder {
                 let elem = self.ast_type_to_data_type(Some(&*gt.get_type_args()[0]));
                 return elem;
             }
+            if base_name == "tuple" {
+                return DataType::Array(Box::new(DataType::Unknown));
+            }
             // 其他泛型类型当作结构体
             return DataType::Struct(base_name.to_string());
         }
@@ -364,6 +378,9 @@ impl IRBuilder {
             "bool" => DataType::Bool,
             "str" => DataType::Str,
             "none" => DataType::None_,
+            // byte and unit aliases
+            "byte" => DataType::Int,
+            "()" => DataType::None_,
             name => DataType::Struct(name.to_string()),
         }
     }
@@ -446,37 +463,125 @@ impl IRBuilder {
         self.current_function_return = DataType::None_;
     }
 
-    fn build_match_condition(&mut self, scrutinee: &IRExpr, pattern: &MatchPattern) -> IRExpr {
-        match pattern {
-            MatchPattern::Wildcard => {
-                IRExpr::Literal(LitValue::Bool(true))
-            }
-            MatchPattern::Literal(lit) => {
-                let lit_expr = match lit {
-                    RtValueSimple::Int(n) => IRExpr::Literal(LitValue::Int(*n)),
-                    RtValueSimple::FloatStr(s) => {
-                        if let Ok(f) = s.parse::<f64>() {
-                            IRExpr::Literal(LitValue::Float(f))
-                        } else {
-                            IRExpr::Literal(LitValue::Str(s.clone()))
+    #[allow(dead_code)]
+    fn visit_match_expression(&mut self, node: &MatchExpression) {
+        // 1. Evaluate scrutinee
+        let scrutinee = if let Some(scrut) = node.get_scrutinee() {
+            scrut.accept(self);
+            self.pop_expr()
+        } else {
+            IRExpr::None
+        };
+
+        let arms = node.get_arms();
+        if arms.is_empty() {
+            self.push_expr(IRExpr::None);
+            return;
+        }
+
+        // 2. Create temp variable for match result
+        let scrutinee_name = format!("__match_value_{}", self.tmp_counter);
+        self.tmp_counter += 1;
+        self.current_block.push(IRStmt::Declaration {
+            name: scrutinee_name.clone(),
+            ty: DataType::Int,
+            init: Some(scrutinee.clone()),
+        });
+        self.var_types.insert(scrutinee_name.clone(), DataType::Int);
+        let scrutinee = IRExpr::Variable(scrutinee_name);
+        let tmp_name = format!("__match_result_{}", self.tmp_counter);
+        self.tmp_counter += 1;
+
+        // Determine result type from the arms
+        let result_type = DataType::Str;
+
+        // Initialize temp variable with default value
+        self.current_block.push(IRStmt::Declaration {
+            name: tmp_name.clone(),
+            ty: result_type.clone(),
+            init: Some(IRExpr::Literal(LitValue::Str("".to_string()))),
+        });
+        self.var_types.insert(tmp_name.clone(), result_type.clone());
+
+        // 3. Build if-else chain (iterating arms from back to front)
+        let mut else_block = None;
+
+        for arm in arms.iter().rev() {
+            // Build condition
+            let cond = self.build_match_condition(&scrutinee, &arm.pattern);
+
+            // Build arm body with assignment to temp variable
+            let mut then_block = IRBlock { statements: Vec::new() };
+
+            if let Some(body) = &arm.body {
+                let mut sub_builder = IRBuilder::new();
+                sub_builder.generic_stack = self.generic_stack.clone();
+                sub_builder.block_depth = 2;
+
+                // ---- 新增：处理枚举变体模式中的变量绑定 ----
+                if let MatchPattern::EnumVariant { payload, .. } = &arm.pattern {
+                    if let Some(p) = payload {
+                        if let MatchPattern::Variable(bind_name) = p.as_ref() {
+                            // 从 scrutinee 中提取 payload 并绑定到变量
+                            // 这将在 IR 生成中处理
+                            // 暂时在 sub_builder 中声明变量
+                            sub_builder.var_types.insert(bind_name.clone(), DataType::Int);
                         }
                     }
-                    RtValueSimple::Str(s) => IRExpr::Literal(LitValue::Str(s.clone())),
-                    RtValueSimple::Bool(b) => IRExpr::Literal(LitValue::Bool(*b)),
-                };
-                
-                IRExpr::Binary {
-                    op: "==".to_string(),
-                    left: Box::new(scrutinee.clone()),
-                    right: Box::new(lit_expr),
                 }
+
+                if let Some(block_node) = body.as_any().downcast_ref::<Block>() {
+                    for stmt in block_node.get_statements() {
+                        stmt.accept(&mut sub_builder);
+                    }
+                } else {
+                    body.accept(&mut sub_builder);
+                }
+
+                // Extract the result value from the last statement
+                if let Some(last_stmt) = sub_builder.current_block.last_mut() {
+                    match last_stmt {
+                        IRStmt::Expression(expr) => {
+                            *last_stmt = IRStmt::Assignment {
+                                target: IRExpr::Variable(tmp_name.clone()),
+                                value: expr.clone(),
+                            };
+                        }
+                        IRStmt::Return(Some(expr)) => {
+                            *last_stmt = IRStmt::Assignment {
+                                target: IRExpr::Variable(tmp_name.clone()),
+                                value: expr.clone(),
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+
+                then_block.statements.extend(sub_builder.current_block);
             }
-            MatchPattern::Variable(_name) => {
-                // 变量模式总是匹配，在 body 中处理绑定
-                IRExpr::Literal(LitValue::Bool(true))
-            }
+
+            // Create if statement
+            let if_stmt = IRStmt::If {
+                cond,
+                then_block,
+                else_block: else_block.take(),
+            };
+
+            let mut block = IRBlock { statements: Vec::new() };
+            block.statements.push(if_stmt);
+            else_block = Some(block);
         }
+
+        // 4. Insert the if-else chain
+        if let Some(final_block) = else_block {
+            self.current_block.extend(final_block.statements);
+        }
+
+        // 5. Generate a Return statement so the sub-builder logic can extract the result
+        self.current_block.push(IRStmt::Return(Some(IRExpr::Variable(tmp_name))));
     }
+
+
 
     #[allow(dead_code)]
     fn build_arm_body(&mut self, arm: &MatchArm) -> IRBlock {
@@ -521,6 +626,64 @@ impl IRBuilder {
         }
 
         block
+    }
+
+    fn build_match_condition(&mut self, scrutinee: &IRExpr, pattern: &MatchPattern) -> IRExpr {
+        match pattern {
+            MatchPattern::Wildcard => {
+                IRExpr::Literal(LitValue::Bool(true))
+            }
+            MatchPattern::Literal(lit) => {
+                let lit_expr = match lit {
+                    RtValueSimple::Int(n) => IRExpr::Literal(LitValue::Int(*n)),
+                    RtValueSimple::FloatStr(s) => {
+                        if let Ok(f) = s.parse::<f64>() {
+                            IRExpr::Literal(LitValue::Float(f))
+                        } else {
+                            IRExpr::Literal(LitValue::Str(s.clone()))
+                        }
+                    }
+                    RtValueSimple::Str(s) => IRExpr::Literal(LitValue::Str(s.clone())),
+                    RtValueSimple::Bool(b) => IRExpr::Literal(LitValue::Bool(*b)),
+                };
+
+                IRExpr::Binary {
+                    op: "==".to_string(),
+                    left: Box::new(scrutinee.clone()),
+                    right: Box::new(lit_expr),
+                }
+            }
+            MatchPattern::Variable(_name) => {
+                IRExpr::Literal(LitValue::Bool(true))
+            }
+            MatchPattern::EnumVariant { enum_name, variant_name, variant_index, .. } => {
+                // 如果 variant_index 是 0（占位），从 variant_indices 中查找
+                let idx = if *variant_index == 0 {
+                    if let Some(&idx) = self.variant_indices.get(&(enum_name.clone(), variant_name.clone())) {
+                        idx
+                    } else {
+                        // Patterns parsed without a resolvable enum path still
+                        // retain the conventional standard-library variant
+                        // names.
+                        match variant_name.as_str() {
+                            "Err" | "None" => 1,
+                            _ => 0,
+                        }
+                    }
+                } else {
+                    *variant_index
+                };
+
+                IRExpr::Binary {
+                    op: "==".to_string(),
+                    left: Box::new(IRExpr::MemberAccess {
+                        object: Box::new(scrutinee.clone()),
+                        member: "_tag".to_string(),
+                    }),
+                    right: Box::new(IRExpr::Literal(LitValue::Int(idx as i64))),
+                }
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -967,6 +1130,7 @@ impl IRBuilder {
             IRExpr::Literal(LitValue::Int(_)) => DataType::Int,
             IRExpr::Literal(LitValue::Float(_)) => DataType::Float,
             IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
+            IRExpr::Literal(LitValue::Byte(_)) => DataType::Byte,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
             IRExpr::Variable(name) => self.var_types.get(name).cloned().unwrap_or(DataType::Int),
@@ -1204,7 +1368,6 @@ impl AstVisitor for IRBuilder {
 
         self.push_generic_scope(&generic_params);
 
-        // Lower enum to a tagged struct: _tag (int) + _N payloads
         let mut fields = vec![IRField {
             name: "_tag".to_string(),
             ty: DataType::Int,
@@ -1212,10 +1375,14 @@ impl AstVisitor for IRBuilder {
 
         let mut variant_idx = 0i32;
         for variant in node.get_variants() {
+            // ---- 存储变体索引 ----
+            self.variant_indices.insert((name.clone(), variant.name.clone()), variant_idx);
+
             if let Some(ref payload) = variant.payload_type {
+                let payload_ty = self.ast_type_to_data_type(Some(payload.as_ref()));
                 fields.push(IRField {
                     name: format!("_{}", variant_idx),
-                    ty: self.ast_type_to_data_type(Some(payload.as_ref())),
+                    ty: payload_ty.clone(),
                 });
             }
             variant_idx += 1;
@@ -1234,7 +1401,7 @@ impl AstVisitor for IRBuilder {
 
         self.pop_generic_scope();
 
-        // Generate variant constructor methods for each variant as an impl block.
+        // Generate variant constructor methods
         let mut methods = Vec::new();
         variant_idx = 0;
         for variant in node.get_variants() {
@@ -1243,7 +1410,6 @@ impl AstVisitor for IRBuilder {
 
             let mut body_stmts = Vec::new();
 
-            // self._tag = variant_idx
             body_stmts.push(IRStmt::Assignment {
                 target: IRExpr::MemberAccess {
                     object: Box::new(IRExpr::Variable("self".to_string())),
@@ -1252,7 +1418,6 @@ impl AstVisitor for IRBuilder {
                 value: IRExpr::Literal(LitValue::Int(variant_idx as i64)),
             });
 
-            // If payload: self._N = value
             if has_payload {
                 body_stmts.push(IRStmt::Assignment {
                     target: IRExpr::MemberAccess {
@@ -1263,7 +1428,6 @@ impl AstVisitor for IRBuilder {
                 });
             }
 
-            // return self
             body_stmts.push(IRStmt::Return(Some(IRExpr::Variable("self".to_string()))));
 
             let mut params = vec![IRParam {
@@ -1274,7 +1438,7 @@ impl AstVisitor for IRBuilder {
             if has_payload {
                 params.push(IRParam {
                     name: "_val".to_string(),
-                    ty: DataType::Int, // generic payload → i64
+                    ty: DataType::Int,
                 });
             }
 
@@ -2167,18 +2331,34 @@ impl AstVisitor for IRBuilder {
             return;
         }
 
-        // 2. Create temp variable for match result
+        // 2. Evaluate the scrutinee once; arm conditions may otherwise repeat
+        // side-effecting calls such as socket bind/connect.
+        let scrutinee_name = format!("__match_value_{}", self.tmp_counter);
+        self.tmp_counter += 1;
+        self.current_block.push(IRStmt::Declaration {
+            name: scrutinee_name.clone(),
+            ty: DataType::Int,
+            init: Some(scrutinee),
+        });
+        self.var_types.insert(scrutinee_name.clone(), DataType::Int);
+        let scrutinee = IRExpr::Variable(scrutinee_name);
+
+        // 3. Create temp variable for match result
         let tmp_name = format!("__match_result_{}", self.tmp_counter);
         self.tmp_counter += 1;
 
         // Determine result type from the arms
-        let result_type = DataType::Str; // Default for string results
+        // All current aggregate values and match control-flow results are
+        // represented as a machine word in the backend.  Using `Str` here
+        // made boolean and enum payload arms assign into a mismatched
+        // Cranelift variable.
+        let result_type = DataType::Int;
 
         // Initialize temp variable with default value
         self.current_block.push(IRStmt::Declaration {
             name: tmp_name.clone(),
             ty: result_type.clone(),
-            init: Some(IRExpr::Literal(LitValue::Str("".to_string()))),
+            init: Some(IRExpr::Literal(LitValue::Int(0))),
         });
         self.var_types.insert(tmp_name.clone(), result_type.clone());
 
@@ -2196,6 +2376,20 @@ impl AstVisitor for IRBuilder {
                 let mut sub_builder = IRBuilder::new();
                 sub_builder.generic_stack = self.generic_stack.clone();
                 sub_builder.block_depth = 2;
+
+                if let MatchPattern::EnumVariant { payload: Some(payload), .. } = &arm.pattern {
+                    if let MatchPattern::Variable(bind_name) = payload.as_ref() {
+                        sub_builder.current_block.push(IRStmt::Declaration {
+                            name: bind_name.clone(),
+                            ty: DataType::Int,
+                            init: Some(IRExpr::MemberAccess {
+                                object: Box::new(scrutinee.clone()),
+                                member: "_0".to_string(),
+                            }),
+                        });
+                        sub_builder.var_types.insert(bind_name.clone(), DataType::Int);
+                    }
+                }
 
                 if let Some(block_node) = body.as_any().downcast_ref::<Block>() {
                     for stmt in block_node.get_statements() {
@@ -2427,6 +2621,7 @@ impl AstVisitor for IRBuilder {
     fn visit_parameter(&mut self, _node: &Parameter) {}
     fn visit_basic_type(&mut self, _node: &BasicType) {}
     fn visit_type(&mut self, _node: &dyn Type) {}
+    fn visit_pointer_type(&mut self, _node: &PointerType) {}
     fn visit_array_type(&mut self, _node: &ArrayType) {}
     fn visit_for_statement(&mut self, node: &ForStatement) {
         let vars = node.get_loop_variables().clone();

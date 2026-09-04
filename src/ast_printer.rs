@@ -161,6 +161,11 @@ impl AstVisitor for AstPrinter {
         }
     }
 
+    fn visit_pointer_type(&mut self, _node: &PointerType) {
+        print!("*");
+        _node.get_pointee().accept(self);
+    }
+
     fn visit_array_type(&mut self, node: &ArrayType) {
         if node.is_multi_dimensional() {
             let element = node.get_element_type();
@@ -779,6 +784,46 @@ impl AstVisitor for AstPrinter {
                         RtValueSimple::FloatStr(v) => print!("literal({}f)", v),
                         RtValueSimple::Str(v) => print!("literal(\"{}\")", v),
                         RtValueSimple::Bool(v) => print!("literal({})", v),
+                    }
+                }
+                MatchPattern::EnumVariant { enum_name, variant_name, variant_index: _, payload } => {
+                    // 打印枚举变体模式
+                    if !enum_name.is_empty() {
+                        print!("{}::", enum_name);
+                    }
+                    print!("{}", variant_name);
+                    if let Some(p) = payload {
+                        print!("(");
+                        match p.as_ref() {
+                            MatchPattern::Literal(val) => {
+                                match val {
+                                    RtValueSimple::Int(v) => print!("{}", v),
+                                    RtValueSimple::FloatStr(v) => print!("{}", v),
+                                    RtValueSimple::Str(v) => print!("\"{}\"", v),
+                                    RtValueSimple::Bool(v) => print!("{}", v),
+                                }
+                            }
+                            MatchPattern::Wildcard => print!("_"),
+                            MatchPattern::Variable(name) => print!("{}", name),
+                            MatchPattern::EnumVariant { enum_name: nested_enum, variant_name: nested_variant, variant_index: _, payload: nested_payload } => {
+                                // 嵌套枚举：Some(Ok(x))
+                                if !nested_enum.is_empty() {
+                                    print!("{}::", nested_enum);
+                                }
+                                print!("{}", nested_variant);
+                                if let Some(np) = nested_payload {
+                                    print!("(");
+                                    // 这里可以递归调用，但为了简化，直接打印变量名或通配符
+                                    match np.as_ref() {
+                                        MatchPattern::Variable(name) => print!("{}", name),
+                                        MatchPattern::Wildcard => print!("_"),
+                                        _ => print!("..."),
+                                    }
+                                    print!(")");
+                                }
+                            }
+                        }
+                        print!(")");
                     }
                 }
                 MatchPattern::Wildcard => print!("_"),

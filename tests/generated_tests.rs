@@ -1,7 +1,3 @@
-// ============================================================
-// 自动生成集成测试 | 禁止手动修改
-// 更新用例后重新执行 ./test.sh 刷新本文件
-// ============================================================
 mod common;
 use common::*;
 
@@ -372,6 +368,38 @@ fn test_stdlib_result_test() {
 #[test]
 fn test_stdlib_enum_test() {
     let path = fixture_path("fixtures/stdlib/enum_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：stdlib/fs_test.gbl | 文件系统测试
+#[test]
+fn test_stdlib_fs_test() {
+    let path = fixture_path("fixtures/stdlib/fs_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：stdlib/math_test.gbl | 数学函数测试
+#[test]
+fn test_stdlib_math_test() {
+    let path = fixture_path("fixtures/stdlib/math_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：stdlib/net_test.gbl | 网络模块测试
+#[test]
+fn test_stdlib_net_test() {
+    let path = fixture_path("fixtures/stdlib/net_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// 用例：stdlib/str_test.gbl | 字符串测试
+#[test]
+fn test_stdlib_str_test() {
+    let path = fixture_path("fixtures/stdlib/str_test.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
 }

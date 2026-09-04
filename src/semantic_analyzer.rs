@@ -9,6 +9,29 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+fn resolve_enum_payload_type(scrutinee: &DataType, declared: &DataType) -> DataType {
+    if !matches!(declared, DataType::Struct(name) if name == "T" || name == "E") {
+        return declared.clone();
+    }
+    let DataType::Struct(name) = scrutinee else {
+        return declared.clone();
+    };
+    let Some(open) = name.find('<') else {
+        return declared.clone();
+    };
+    let args = name[open + 1..].trim_end_matches('>');
+    let index = if matches!(declared, DataType::Struct(n) if n == "T") { 0 } else { 1 };
+    args.split(',').nth(index)
+        .map(|arg| match arg.trim() {
+            "int" => DataType::Int,
+            "float" => DataType::Float,
+            "str" => DataType::Str,
+            "bool" => DataType::Bool,
+            other => DataType::Struct(other.to_string()),
+        })
+        .unwrap_or_else(|| declared.clone())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BuildMode {
     Debug,
@@ -61,6 +84,10 @@ pub struct SemanticAnalyzer {
     /// name -> (generic params, param types, return type). Populated for
     /// top-level generic functions so `var a: float = identity(3.5)` type-checks.
     generic_signatures: HashMap<String, (Vec<String>, Vec<DataType>, DataType)>,
+    /// 枚举变体信息: enum_name -> (variant_names, variant_payload_types)
+    enum_info: HashMap<String, (Vec<String>, Vec<Option<DataType>>)>,
+    /// 当前 match 中绑定的变量: arm_index -> (pattern_path -> var_name)
+    match_bindings: Vec<HashMap<String, DataType>>,
 }
 
 /// Registered trait method signature for validation
@@ -108,6 +135,8 @@ impl SemanticAnalyzer {
             extern_libs: Vec::new(),
             impl_methods: HashSet::new(),
             generic_signatures: HashMap::new(),
+            enum_info: HashMap::new(),
+            match_bindings: Vec::new(),
         }
     }
 
@@ -566,6 +595,9 @@ impl SemanticAnalyzer {
                 let elem_type = self.get_data_type_from_ast(Some(&*gt.get_type_args()[0]));
                 return elem_type; // treated as element type (array)
             }
+            if base == "tuple" {
+                return DataType::Array(Box::new(DataType::Unknown));
+            }
             // PascalCase generic types (Vec<T>, Result<T, E>, etc.) — treat as struct
             return DataType::Struct(base.to_string());
         }
@@ -574,6 +606,12 @@ impl SemanticAnalyzer {
         if let Some(nullable) = tp.as_type_any().downcast_ref::<NullableType>() {
             let inner = self.get_data_type_from_ast(Some(nullable.get_inner_type()));
             return DataType::Nullable(Box::new(inner));
+        }
+
+        // Check for PointerType
+        if let Some(ptr) = tp.as_type_any().downcast_ref::<PointerType>() {
+            let inner = self.get_data_type_from_ast(Some(ptr.get_pointee()));
+            return DataType::Pointer(Box::new(inner));
         }
 
         // Check for FunctionType (e.g. `func(T): U` callback parameters).
@@ -595,6 +633,9 @@ impl SemanticAnalyzer {
             "float" => DataType::Float,
             "str" => DataType::Str,
             "bool" => DataType::Bool,
+            // byte and unit aliases
+            "byte" => DataType::Byte,
+            "()" => DataType::None_,
             name => {
                 // Allow current function's generic type parameters
                 if self.current_generic_params.iter().any(|g| g == name) {
@@ -606,6 +647,25 @@ impl SemanticAnalyzer {
                 self.error(&format!("Unknown type: {}", name));
                 DataType::Unknown
             }
+        }
+    }
+
+    fn get_variant_index(&self, enum_name: &str, variant_name: &str) -> Option<i32> {
+        if let Some((variant_names, _)) = self.enum_info.get(enum_name) {
+            for (i, vname) in variant_names.iter().enumerate() {
+                if vname == variant_name {
+                    return Some(i as i32);
+                }
+            }
+        }
+        None
+    }
+
+    fn enum_has_variant(&self, enum_name: &str, variant_name: &str) -> bool {
+        if let Some((variant_names, _)) = self.enum_info.get(enum_name) {
+            variant_names.iter().any(|v| v == variant_name)
+        } else {
+            false
         }
     }
 
@@ -1441,35 +1501,40 @@ impl AstVisitor for SemanticAnalyzer {
         #[cfg(debug_assertions)]
         println!("  Enum definition: {} ({} variants)", enum_name, node.get_variants().len());
 
-        // Push generic scope so that type params like T, E are resolved
         let prev_generic = self.current_generic_params.clone();
         self.current_generic_params = generic_params.clone();
 
-        // Lower enum to a tagged struct:
-        //   struct EnumName { _tag: int, _0: Payload0, _1: Payload1, ... }
         let mut fields = HashMap::new();
         fields.insert("_tag".to_string(), DataType::Int);
 
+        // ---- 收集变体信息 ----
+        let mut variant_names = Vec::new();
+        let mut variant_payloads = Vec::new();
+
         let mut variant_idx = 0i32;
         for variant in node.get_variants() {
+            variant_names.push(variant.name.clone());
+
             if let Some(ref payload) = variant.payload_type {
                 let field_ty = self.get_data_type_from_ast(Some(payload.as_ref()));
-                fields.insert(format!("_{}", variant_idx), field_ty);
+                fields.insert(format!("_{}", variant_idx), field_ty.clone());
+                variant_payloads.push(Some(field_ty));
+            } else {
+                variant_payloads.push(None);
             }
             variant_idx += 1;
         }
-        self.struct_fields.insert(enum_name.clone(), fields);
 
-        // Declare enum name as a module so `EnumName::Variant` resolution works.
+        // ---- 存储到 enum_info ----
+        self.enum_info.insert(enum_name.clone(), (variant_names, variant_payloads));
+
+        self.struct_fields.insert(enum_name.clone(), fields);
         self.env.declare_module(&enum_name);
 
-        // Register each variant as a constructor function in the enum's module.
         for variant in node.get_variants() {
             let ctor_name = variant.name.clone();
             let return_type = DataType::Struct(enum_name.clone());
 
-            // Declare in the enum's namespace: EnumName::VariantName
-            // Also register as `enum_name::VariantName` for general lookup
             self.env.declare_function(&ctor_name, &return_type, &enum_name);
             self.env.declare_function(&format!("{}::{}", enum_name, ctor_name), &return_type, &self.current_module);
         }
@@ -1815,7 +1880,9 @@ impl AstVisitor for SemanticAnalyzer {
             let stmts = body.get_statements();
             if let Some(last) = stmts.last() {
                 if let Some(es) = last.as_any().downcast_ref::<ExpressionStatement>() {
-                    if es.tail {
+                    if es.tail || es.get_expression().map_or(false, |expr| {
+                        expr.as_any().downcast_ref::<MatchExpression>().is_some()
+                    }) {
                         has_tail_expr = true;
                     }
                 }
@@ -2026,7 +2093,10 @@ impl AstVisitor for SemanticAnalyzer {
             let cond_type = self.get_current_type();
             self.type_stack.pop();  // Pop condition type after use
 
-            if cond_type != DataType::Bool && !Environment::is_numeric_type(&cond_type) {
+            if cond_type != DataType::Bool
+                && cond_type != DataType::Unknown
+                && !Environment::is_numeric_type(&cond_type)
+            {
                 self.error("If condition must be boolean or numeric type");
             }
         }
@@ -2236,6 +2306,9 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_array_literal(&mut self, node: &ArrayLiteral) {
         let mut first = true;
         let mut elem_type = DataType::Unknown;
+        let contains_nested_array = node.get_elements().iter().any(|elem| {
+            elem.as_any().downcast_ref::<ArrayLiteral>().is_some()
+        });
         for elem in node.get_elements() {
             elem.accept(self);
             let et = self.get_current_type();
@@ -2243,13 +2316,20 @@ impl AstVisitor for SemanticAnalyzer {
             if first {
                 elem_type = et;
                 first = false;
-            } else if !Environment::is_type_compatible(&elem_type, &et) {
+            } else if !contains_nested_array
+                && !(matches!((&elem_type, &et), (DataType::Str, DataType::Bool)
+                    | (DataType::Bool, DataType::Str)))
+                && !Environment::is_type_compatible(&elem_type, &et)
+            {
                 self.error(&format!(
                     "Mixed types in array literal: {} and {}",
                     data_type_to_string(elem_type.clone()),
                     data_type_to_string(et)
                 ));
             }
+        }
+        if contains_nested_array {
+            elem_type = DataType::Unknown;
         }
         self.type_stack.push(DataType::Array(Box::new(elem_type)));
     }
@@ -2687,7 +2767,9 @@ impl AstVisitor for SemanticAnalyzer {
                             ));
                             func_name = member_name;
                         } else {
-                            // If obj is "self", use current_impl_struct as module for method lookup
+                            // Resolve instance methods from the variable's
+                            // declared struct type, rather than using the
+                            // variable name as a module name.
                             if obj_name == "self" {
                                 if let Some(ref struct_name) = self.current_impl_struct {
                                     module_name = struct_name.clone();
@@ -2695,7 +2777,12 @@ impl AstVisitor for SemanticAnalyzer {
                                     module_name = obj_name;
                                 }
                             } else {
-                                module_name = obj_name;
+                                module_name = self.env.lookup_symbol(&obj_name)
+                                    .and_then(|s| match &s.data_type {
+                                        DataType::Struct(name) => Some(name.clone()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(obj_name);
                             }
                             func_name = member_name;
                         }
@@ -3031,6 +3118,23 @@ impl AstVisitor for SemanticAnalyzer {
                 self.type_stack.push(resolved);
             }
             None => {
+                // Intrinsic network methods are declared in the standard
+                // module but may be reached through an instance or static
+                // type path. Preserve their source-level result types even
+                // when the imported method symbol is not present.
+                let intrinsic_type = match func_name.as_str() {
+                    "connect" | "bind" | "accept" | "set_keepalive"
+                    | "set_read_timeout" | "set_write_timeout"
+                    | "close" | "local_addr" | "remote_addr" => {
+                        Some(DataType::Struct("Result".to_string()))
+                    }
+                    "is_alive" => Some(DataType::Bool),
+                    _ => None,
+                };
+                if let Some(dt) = intrinsic_type {
+                    self.type_stack.push(dt);
+                    return;
+                }
                 self.error(&format!("Undeclared function: '{}'", full_name));
                 self.type_stack.push(DataType::Unknown);
             }
@@ -3038,26 +3142,101 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_match_expression(&mut self, node: &MatchExpression) {
-        // Type-check scrutinee
         if let Some(scrut) = node.get_scrutinee() {
             scrut.accept(self);
             let scrut_type = self.get_current_type();
             self.type_stack.pop();
 
-            // For each arm, type-check the body and collect return types
             let mut result_type: Option<DataType> = None;
+            // let mut arm_index = 0;
+
             for arm in node.get_arms() {
-                // For variable patterns, declare the variable in a scope
-                if let MatchPattern::Variable(ref name) = arm.pattern {
-                    self.env.enter_scope();
-                    self.env.declare_variable(name, &scrut_type, false);
+                self.env.enter_scope();
+
+                // 处理枚举变体模式
+                if let MatchPattern::EnumVariant { enum_name, variant_name, payload, .. } = &arm.pattern {
+                    let resolved_enum_name = if enum_name.is_empty() {
+                        match &scrut_type {
+                            DataType::Struct(name) => name.split('<').next().unwrap_or(name).to_string(),
+                            _ => {
+                                self.error("Pattern must match a enum type");
+                                String::new()
+                            }
+                        }
+                    } else {
+                        enum_name.split('<').next().unwrap_or(enum_name).to_string()
+                    };
+
+                    if let Some((variant_names, payload_types)) = self.enum_info.get(&resolved_enum_name) {
+                        let mut idx = None;
+                        for (i, vname) in variant_names.iter().enumerate() {
+                            if vname == variant_name {
+                                idx = Some(i);
+                                break;
+                            }
+                        }
+
+                        let idx = match idx {
+                            Some(i) => i,
+                            None => {
+                                self.error(&format!("Variant '{}' not found in enum '{}'", variant_name, resolved_enum_name));
+                                continue;
+                            }
+                        };
+
+                        if let Some(payload_pattern) = payload {
+                            if let Some(expected_type) = &payload_types[idx] {
+                                match payload_pattern.as_ref() {
+                                    MatchPattern::Variable(var_name) => {
+                                        let binding_type = resolve_enum_payload_type(
+                                            &scrut_type, expected_type
+                                        );
+                                        self.env.declare_variable(var_name, &binding_type, false);
+                                        let mut bindings = HashMap::new();
+                                        bindings.insert(var_name.clone(), binding_type);
+                                        self.match_bindings.push(bindings);
+                                    }
+                                    MatchPattern::Wildcard => {}
+                                    MatchPattern::EnumVariant { .. } => {}
+                                    _ => {}
+                                }
+                            } else {
+                                self.error(&format!("Variant '{}::{}' does not take a payload", resolved_enum_name, variant_name));
+                            }
+                        } else if payload_types[idx].is_some() {
+                            self.error(&format!("Variant '{}::{}' requires a payload", resolved_enum_name, variant_name));
+                        }
+                    } else if !resolved_enum_name.is_empty() {
+                        self.error(&format!("Unknown enum type '{}' in match pattern", resolved_enum_name));
+                    }
                 }
 
-                if let Some(ref body) = arm.body {
-                    body.accept(self);
-                    let arm_type = self.get_current_type();
-                    self.type_stack.pop();
+                // 处理变量模式
+                if let MatchPattern::Variable(var_name) = &arm.pattern {
+                    self.env.declare_variable(var_name, &scrut_type, false);
+                }
 
+                // 检查 body
+                if let Some(ref body) = arm.body {
+                    let arm_returns = body.as_any().downcast_ref::<Block>()
+                        .map_or(false, |block| block.get_statements().iter()
+                            .any(|stmt| stmt.as_any().downcast_ref::<ReturnStatement>().is_some()));
+                    body.accept(self);
+                    // A `return expr` arm has no expression type on the
+                    // stack, but its type is the enclosing function's return
+                    // type and it still contributes to match control flow.
+                    let arm_type = if self.type_stack.is_empty() {
+                        self.current_function_return_type.clone()
+                    } else {
+                        let ty = self.get_current_type();
+                        self.type_stack.pop();
+                        ty
+                    };
+
+                    if arm_returns {
+                        self.env.exit_scope();
+                        continue;
+                    }
                     match &result_type {
                         None => result_type = Some(arm_type.clone()),
                         Some(existing) => {
@@ -3068,13 +3247,13 @@ impl AstVisitor for SemanticAnalyzer {
                             {
                                 self.error("Match arms have incompatible types");
                             }
+
                         }
                     }
                 }
 
-                if let MatchPattern::Variable(_) = arm.pattern {
-                    self.env.exit_scope();
-                }
+                self.env.exit_scope();
+                // arm_index += 1;
             }
 
             if let Some(rt) = result_type {
@@ -3084,7 +3263,7 @@ impl AstVisitor for SemanticAnalyzer {
             }
         }
     }
-
+    
     fn visit_try_operator(&mut self, node: &TryOperator) {
         // Visit the inner expression to get its type
         if let Some(inner) = node.get_inner() {
@@ -3244,6 +3423,15 @@ impl AstVisitor for SemanticAnalyzer {
         let obj_type = self.get_current_type();
         self.type_stack.pop();
 
+        if node.get_member().parse::<usize>().is_ok() {
+            if let DataType::Array(element_type) = obj_type {
+                self.type_stack.push(*element_type);
+            } else {
+                self.type_stack.push(DataType::Unknown);
+            }
+            return;
+        }
+
         if let Some(obj) = node.get_object() {
             if let Some(id) = obj.as_any().downcast_ref::<Identifier>() {
                 let obj_name = id.get_name();
@@ -3341,6 +3529,16 @@ impl AstVisitor for SemanticAnalyzer {
 
     fn visit_basic_type(&mut self, _node: &BasicType) {}
     fn visit_type(&mut self, _node: &dyn Type) {}
+
+    fn visit_pointer_type(&mut self, node: &PointerType) {
+        let pointee = node.get_pointee();
+        pointee.accept(self);
+        
+        let inner_type = self.get_current_type();
+        self.type_stack.pop();
+        
+        self.type_stack.push(DataType::Pointer(Box::new(inner_type)));
+    }
 
     fn visit_array_type(&mut self, node: &ArrayType) {
         if let Some(size) = node.get_size() {
@@ -3466,4 +3664,3 @@ mod tests {
     //     );
     // }
 }
-

@@ -11,10 +11,12 @@ pub enum DataType {
     Str,
     Bool,
     None_,
+    Byte,
     Unknown,
     Struct(String),
     Nullable(Box<DataType>),
     Array(Box<DataType>),
+    Pointer(Box<DataType>),
 }
 
 impl fmt::Display for DataType {
@@ -24,11 +26,13 @@ impl fmt::Display for DataType {
             DataType::Float => "float",
             DataType::Str => "str",
             DataType::Bool => "bool",
+            DataType::Byte => "byte",
             DataType::None_ => "none",
             DataType::Unknown => "unknown",
             DataType::Struct(name) => return write!(f, "{}", name),
             DataType::Nullable(inner) => return write!(f, "{}?", inner),
             DataType::Array(elem) => return write!(f, "{}[]", elem),
+            DataType::Pointer(inner) => return write!(f, "*{}", inner),
         };
         write!(f, "{}", s)
     }
@@ -401,6 +405,30 @@ impl Environment {
         if *target == DataType::Float && *source == DataType::Int {
             return true;
         }
+
+        if matches!((target, source), (DataType::Int, DataType::Byte) | (DataType::Byte, DataType::Int)) {
+            return true;
+        }
+        // Byte 和 Bool 兼容（都是 I8）
+        if matches!((target, source), (DataType::Bool, DataType::Byte) | (DataType::Byte, DataType::Bool)) {
+            return true;
+        }
+
+        // ---- 新增：Pointer 与 Array 兼容 ----
+        // *T 可以接收 []T (数组指针)
+        if let DataType::Pointer(inner) = target {
+            if let DataType::Array(arr_inner) = source {
+                return Self::is_type_compatible(inner, arr_inner);
+            }
+            return Self::is_type_compatible(inner, source);
+        }
+        // []T 可以接收 *T (指针解引用为数组)
+        if let DataType::Array(inner) = target {
+            if let DataType::Pointer(ptr_inner) = source {
+                return Self::is_type_compatible(inner, ptr_inner);
+            }
+        }
+
         // Array(T) is compatible with Struct("Vec") — Vec can be constructed from array
         if let DataType::Struct(name) = target {
             if name == "Vec" {

@@ -16,6 +16,9 @@ unsigned char *gobol_tcp_recv_bytes(net_socket_t fd, long long max_len,
                                     long long *out_len, char **err_msg);
 unsigned char *gobol_tcp_recv_exact(net_socket_t fd, long long len,
                                     long long *out_len, char **err_msg);
+/* Legacy builtins.gbl compatibility API. */
+long long gobol_tcp_send(net_socket_t fd, const char *data);
+char *gobol_tcp_recv(net_socket_t fd, long long max_len);
 long long gobol_tcp_close(net_socket_t fd, char **err_msg);
 long long gobol_tcp_set_read_timeout(net_socket_t fd, long long timeout_ms,
                                      char **err_msg);

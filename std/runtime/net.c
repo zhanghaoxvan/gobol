@@ -351,6 +351,10 @@ long long gobol_tcp_send_str(net_socket_t fd, const char *data, char **err_msg) 
                                 (long long)strlen(data), err_msg);
 }
 
+long long gobol_tcp_send(net_socket_t fd, const char *data) {
+    return gobol_tcp_send_str(fd, data, NULL);
+}
+
 long long gobol_tcp_send_bytes(net_socket_t fd, const unsigned char *buf,
                                long long len, char **err_msg) {
     if (fd <= 0 || !buf || len <= 0) {
@@ -431,6 +435,24 @@ unsigned char *gobol_tcp_recv_bytes(net_socket_t fd, long long max_len,
         if (out_len) *out_len = n;
         return buf;
     }
+}
+
+char *gobol_tcp_recv(net_socket_t fd, long long max_len) {
+    if (max_len < 0) return NULL;
+
+    long long out_len = 0;
+    unsigned char *data = gobol_tcp_recv_bytes(fd, max_len, &out_len, NULL);
+    if (!data) return NULL;
+
+    char *result = (char *)gobol_gc_alloc((size_t)out_len + 1);
+    if (!result) {
+        gobol_free(data);
+        return NULL;
+    }
+    if (out_len > 0) memcpy(result, data, (size_t)out_len);
+    result[out_len] = '\0';
+    gobol_free(data);
+    return result;
 }
 
 unsigned char *gobol_tcp_recv_exact(net_socket_t fd, long long len,
@@ -685,15 +707,22 @@ net_socket_t gobol_tcp_bind(const char *addr, long long port,
         int val = ipv6_only ? 1 : 0;
         int is_ipv6 = 0;
 
-#ifdef __linux__
-        // Linux: use SO_DOMAIN to get socket address family
+#ifdef _WIN32
+        // Windows: getsockname
+        struct sockaddr_storage sa;
+        socklen_t sa_len = sizeof(sa);
+        if (getsockname((SOCKET)fd, (struct sockaddr *)&sa, &sa_len) == 0) {
+            is_ipv6 = (sa.ss_family == AF_INET6);
+        }
+#elif defined(__linux__)
+        // Linux: SO_DOMAIN
         int af;
         socklen_t len = sizeof(af);
         if (getsockopt((int)fd, SOL_SOCKET, SO_DOMAIN, &af, &len) == 0) {
             is_ipv6 = (af == AF_INET6);
         }
 #else
-        // macOS, BSD, Windows: use getsockname to get address family
+        // macOS, BSD: getsockname fallback
         struct sockaddr_storage sa;
         socklen_t sa_len = sizeof(sa);
         if (getsockname((int)fd, (struct sockaddr *)&sa, &sa_len) == 0) {
@@ -702,12 +731,7 @@ net_socket_t gobol_tcp_bind(const char *addr, long long port,
 #endif
 
         if (is_ipv6) {
-            if (setsockopt((int)fd, IPPROTO_IPV6, IPV6_V6ONLY, &val, sizeof(val)) < 0) {
-                // Non-fatal on some platforms (e.g., IPv4 socket returns error)
-                if (errno != ENOPROTOOPT && errno != EINVAL) {
-                    set_system_error(err_msg, "setsockopt(IPV6_V6ONLY)");
-                }
-            }
+            setsockopt((int)fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&val, sizeof(val));
         }
     }
 #endif

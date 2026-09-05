@@ -683,12 +683,30 @@ net_socket_t gobol_tcp_bind(const char *addr, long long port,
 #ifdef IPV6_V6ONLY
     {
         int val = ipv6_only ? 1 : 0;
+        int is_ipv6 = 0;
+
+#ifdef __linux__
+        // Linux: use SO_DOMAIN to get socket address family
         int af;
         socklen_t len = sizeof(af);
-        getsockopt((int)fd, SOL_SOCKET, SO_DOMAIN, &af, &len);
-        if (af == AF_INET6) {
+        if (getsockopt((int)fd, SOL_SOCKET, SO_DOMAIN, &af, &len) == 0) {
+            is_ipv6 = (af == AF_INET6);
+        }
+#else
+        // macOS, BSD, Windows: use getsockname to get address family
+        struct sockaddr_storage sa;
+        socklen_t sa_len = sizeof(sa);
+        if (getsockname((int)fd, (struct sockaddr *)&sa, &sa_len) == 0) {
+            is_ipv6 = (sa.ss_family == AF_INET6);
+        }
+#endif
+
+        if (is_ipv6) {
             if (setsockopt((int)fd, IPPROTO_IPV6, IPV6_V6ONLY, &val, sizeof(val)) < 0) {
-                set_system_error(err_msg, "setsockopt(IPV6_V6ONLY)");
+                // Non-fatal on some platforms (e.g., IPv4 socket returns error)
+                if (errno != ENOPROTOOPT && errno != EINVAL) {
+                    set_system_error(err_msg, "setsockopt(IPV6_V6ONLY)");
+                }
             }
         }
     }

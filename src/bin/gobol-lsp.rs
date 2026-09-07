@@ -597,6 +597,9 @@ fn classify_ident(
     ns_set: &std::collections::HashSet<(i32, i32)>,
 ) -> (u32, u32) {
     let t = &tokens[i];
+    if t.value == "lambda" {
+        return (type_index(SemanticTokenType::KEYWORD), 0);
+    }
     // 1. Position is a declaration (from the symbol index) — use its kind.
     if let Some(sym) = find_symbol_at(symbols, t.line, t.col) {
         return symbol_semantic(&sym.kind);
@@ -614,6 +617,21 @@ fn classify_ident(
     // 4. Capitalized identifier not matched above is a type reference.
     if is_capitalized(&t.value) {
         return (type_index(SemanticTokenType::TYPE), 0);
+    }
+    // A function can be passed as a value (for example in
+    // `[(str, func(): bool)]`), so it is not necessarily followed by `(`.
+    // Resolve known declarations before falling back to variable highlighting.
+    if symbols.iter().any(|sym| {
+        sym.name == t.value
+            && matches!(
+                sym.kind,
+                SymKind::Function
+                    | SymKind::Method
+                    | SymKind::StaticFunc
+                    | SymKind::ExternFn
+            )
+    }) {
+        return (type_index(SemanticTokenType::FUNCTION), 0);
     }
     // 5. Identifier directly followed by `(` is a function call.
     if let Some(next) = tokens.get(i + 1) {
@@ -642,6 +660,15 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
             TokenType::Keyword => match t.value.as_str() {
                 // Primitive types are lexed as keywords; color them as types.
                 "int" | "float" | "str" | "bool" | "void" | "char" | "unit" => {
+                    (type_index(SemanticTokenType::TYPE), 0)
+                }
+                // `func(T): U` is a function type, while `func name(...)`
+                // remains a declaration keyword.
+                "func" if tokens
+                    .get(i + 1)
+                    .map(|next| next.value == "(")
+                    .unwrap_or(false) =>
+                {
                     (type_index(SemanticTokenType::TYPE), 0)
                 }
                 _ => (type_index(SemanticTokenType::KEYWORD), 0),
@@ -2374,6 +2401,35 @@ fn build_lib_paths(file_path: &str, workspace_roots: &[PathBuf]) -> Vec<String> 
     paths
 }
 
+/// Resolve an imported module using the same layouts accepted by the compiler.
+/// Relative imports are resolved beside the importing file before library roots.
+fn resolve_module_file(
+    file_path: &str,
+    module_name: &str,
+    workspace_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    let module_path = module_name
+        .split("::")
+        .fold(PathBuf::new(), |path, part| path.join(part));
+    let mut roots = Vec::new();
+    if let Some(parent) = PathBuf::from(file_path).parent() {
+        roots.push(parent.to_path_buf());
+    }
+    roots.extend(build_lib_paths(file_path, workspace_roots).into_iter().map(PathBuf::from));
+
+    for root in roots {
+        for candidate in [
+            root.join(&module_path).with_extension("gbl"),
+            root.join(&module_path).join("mod.gbl"),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 // ==================== Analysis ====================
 
 fn analyze_document(
@@ -3558,35 +3614,18 @@ impl GobolLsp {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let lib_paths = build_lib_paths(&file_path, &roots);
-        let file_name = module.split("::").last().unwrap_or(module);
-
-        for lib_path in &lib_paths {
-            for mod_path in [
-                PathBuf::from(lib_path).join(format!("{}.gbl", file_name)),
-                PathBuf::from(lib_path).join(file_name).join("mod.gbl"),
-            ] {
-                if mod_path.exists() {
-                    if let Ok(source) = std::fs::read_to_string(&mod_path) {
-                        let mut lexer = Lexer::new(&source);
-                        let mut toks = Vec::new();
-                        loop {
-                            let t = lexer.get_next_token();
-                            if t.r#type == TokenType::EndOfFile {
-                                break;
-                            }
-                            toks.push(t);
-                        }
-                        let sigs = collect_signatures(&toks, &source);
-                        if let Some(sig) = sigs.get(name) {
-                            return Some(sig.clone());
-                        }
-                    }
-                    return None;
-                }
+        let mod_path = resolve_module_file(&file_path, module, &roots)?;
+        let source = std::fs::read_to_string(mod_path).ok()?;
+        let mut lexer = Lexer::new(&source);
+        let mut toks = Vec::new();
+        loop {
+            let t = lexer.get_next_token();
+            if t.r#type == TokenType::EndOfFile {
+                break;
             }
+            toks.push(t);
         }
-        None
+        collect_signatures(&toks, &source).remove(name)
     }
 
     /// Compute inlay hints for a range: type hints after `var x =`, parameter
@@ -3789,27 +3828,13 @@ impl GobolLsp {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let lib_paths = build_lib_paths(&file_path, &roots);
-
-        let module_parts: Vec<&str> = module_name.split("::").collect();
-        let file_name = module_parts.last().unwrap_or(&module_name);
-
-        for lib_path in &lib_paths {
-            // `<lib>/std/mod.gbl` layout and `<lib>/io.gbl` layout.
-            let candidates = [
-                PathBuf::from(lib_path).join(file_name).join("mod.gbl"),
-                PathBuf::from(lib_path).join(format!("{}.gbl", file_name)),
-            ];
-            for mod_path in candidates {
-                if mod_path.exists() {
-                    let mod_path_str = mod_path.to_string_lossy().into_owned();
-                    return Some(Location {
-                        uri: path_to_uri(&mod_path_str),
-                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                    });
-                }
+        if let Some(mod_path) = resolve_module_file(&file_path, module_name, &roots) {
+            let mod_path_str = mod_path.to_string_lossy().into_owned();
+            return Some(Location {
+                uri: path_to_uri(&mod_path_str),
+                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+            });
             }
-        }
         None
     }
 
@@ -4125,33 +4150,23 @@ impl GobolLsp {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let lib_paths = build_lib_paths(&file_path, &roots);
-
-        let module_parts: Vec<&str> = module_name.split("::").collect();
-        let file_name = module_parts.last().unwrap_or(&module_name);
-
-        for lib_path in &lib_paths {
-            let mut mod_paths = Vec::new();
-            mod_paths.push(PathBuf::from(lib_path).join(format!("{}.gbl", file_name)));
-            // `<lib>/<mod>/mod.gbl` layout (e.g. std/mod.gbl for `import std;`).
-            mod_paths.push(PathBuf::from(lib_path).join(file_name).join("mod.gbl"));
-            let mut found = false;
-            for mod_path in mod_paths {
-                if mod_path.exists() {
-                    if let Ok(source) = std::fs::read_to_string(&mod_path) {
-                        let mut lexer = Lexer::new(&source);
-                        let mut mod_tokens: Vec<Token> = Vec::new();
-                        loop {
-                            let t = lexer.get_next_token();
-                            if t.r#type == TokenType::EndOfFile {
-                                break;
-                            }
-                            mod_tokens.push(t);
-                        }
-                        let symbols = build_symbol_index(&mod_tokens, &source);
-                        let mod_uri = path_to_uri(&mod_path.to_string_lossy());
-                        for sym in &symbols {
-                            if matches!(
+        let Some(mod_path) = resolve_module_file(&file_path, module_name, &roots) else {
+            return result;
+        };
+        if let Ok(source) = std::fs::read_to_string(&mod_path) {
+            let mut lexer = Lexer::new(&source);
+            let mut mod_tokens: Vec<Token> = Vec::new();
+            loop {
+                let t = lexer.get_next_token();
+                if t.r#type == TokenType::EndOfFile {
+                    break;
+                }
+                mod_tokens.push(t);
+            }
+            let symbols = build_symbol_index(&mod_tokens, &source);
+            let mod_uri = path_to_uri(&mod_path.to_string_lossy());
+            for sym in &symbols {
+                if matches!(
                                 sym.kind,
                                 SymKind::Function
                                     | SymKind::Method
@@ -4162,25 +4177,17 @@ impl GobolLsp {
                                     | SymKind::Enum
                                     | SymKind::Trait
                                     | SymKind::TypeAlias
-                            ) {
-                                result.push((
-                                    sym.name.clone(),
-                                    sym.kind.label().to_string(),
-                                    sym.type_info.clone(),
-                                    mod_uri.clone(),
-                                    sym.line,
-                                    sym.col,
-                                    sym.doc_comment.clone(),
-                                ));
-                            }
-                        }
-                    }
-                    found = true;
-                    break;
+                ) {
+                    result.push((
+                        sym.name.clone(),
+                        sym.kind.label().to_string(),
+                        sym.type_info.clone(),
+                        mod_uri.clone(),
+                        sym.line,
+                        sym.col,
+                        sym.doc_comment.clone(),
+                    ));
                 }
-            }
-            if found {
-                break;
             }
         }
         result
@@ -4571,6 +4578,21 @@ fib(10) == 55
         assert!(decoded.contains(&(0, 8, "namespace".to_string())));
         // `io` in an import statement (line 1 col 7) is a namespace
         assert!(decoded.contains(&(1, 7, "namespace".to_string())));
+    }
+
+    #[test]
+    fn test_semantic_tokens_function_reference_is_function() {
+        let source = "func test_connect_timeout(): bool { true }\n\
+var tests: [(str, func(): bool)] = [(\"timeout\", test_connect_timeout)];\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let decoded = decode(&build_semantic_tokens(&tokens, &symbols));
+
+        assert!(
+            decoded.contains(&(1, 48, "function".to_string())),
+            "function references should be highlighted as functions, got {:?}",
+            decoded
+        );
     }
 
     #[test]

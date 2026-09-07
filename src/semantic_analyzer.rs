@@ -1052,10 +1052,7 @@ impl SemanticAnalyzer {
             if Path::new(&rel_mod).exists() {
                 return Some(rel_mod);
             }
-            let rel_setup = format!("{}/{}/__setup__.gbl", dir, path_parts.join("/"));
-            if Path::new(&rel_setup).exists() {
-                return Some(rel_setup);
-            }
+
             // Also check in base_dir/lib/ (local lib directory)
             let rel_lib = format!("{}/lib/{}", dir, relative);
             if Path::new(&rel_lib).exists() {
@@ -1076,12 +1073,6 @@ impl SemanticAnalyzer {
             if Path::new(&mod_full).exists() {
                 return Some(mod_full);
             }
-            // <lib_path>/<module>/__setup__.gbl (legacy)
-            let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
-            let setup_full = format!("{}/{}", lib_path, setup_relative);
-            if Path::new(&setup_full).exists() {
-                return Some(setup_full);
-            }
             // <lib_path>/src/<module>.gbl (for grape packages)
             let src_full = format!("{}/src/{}", lib_path, relative);
             if Path::new(&src_full).exists() {
@@ -1101,10 +1092,6 @@ impl SemanticAnalyzer {
         let mod_direct = format!("{}/mod.gbl", path_parts.join("/"));
         if Path::new(&mod_direct).exists() {
             return Some(mod_direct);
-        }
-        let setup_direct = format!("{}/__setup__.gbl", path_parts.join("/"));
-        if Path::new(&setup_direct).exists() {
-            return Some(setup_direct);
         }
         None
     }

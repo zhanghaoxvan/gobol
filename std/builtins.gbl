@@ -3,7 +3,7 @@
 // Declares the C runtime functions from std/runtime.h (and its sub-headers
 // under std/runtime/) as a single, authoritative `extern "C"` block.
 //
-// Every Gobol program auto-imports this module via __setup__ (`builtins`),
+// Every Gobol program auto-imports this module via mod (`builtins`),
 // so these functions are available as `builtins::<name>` from any std module
 // or user module.  Use the `builtins::` qualifier (e.g. `builtins::gobol_str_len`)
 // or the bare name — the compiler resolves both.

@@ -608,6 +608,9 @@ fn classify_ident(
     if ns_set.contains(&(t.line, t.col)) {
         return (type_index(SemanticTokenType::NAMESPACE), 0);
     }
+    if matches!(t.value.as_str(), "bool" | "byte" | "char" | "float" | "int" | "str" | "unit" | "void") {
+        return (type_index(SemanticTokenType::TYPE), 0);
+    }
     // 3. Module qualifier before `::` (e.g. `io::println`, `Vec::new`).
     if let Some(next) = tokens.get(i + 1) {
         if next.r#type == TokenType::Operator && next.value == "::" {
@@ -2037,6 +2040,13 @@ fn infer_expr_type(
                 }
                 if is_call {
                     if let (Some(lsp), Some(uri)) = (lsp, uri) {
+                        if let Some(sig) = lsp.imported_method_signature(uri, &module, m) {
+                            return sig.return_type.or(Some("unknown".to_string()));
+                        }
+                    }
+                }
+                if is_call {
+                    if let (Some(lsp), Some(uri)) = (lsp, uri) {
                         if let Some(sig) = lsp.imported_signature(uri, &module, m) {
                             return sig.return_type.or(Some("unknown".to_string()));
                         }
@@ -2431,6 +2441,19 @@ fn resolve_module_file(
 }
 
 // ==================== Analysis ====================
+
+fn lex_source(source: &str) -> Vec<Token> {
+    let mut lexer = Lexer::new(source);
+    let mut tokens = Vec::new();
+    loop {
+        let token = lexer.get_next_token();
+        if token.r#type == TokenType::EndOfFile {
+            break;
+        }
+        tokens.push(token);
+    }
+    tokens
+}
 
 fn analyze_document(
     uri: &str,
@@ -2873,32 +2896,35 @@ impl LanguageServer for GobolLsp {
                     kind_label, sym.name, parent_str, signature, type_str
                 );
 
-                // Append doc comment if available
-                if let Some(doc) = &sym.doc_comment {
-                    hover_text.push_str(&format!("\n\n---\n\n{}", doc));
-                } else if let Some(module) = sym
+                // A `from module import Type` entry is initially indexed as a
+                // local function-like symbol. Replace that placeholder with
+                // the real imported declaration so types get the correct
+                // hover kind, definition, and documentation.
+                if let Some(module) = sym
                     .parent
                     .as_ref()
                     .and_then(|p| state.module_imported(p))
                 {
-                    // This is a `from lib import ...` re-export whose source
-                    // lives in the imported module: enrich the hover with the
-                    // definition's doc comment from that module's file.
-                    let uri_c = uri.clone();
-                    let name_c = token.value.clone();
-                    if let Some((_n, _mod2, _k, _ty, _u, _l, _c, doc)) = self
-                        .resolve_imported_symbol(&uri_c, &name_c)
-                        .await
+                    if let Some((_n, _m, imported_kind, imported_ty, _u, _l, _c, doc)) =
+                        self.resolve_imported_symbol(&uri, &token.value).await
                     {
+                        let imported_type = imported_ty.unwrap_or_else(|| "-".to_string());
+                        hover_text = format!(
+                            "**{}** imported from `{}`\n\n```gobol\n{} {}\n```\n\nType: `{}`",
+                            imported_kind,
+                            module,
+                            imported_kind,
+                            token.value,
+                            imported_type
+                        );
                         if let Some(doc) = doc {
                             if !doc.trim().is_empty() {
-                                hover_text.push_str(&format!(
-                                    "\n\n---\n\n*from `{}`* —\n\n{}",
-                                    module, doc
-                                ));
+                                hover_text.push_str(&format!("\n\n---\n\n{}", doc));
                             }
                         }
                     }
+                } else if let Some(doc) = &sym.doc_comment {
+                    hover_text.push_str(&format!("\n\n---\n\n{}", doc));
                 }
 
                 break;
@@ -2932,6 +2958,28 @@ impl LanguageServer for GobolLsp {
                     if !doc.trim().is_empty() {
                         hover_text.push_str(&format!("\n\n---\n\n{}", doc));
                     }
+                }
+            }
+        }
+
+        // Qualified references such as `math::abs` or `TcpListener::bind`
+        // need the qualifier to disambiguate ordinary module functions from
+        // methods with the same name.
+        if let Some(qualifier) = self
+            .find_qualifier_before_colon_colon(&uri, pos.position)
+            .await
+        {
+            if let Some((_name, module, kind, ty, _file, _line, _col, doc)) =
+                self.resolve_qualified_symbol(&uri, &qualifier, &token.value).await
+            {
+                hover_text = format!(
+                    "**{}** imported from `{}`\n\nType: `{}`",
+                    kind,
+                    module,
+                    ty.unwrap_or_else(|| "-".to_string())
+                );
+                if let Some(doc) = doc {
+                    hover_text.push_str(&format!("\n\n---\n\n{}", doc));
                 }
             }
         }
@@ -2979,6 +3027,18 @@ impl LanguageServer for GobolLsp {
             }
         }
 
+        if let Some(qualifier) = self
+            .find_qualifier_before_colon_colon(&uri, pos.position)
+            .await
+        {
+            if let Some(loc) = self
+                .goto_qualified_symbol(&uri, &qualifier, &token.value)
+                .await
+            {
+                return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+            }
+        }
+
         // 1. Definition in this document.
         if let Some(sym) = state.find_definition(&token.value) {
             // If the local symbol is a `from lib import greet` re-export (its
@@ -2994,6 +3054,18 @@ impl LanguageServer for GobolLsp {
                     .await;
                 if let Some(loc) = loc {
                     return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                }
+
+                if let Some(qualifier) = self
+                    .find_qualifier_before_colon_colon(&uri, pos.position)
+                    .await
+                {
+                    if let Some(loc) = self
+                        .goto_qualified_symbol(&uri, &qualifier, &token.value)
+                        .await
+                    {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                    }
                 }
             }
             let line = (sym.line as u32).saturating_sub(1);
@@ -3628,6 +3700,63 @@ impl GobolLsp {
         collect_signatures(&toks, &source).remove(name)
     }
 
+    fn imported_method_signature(
+        &self,
+        uri: &str,
+        receiver: &str,
+        method: &str,
+    ) -> Option<FuncSignature> {
+        let mut modules = self.imported_module_names_blocking(uri);
+        modules.extend(self.list_std_modules(uri).into_iter().map(|(name, _)| name));
+        modules.push("net".to_string());
+        modules.sort();
+        modules.dedup();
+        for module in modules {
+            let details = self.index_imported_module_detailed(uri, &module);
+            if details.iter().any(|entry| entry.0 == method) {
+                let entry = details.iter().find(|entry| entry.0 == method)?;
+                let file_path = uri_to_path(entry.3.as_str());
+                let source = std::fs::read_to_string(file_path).ok()?;
+                let mut lexer = Lexer::new(&source);
+                let mut tokens = Vec::new();
+                loop {
+                    let token = lexer.get_next_token();
+                    if token.r#type == TokenType::EndOfFile {
+                        break;
+                    }
+                    tokens.push(token);
+                }
+                let symbols = build_symbol_index(&tokens, &source);
+                if let Some(symbol) = symbols.iter().find(|symbol| {
+                    symbol.name == method && symbol.parent.as_deref() == Some(receiver)
+                }) {
+                    let mut signatures = collect_signatures(&tokens, &source);
+                    if let Some(signature) = signatures.remove(method) {
+                        return Some(signature);
+                    }
+                    let _ = symbol;
+                }
+            }
+        }
+        None
+    }
+
+    fn imported_module_names_blocking(&self, uri: &str) -> Vec<String> {
+        self.documents
+            .try_read()
+            .ok()
+            .and_then(|documents| documents.get(uri).cloned())
+            .map(|state| {
+                state
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.kind == SymKind::Import)
+                    .map(|symbol| symbol.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Compute inlay hints for a range: type hints after `var x =`, parameter
     /// name hints in call arguments, and return-type hints for `func f() { e }`
     /// single-expression bodies.
@@ -3872,8 +4001,61 @@ impl GobolLsp {
                     ),
                 });
             }
+
         }
         None
+    }
+
+    async fn resolve_qualified_symbol(
+        &self,
+        uri: &str,
+        qualifier: &str,
+        name: &str,
+    ) -> Option<(String, String, String, Option<String>, url::Url, i32, i32, Option<String>)> {
+        let mut modules = self.imported_module_names(uri).await;
+        modules.extend(self.list_std_modules(uri).into_iter().map(|(name, _)| name));
+        modules.push("net".to_string());
+        modules.sort();
+        modules.dedup();
+        for module in modules {
+            for entry in self.index_imported_module_detailed(uri, &module) {
+                if entry.0 != name {
+                    continue;
+                }
+                let module_match = module == qualifier
+                    || module.rsplit("::").next() == Some(qualifier);
+                let file = uri_to_path(entry.3.as_str());
+                let source = std::fs::read_to_string(file).ok()?;
+                let symbols = build_symbol_index(&lex_source(&source), &source);
+                let receiver_match = symbols.iter().any(|symbol| {
+                    symbol.name == name && symbol.parent.as_deref() == Some(qualifier)
+                });
+                if module_match || receiver_match {
+                    return Some((
+                        entry.0, module, entry.1, entry.2, entry.3, entry.4, entry.5, entry.6,
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    async fn goto_qualified_symbol(
+        &self,
+        uri: &str,
+        qualifier: &str,
+        name: &str,
+    ) -> Option<Location> {
+        let resolved = self.resolve_qualified_symbol(uri, qualifier, name).await?;
+        let col = resolved.6.max(0) as u32;
+        let line = (resolved.5 as u32).saturating_sub(1);
+        Some(Location {
+            uri: resolved.4,
+            range: Range::new(
+                Position::new(line, col),
+                Position::new(line, col + name.len() as u32),
+            ),
+        })
     }
 
     async fn find_qualifier_before_colon_colon(

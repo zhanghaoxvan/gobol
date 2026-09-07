@@ -14,14 +14,11 @@ use colored::*;
 fn resolve_module_file(path_parts: &[String], lib_paths: &[String], main_file: &str) -> Option<String> {
     let relative = format!("{}.gbl", path_parts.join("/"));
     let mod_relative = format!("{}/mod.gbl", path_parts.join("/"));
-    let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
 
     if let Some(parent) = Path::new(main_file).parent() {
         let p = parent.join(&relative);
         if p.exists() { return p.to_str().map(|s| s.to_string()); }
         let p = parent.join(&mod_relative);
-        if p.exists() { return p.to_str().map(|s| s.to_string()); }
-        let p = parent.join(&setup_relative);
         if p.exists() { return p.to_str().map(|s| s.to_string()); }
     }
     for lp in lib_paths {
@@ -29,12 +26,9 @@ fn resolve_module_file(path_parts: &[String], lib_paths: &[String], main_file: &
         if p.exists() { return p.to_str().map(|s| s.to_string()); }
         let p = Path::new(lp).join(&mod_relative);
         if p.exists() { return p.to_str().map(|s| s.to_string()); }
-        let p = Path::new(lp).join(&setup_relative);
-        if p.exists() { return p.to_str().map(|s| s.to_string()); }
     }
     if Path::new(&relative).exists() { return Some(relative); }
     if Path::new(&mod_relative).exists() { return Some(mod_relative); }
-    if Path::new(&setup_relative).exists() { return Some(setup_relative); }
     None
 }
 
@@ -457,9 +451,8 @@ fn main() {
     fn resolve_module_file_relative(path_parts: &[String], parent_file: &str) -> Option<String> {
         let relative = format!("{}.gbl", path_parts.join("/"));
         let mod_relative = format!("{}/mod.gbl", path_parts.join("/"));
-        let setup_relative = format!("{}/__setup__.gbl", path_parts.join("/"));
         if let Some(parent) = Path::new(parent_file).parent() {
-            for rel in [&relative, &mod_relative, &setup_relative] {
+            for rel in [&relative, &mod_relative] {
                 let p = parent.join(rel);
                 if p.exists() {
                     return p.to_str().map(|s| s.to_string());

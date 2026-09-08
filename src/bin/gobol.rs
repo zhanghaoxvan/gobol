@@ -1,34 +1,52 @@
+use colored::*;
 use gobol::ast_builder::AstBuilder;
 use gobol::ast_printer::AstPrinter;
-use gobol::cranelift::{CraneliftBackend, LinkOptions, host_target_string, target_is_bare_metal};
+use gobol::cranelift::{
+    CraneliftBackend, LinkOptions, LinkSpec, host_target_string, target_is_bare_metal,
+};
 use gobol::error::ErrorFormatter;
 use gobol::lexer::Lexer;
-use gobol::semantic_analyzer::{SemanticAnalyzer, BuildMode};
+use gobol::semantic_analyzer::{BuildMode, SemanticAnalyzer};
 use gobol::token;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use colored::*;
 
-fn resolve_module_file(path_parts: &[String], lib_paths: &[String], main_file: &str) -> Option<String> {
+fn resolve_module_file(
+    path_parts: &[String],
+    lib_paths: &[String],
+    main_file: &str,
+) -> Option<String> {
     let relative = format!("{}.gbl", path_parts.join("/"));
     let mod_relative = format!("{}/mod.gbl", path_parts.join("/"));
 
     if let Some(parent) = Path::new(main_file).parent() {
         let p = parent.join(&relative);
-        if p.exists() { return p.to_str().map(|s| s.to_string()); }
+        if p.exists() {
+            return p.to_str().map(|s| s.to_string());
+        }
         let p = parent.join(&mod_relative);
-        if p.exists() { return p.to_str().map(|s| s.to_string()); }
+        if p.exists() {
+            return p.to_str().map(|s| s.to_string());
+        }
     }
     for lp in lib_paths {
         let p = Path::new(lp).join(&relative);
-        if p.exists() { return p.to_str().map(|s| s.to_string()); }
+        if p.exists() {
+            return p.to_str().map(|s| s.to_string());
+        }
         let p = Path::new(lp).join(&mod_relative);
-        if p.exists() { return p.to_str().map(|s| s.to_string()); }
+        if p.exists() {
+            return p.to_str().map(|s| s.to_string());
+        }
     }
-    if Path::new(&relative).exists() { return Some(relative); }
-    if Path::new(&mod_relative).exists() { return Some(mod_relative); }
+    if Path::new(&relative).exists() {
+        return Some(relative);
+    }
+    if Path::new(&mod_relative).exists() {
+        return Some(mod_relative);
+    }
     None
 }
 
@@ -43,9 +61,13 @@ fn find_runtime_c(lib_paths: &[String]) -> Option<PathBuf> {
     // the project root that contains std/runtime.c).
     for lp in lib_paths {
         let p = PathBuf::from(lp).join("std").join("runtime.c");
-        if p.exists() { return Some(p); }
+        if p.exists() {
+            return Some(p);
+        }
         let p = PathBuf::from(lp).join("runtime.c");
-        if p.exists() { return Some(p); }
+        if p.exists() {
+            return Some(p);
+        }
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -90,34 +112,54 @@ fn print_help() {
     println!("Gobol - A statically compiled programming language");
     println!();
     println!("Usage:");
-    println!("  gobol build <file.gbl> [--debug|--release] [-o name] [--lib-path path]  Compile to binary");
-    println!("  gobol <file.gbl>                                                           Alias for 'gobol build <file> --debug'");
-    println!("  gobol --version                                                            Show version information");
-    println!("  gobol --help                                                               Show this help message");
+    println!(
+        "  gobol build <file.gbl> [--debug|--release] [-o name] [--lib-path path]  Compile to binary"
+    );
+    println!(
+        "  gobol <file.gbl>                                                           Alias for 'gobol build <file> --debug'"
+    );
+    println!(
+        "  gobol --version                                                            Show version information"
+    );
+    println!(
+        "  gobol --help                                                               Show this help message"
+    );
     println!();
     println!("Options:");
     println!("  --debug                  Debug build (default)");
     println!("  --release                Release build (optimized)");
-    println!("  -O<n>                    Optimization level 0-2 (0=none, 1=speed, 2=speed_and_size).");
+    println!(
+        "  -O<n>                    Optimization level 0-2 (0=none, 1=speed, 2=speed_and_size)."
+    );
     println!("                           Default: 0 for debug, 2 for release.");
     println!("  -o <name>                Output binary name");
     println!("  --verbose, -v            Enable verbose output");
     println!("  --lib-path <path>        Add a library search path (can be used multiple times)");
-    println!("  --target <triple>        Cross-compile for a target triple (e.g. x86_64-pc-windows-msvc)");
+    println!(
+        "  --target <triple>        Cross-compile for a target triple (e.g. x86_64-pc-windows-msvc)"
+    );
     println!("  --entry-point <name>     Custom entry symbol (default: main). When set to");
     println!("                           anything else, a main() function is not required.");
     println!("  --link-script <path>     Custom linker script (bare-metal / kernel builds)");
     println!("  --no-std                 Don't link the C runtime (no_std / bare-metal)");
     println!("  --no-main                Don't require a main() function (kernel entry)");
-    println!("  --link-arg <lib>         Append a library base name to the link line (repeatable).");
-    println!("                           Formatted per linker: ws2_32 -> ws2_32.lib (MSVC) / -lws2_32 (cc)");
+    println!(
+        "  --link-arg <lib>         Append a library base name to the link line (repeatable)."
+    );
+    println!(
+        "                           Formatted per linker: ws2_32 -> ws2_32.lib (MSVC) / -lws2_32 (cc)"
+    );
     println!();
     println!("Examples:");
-    println!("  gobol main.gbl                         Debug build (alias for 'gobol build main.gbl --debug')");
+    println!(
+        "  gobol main.gbl                         Debug build (alias for 'gobol build main.gbl --debug')"
+    );
     println!("  gobol build main.gbl                   Debug build");
     println!("  gobol build main.gbl --release -o myapp  Release build, output ./myapp");
     println!("  gobol build boot.gbl --target x86_64-pc-windows-msvc -o myapp");
-    println!("  gobol build boot.gbl --target aarch64-unknown-none --entry-point _start --link-script kernel.ld");
+    println!(
+        "  gobol build boot.gbl --target aarch64-unknown-none --entry-point _start --link-script kernel.ld"
+    );
 }
 
 /// Parsed cross-compilation / linking options gathered from CLI flags.
@@ -315,7 +357,11 @@ fn main() {
             println!(
                 "Token(Type={}, Val='{}')",
                 tk.r#type,
-                if tk.value == "\n" { "\\n".to_string() } else { tk.value.clone() }
+                if tk.value == "\n" {
+                    "\\n".to_string()
+                } else {
+                    tk.value.clone()
+                }
             );
             tk = lexer.get_next_token();
         }
@@ -374,15 +420,26 @@ fn main() {
     if let Ok(exe_path) = env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             // target/release/  →  target/std  (installed layout)
-            if let Some(p) = exe_dir.parent().map(|d| d.join("std")).and_then(|d| d.to_str().map(|s| s.to_string())) {
+            if let Some(p) = exe_dir
+                .parent()
+                .map(|d| d.join("std"))
+                .and_then(|d| d.to_str().map(|s| s.to_string()))
+            {
                 lib_paths.push(p);
                 // Also add the parent so `import std;` can find std/mod.gbl
-                if let Some(pp) = exe_dir.parent().and_then(|d| d.to_str().map(|s| s.to_string())) {
+                if let Some(pp) = exe_dir
+                    .parent()
+                    .and_then(|d| d.to_str().map(|s| s.to_string()))
+                {
                     lib_paths.push(pp);
                 }
                 // Installed layout with lib/: ~/.gobol/bin/gobol → ~/.gobol/lib
                 // (std/mod.gbl lives at <install>/lib/std/mod.gbl)
-                if let Some(p) = exe_dir.parent().map(|d| d.join("lib")).and_then(|d| d.to_str().map(|s| s.to_string())) {
+                if let Some(p) = exe_dir
+                    .parent()
+                    .map(|d| d.join("lib"))
+                    .and_then(|d| d.to_str().map(|s| s.to_string()))
+                {
                     lib_paths.push(p);
                 }
             }
@@ -424,6 +481,7 @@ fn main() {
     semantic_analyzer.set_lib_paths(lib_paths.clone());
     semantic_analyzer.set_error_formatter(error_fmt.clone());
     semantic_analyzer.set_build_mode(build_mode);
+    semantic_analyzer.set_target(&target);
     let semantic_passed = semantic_analyzer.analyze(&prog);
     if !semantic_passed {
         process::exit(1);
@@ -437,6 +495,7 @@ fn main() {
 
     let mut ir_builder = gobol::ir::IRBuilder::new();
     ir_builder.set_current_file(filename.clone());
+    ir_builder.set_target(&target);
     let mut ir = match ir_builder.build(&prog) {
         Ok(ir) => ir,
         Err(errors) => {
@@ -467,6 +526,7 @@ fn main() {
         module_file: &str,
         lib_paths: &[String],
         error_fmt: &ErrorFormatter,
+        target: &str,
         ir: &mut gobol::ir::GobolIR,
         visited: &mut std::collections::HashSet<String>,
     ) {
@@ -489,6 +549,7 @@ fn main() {
         }
         let mut mod_ir_builder = gobol::ir::IRBuilder::new();
         mod_ir_builder.set_current_file(module_file);
+        mod_ir_builder.set_target(target);
         let mod_ir = match mod_ir_builder.build(&mod_prog) {
             Ok(ir) => ir,
             Err(_) => return,
@@ -578,11 +639,20 @@ fn main() {
                     .filter(|s| !s.is_empty())
                     .collect();
                 if let Some(sub_file) = resolve_module_file_relative(&sub_parts, module_file) {
-                    load_module_into_ir(&sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
-                } else if let Some(sub_file) = resolve_module_file(&sub_parts, lib_paths, module_file) {
-                    load_module_into_ir(&sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
+                    load_module_into_ir(
+                        &sub_name, &sub_file, lib_paths, error_fmt, target, ir, visited,
+                    );
+                } else if let Some(sub_file) =
+                    resolve_module_file(&sub_parts, lib_paths, module_file)
+                {
+                    load_module_into_ir(
+                        &sub_name, &sub_file, lib_paths, error_fmt, target, ir, visited,
+                    );
                 }
-            } else if let Some(from_import) = stmt.as_any().downcast_ref::<gobol::ast::FromImportStatement>() {
+            } else if let Some(from_import) = stmt
+                .as_any()
+                .downcast_ref::<gobol::ast::FromImportStatement>()
+            {
                 // `from module import member, ...` — load the module into IR.
                 // The bare-name function entries are created automatically by
                 // load_module_into_ir, so from-import members are resolvable.
@@ -594,9 +664,15 @@ fn main() {
                     .filter(|s| !s.is_empty())
                     .collect();
                 if let Some(sub_file) = resolve_module_file_relative(&sub_parts, module_file) {
-                    load_module_into_ir(sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
-                } else if let Some(sub_file) = resolve_module_file(&sub_parts, lib_paths, module_file) {
-                    load_module_into_ir(sub_name, &sub_file, lib_paths, error_fmt, ir, visited);
+                    load_module_into_ir(
+                        sub_name, &sub_file, lib_paths, error_fmt, target, ir, visited,
+                    );
+                } else if let Some(sub_file) =
+                    resolve_module_file(&sub_parts, lib_paths, module_file)
+                {
+                    load_module_into_ir(
+                        sub_name, &sub_file, lib_paths, error_fmt, target, ir, visited,
+                    );
                 }
             }
         }
@@ -619,6 +695,7 @@ fn main() {
                         &module_path,
                         &lib_paths,
                         &error_fmt,
+                        &target,
                         &mut ir,
                         &mut visited,
                     );
@@ -626,7 +703,10 @@ fn main() {
                     // Module resolution failure is non-fatal here; the
                     // semantic analyzer already reported the error.
                 }
-            } else if let Some(from_import) = stmt.as_any().downcast_ref::<gobol::ast::FromImportStatement>() {
+            } else if let Some(from_import) = stmt
+                .as_any()
+                .downcast_ref::<gobol::ast::FromImportStatement>()
+            {
                 // `from module import member, ...` — load the module so its
                 // functions (including the requested members) are available
                 // in the IR for code generation.
@@ -643,6 +723,7 @@ fn main() {
                         &module_path,
                         &lib_paths,
                         &error_fmt,
+                        &target,
                         &mut ir,
                         &mut visited,
                     );
@@ -694,11 +775,19 @@ fn main() {
 
     // Effective optimization level: explicit CLI `-O`, else the build-mode
     // default (release → 2, debug → 0). Levels must be 0–2.
-    let opt_level = opt_level.unwrap_or(if build_mode == BuildMode::Release { 2 } else { 0 });
+    let opt_level = opt_level.unwrap_or(if build_mode == BuildMode::Release {
+        2
+    } else {
+        0
+    });
     if opt_level > 2 {
         eprintln!(
             "{}",
-            format!("Error: invalid optimization level {} (must be 0, 1, or 2)", opt_level).red()
+            format!(
+                "Error: invalid optimization level {} (must be 0, 1, or 2)",
+                opt_level
+            )
+            .red()
         );
         process::exit(1);
     }
@@ -724,6 +813,17 @@ fn main() {
         target: target.clone(),
         runtime_c_path: runtime_c.as_ref().map(|p| p.to_string_lossy().into_owned()),
         link_libs,
+        link_specs: semantic_analyzer
+            .get_extern_links()
+            .iter()
+            .map(|link| LinkSpec {
+                name: link.name.clone(),
+                kind: link.kind.clone(),
+                rename: link.rename.clone(),
+                version: link.version.clone(),
+                optional: link.optional,
+            })
+            .collect(),
         link_script: link_cli.link_script.clone(),
         entry_point: link_cli.entry_point.clone(),
     };

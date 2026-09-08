@@ -1,11 +1,11 @@
+use colored::*;
+use git2::{Repository, ResetType};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use colored::*;
-use git2::{Repository, ResetType};
 
 // ============ 常量 ============
 
@@ -149,11 +149,7 @@ impl DependencySpec {
 
 /// Append a failed dependency to `grape.err`.
 fn log_failed_dep(name: &str, reason: &str) {
-    let entry = format!("[{}] {}: {}\n",
-        chrono_or_now(),
-        name,
-        reason,
-    );
+    let entry = format!("[{}] {}: {}\n", chrono_or_now(), name, reason,);
     let _ = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -225,7 +221,10 @@ fn run_command(args: &[String]) -> Result<()> {
             println!("Grape version: 0.2.0, binding with Gobol 0.2.0");
             Ok(())
         }
-        _ => Err(GrapeError::NotFound(format!("Unknown command: {}", args[1]))),
+        _ => Err(GrapeError::NotFound(format!(
+            "Unknown command: {}",
+            args[1]
+        ))),
     }
 }
 
@@ -297,8 +296,7 @@ fn cmd_init() -> Result<()> {
         optimize: None,
     };
 
-    let toml_str =
-        toml::to_string_pretty(&config).map_err(|e| GrapeError::Toml(e.to_string()))?;
+    let toml_str = toml::to_string_pretty(&config).map_err(|e| GrapeError::Toml(e.to_string()))?;
     fs::write(GRAPE_TOML, toml_str).map_err(GrapeError::Io)?;
     fs::create_dir_all(packages_dir()).map_err(GrapeError::Io)?;
     fs::create_dir_all(lib_dir()).map_err(GrapeError::Io)?;
@@ -474,8 +472,10 @@ fn cmd_update(args: &[String]) -> Result<()> {
                 Ok(latest_tag) if latest_tag != spec.tag => {
                     println!(
                         "  {} {}: {} → {}",
-                        name, "upgrading".yellow(),
-                        spec.tag, latest_tag.green()
+                        name,
+                        "upgrading".yellow(),
+                        spec.tag,
+                        latest_tag.green()
                     );
                     spec.tag = latest_tag;
                     config.dependencies.insert(name.clone(), spec.clone());
@@ -485,11 +485,7 @@ fn cmd_update(args: &[String]) -> Result<()> {
                     println!("  {} is already at the latest version ({})", name, spec.tag);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  Could not fetch latest tag for {}: {}",
-                        name,
-                        e
-                    );
+                    eprintln!("  Could not fetch latest tag for {}: {}", name, e);
                 }
             }
         }
@@ -750,10 +746,7 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     let profile = if resolved.release { "release" } else { "debug" };
     let target_triple = resolved.target_or_host();
     let target_dir = Path::new("target").join(&target_triple).join(profile);
-    let exe_name = gobol::cranelift::ensure_exe_extension(
-        &target_triple,
-        &out_name,
-    );
+    let exe_name = gobol::cranelift::ensure_exe_extension(&target_triple, &out_name);
     let final_out: PathBuf = if cli.out.is_some() {
         // User asked for a specific path; honour it (still add .exe on Windows).
         PathBuf::from(gobol::cranelift::ensure_exe_extension(
@@ -772,8 +765,8 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     // plain shell. This locates MSVC via vswhere + vcvarsall.bat (or
     // MinGW via gcc.exe) and returns the env overlay to apply below. It
     // is a no-op for non-Windows targets, so Unix builds are untouched.
-    let toolchain = gobol::toolchain::detect_for_target(&target_triple)
-        .map_err(GrapeError::CommandFailed)?;
+    let toolchain =
+        gobol::toolchain::detect_for_target(&target_triple).map_err(GrapeError::CommandFailed)?;
     if let Some(tc) = &toolchain {
         if cli.verbose {
             println!(
@@ -837,9 +830,7 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     }
 
     let status = cmd.status().map_err(|_| {
-        GrapeError::CommandFailed(
-            "Failed to run gobol. Make sure gobol is installed.".to_string(),
-        )
+        GrapeError::CommandFailed("Failed to run gobol. Make sure gobol is installed.".to_string())
     })?;
 
     if !status.success() {
@@ -967,8 +958,7 @@ fn read_grape_toml() -> Result<GrapeToml> {
 }
 
 fn save_grape_toml(config: &GrapeToml) -> Result<()> {
-    let toml_str =
-        toml::to_string_pretty(config).map_err(|e| GrapeError::Toml(e.to_string()))?;
+    let toml_str = toml::to_string_pretty(config).map_err(|e| GrapeError::Toml(e.to_string()))?;
     fs::write(GRAPE_TOML, toml_str).map_err(GrapeError::Io)
 }
 
@@ -984,8 +974,7 @@ fn read_lock_file() -> Result<GrapeLock> {
 }
 
 fn save_lock_file(lock: &GrapeLock) -> Result<()> {
-    let toml_str =
-        toml::to_string_pretty(lock).map_err(|e| GrapeError::Toml(e.to_string()))?;
+    let toml_str = toml::to_string_pretty(lock).map_err(|e| GrapeError::Toml(e.to_string()))?;
     fs::write(GRAPE_LOCK, toml_str).map_err(GrapeError::Io)
 }
 
@@ -1048,11 +1037,7 @@ fn resolve_dependencies(
                 Ok(()) => {}
                 Err(e) => {
                     let msg = format!("{}", e);
-                    eprintln!(
-                        "   Failed to download {}: {}",
-                        name,
-                        msg.red()
-                    );
+                    eprintln!("   Failed to download {}: {}", name, msg.red());
                     log_failed_dep(name, &msg);
                     continue; // don't block the build for one failed dep
                 }
@@ -1103,9 +1088,7 @@ fn download_package(spec: &DependencySpec) -> Result<()> {
             Ok(())
         }
         Err(_shallow_err) => {
-            println!(
-                "  Shallow clone failed, retrying with full clone...",
-            );
+            println!("  Shallow clone failed, retrying with full clone...",);
             clone_tag_full(&git_url, tag, &target_dir)?;
             println!("   Successfully cloned with full clone");
             Ok(())
@@ -1116,7 +1099,11 @@ fn download_package(spec: &DependencySpec) -> Result<()> {
 fn clone_tag_shallow(git_url: &str, tag: &str, target_dir: &Path) -> Result<()> {
     let status = std::process::Command::new("git")
         .args(&[
-            "clone", "--depth", "1", "--branch", tag,
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            tag,
             git_url,
             target_dir.to_str().unwrap(),
         ])
@@ -1258,9 +1245,13 @@ fn find_std_path() -> Option<PathBuf> {
         // 1. GOBOL_INSTALL_DIR env var
         if let Ok(dir) = std::env::var("GOBOL_INSTALL_DIR") {
             let p = PathBuf::from(&dir);
-            if p.join("std").exists() { v.push(p); }
+            if p.join("std").exists() {
+                v.push(p);
+            }
             let p = PathBuf::from(&dir).join("lib");
-            if p.join("std").exists() { v.push(p); }
+            if p.join("std").exists() {
+                v.push(p);
+            }
         }
 
         // 2. Relative to the grape executable
@@ -1268,24 +1259,35 @@ fn find_std_path() -> Option<PathBuf> {
             if let Some(dir) = exe.parent() {
                 // ~/.gobol/bin/ → ~/.gobol/  (std/ lives next to bin/)
                 if let Some(parent) = dir.parent() {
-                    if parent.join("std").exists() { v.push(parent.to_path_buf()); }
+                    if parent.join("std").exists() {
+                        v.push(parent.to_path_buf());
+                    }
                 }
 
                 // target/debug/ → project_root/  (std/ is at project root)
-                let p = dir.parent()
+                let p = dir
+                    .parent()
                     .and_then(|d| d.parent())
                     .filter(|d| d.join("std").exists())
                     .map(|d| d.to_path_buf());
-                if let Some(p) = p { v.push(p); }
+                if let Some(p) = p {
+                    v.push(p);
+                }
             }
         }
 
         // 3. Relative to current working directory
         if let Ok(cwd) = std::env::current_dir() {
-            if cwd.join("std").exists() { v.push(cwd.clone()); }
-            if cwd.join("lib").join("std").exists() { v.push(cwd.join("lib")); }
+            if cwd.join("std").exists() {
+                v.push(cwd.clone());
+            }
+            if cwd.join("lib").join("std").exists() {
+                v.push(cwd.join("lib"));
+            }
             if let Some(parent) = cwd.parent() {
-                if parent.join("std").exists() { v.push(parent.to_path_buf()); }
+                if parent.join("std").exists() {
+                    v.push(parent.to_path_buf());
+                }
             }
         }
 
@@ -1351,12 +1353,12 @@ mod tests {
         assert_eq!(spec.local_name(), "repo");
         assert_eq!(
             spec.local_path(),
-            PathBuf::from("target").join("grape").join("packages").join("repo")
+            PathBuf::from("target")
+                .join("grape")
+                .join("packages")
+                .join("repo")
         );
-        assert_eq!(
-            spec.lib_material_path(),
-            PathBuf::from("lib").join("repo")
-        );
+        assert_eq!(spec.lib_material_path(), PathBuf::from("lib").join("repo"));
     }
 
     #[test]
@@ -1371,7 +1373,11 @@ mod tests {
         assert!(p.is_relative(), "path should be relative, got {:?}", p);
         // Must use PathBuf join semantics (components, not string fmt).
         let comps: Vec<_> = p.components().collect();
-        assert!(comps.len() >= 4, "expected at least 4 components, got {:?}", comps);
+        assert!(
+            comps.len() >= 4,
+            "expected at least 4 components, got {:?}",
+            comps
+        );
         // Verify the expected logical structure: target → grape → packages → name
         assert_eq!(comps[0].as_os_str(), "target");
         assert_eq!(comps[1].as_os_str(), "grape");
@@ -1417,7 +1423,10 @@ mod tests {
     #[test]
     fn test_tag_comparison_semver() {
         assert_eq!(compare_tags("1.0.0", "0.9.0"), std::cmp::Ordering::Greater);
-        assert_eq!(compare_tags("v2.0.0", "v1.9.9"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            compare_tags("v2.0.0", "v1.9.9"),
+            std::cmp::Ordering::Greater
+        );
         assert_eq!(compare_tags("0.1.0", "0.1.0"), std::cmp::Ordering::Equal);
         assert_eq!(compare_tags("v1.0.0", "1.0.0"), std::cmp::Ordering::Equal);
         assert_eq!(compare_tags("0.1.0", "0.2.0"), std::cmp::Ordering::Less);
@@ -1463,11 +1472,7 @@ mod tests {
 
     #[test]
     fn test_parse_build_cli_opt_level() {
-        let args = vec![
-            "grape".to_string(),
-            "build".to_string(),
-            "-O2".to_string(),
-        ];
+        let args = vec!["grape".to_string(), "build".to_string(), "-O2".to_string()];
         let cli = parse_build_cli(&args);
         assert_eq!(cli.opt_level, Some(2));
 

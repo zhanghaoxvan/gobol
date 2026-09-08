@@ -138,11 +138,11 @@ impl SymKind {
 struct SymbolEntry {
     name: String,
     kind: SymKind,
-    line: i32,   // 1-based (token line)
-    col: i32,    // 0-based (token col)
-    len: i32,    // length in chars
+    line: i32, // 1-based (token line)
+    col: i32,  // 0-based (token col)
+    len: i32,  // length in chars
     type_info: Option<String>,
-    parent: Option<String>, // struct/trait/enum name for methods/variants
+    parent: Option<String>,      // struct/trait/enum name for methods/variants
     doc_comment: Option<String>, // documentation comment above the declaration
     /// `#[deprecated("msg")]` attribute message, when the symbol is deprecated.
     deprecated_msg: Option<String>,
@@ -291,8 +291,8 @@ impl DocState {
         //    opening brace; i.e. anywhere inside their function body. We treat
         //    them as visible if the cursor is after the parameter declaration.
         // 2. Variables must be declared strictly before the cursor.
-        let declared_before = sym_line < target_line
-            || (sym_line == target_line && sym_col < target_col);
+        let declared_before =
+            sym_line < target_line || (sym_line == target_line && sym_col < target_col);
         if !declared_before {
             return false;
         }
@@ -377,11 +377,7 @@ fn import_module_token_positions(tokens: &[Token]) -> std::collections::HashSet<
 }
 
 /// Look up a symbol declared exactly at (line, col).
-fn find_symbol_at<'a>(
-    symbols: &'a [SymbolEntry],
-    line: i32,
-    col: i32,
-) -> Option<&'a SymbolEntry> {
+fn find_symbol_at<'a>(symbols: &'a [SymbolEntry], line: i32, col: i32) -> Option<&'a SymbolEntry> {
     symbols.iter().find(|s| s.line == line && s.col == col)
 }
 
@@ -397,10 +393,7 @@ fn symbol_semantic(kind: &SymKind) -> (u32, u32) {
         ),
         SymKind::Struct => (type_index(SemanticTokenType::STRUCT), MOD_DECLARATION),
         SymKind::Enum => (type_index(SemanticTokenType::ENUM), MOD_DECLARATION),
-        SymKind::EnumVariant => (
-            type_index(SemanticTokenType::ENUM_MEMBER),
-            MOD_DECLARATION,
-        ),
+        SymKind::EnumVariant => (type_index(SemanticTokenType::ENUM_MEMBER), MOD_DECLARATION),
         SymKind::Variable => (type_index(SemanticTokenType::VARIABLE), MOD_DECLARATION),
         SymKind::Parameter => (type_index(SemanticTokenType::PARAMETER), MOD_DECLARATION),
         SymKind::Trait => (type_index(SemanticTokenType::TYPE), MOD_DECLARATION),
@@ -416,14 +409,14 @@ const MOD_STATIC: u32 = 1 << 3; // STATIC
 
 /// Index of a token type within SEMANTIC_TYPES.
 fn type_index(ty: SemanticTokenType) -> u32 {
-    SEMANTIC_TYPES
-        .iter()
-        .position(|t| *t == ty)
-        .unwrap_or(0) as u32
+    SEMANTIC_TYPES.iter().position(|t| *t == ty).unwrap_or(0) as u32
 }
 
 fn is_capitalized(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+    s.chars()
+        .next()
+        .map(|c| c.is_ascii_uppercase())
+        .unwrap_or(false)
 }
 
 /// Extract `{name}` interpolation identifiers from a format-string literal
@@ -466,7 +459,11 @@ fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
                         .unwrap_or(name)
                         .trim();
                     if !ident.is_empty()
-                        && ident.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                        && ident
+                            .chars()
+                            .next()
+                            .map(|c| c.is_alphabetic() || c == '_')
+                            .unwrap_or(false)
                     {
                         out.push((start, ident.to_string()));
                     }
@@ -543,11 +540,7 @@ fn string_literal_segments(value: &str, skip_braces: bool) -> Vec<(usize, usize)
                 while j < n && bytes[j] != b'}' {
                     j += 1;
                 }
-                if j < n {
-                    j - i + 1
-                } else {
-                    n - i
-                }
+                if j < n { j - i + 1 } else { n - i }
             };
         }
         seg_start = i;
@@ -608,7 +601,10 @@ fn classify_ident(
     if ns_set.contains(&(t.line, t.col)) {
         return (type_index(SemanticTokenType::NAMESPACE), 0);
     }
-    if matches!(t.value.as_str(), "bool" | "byte" | "char" | "float" | "int" | "str" | "unit" | "void") {
+    if matches!(
+        t.value.as_str(),
+        "bool" | "byte" | "char" | "float" | "int" | "str" | "unit" | "void"
+    ) {
         return (type_index(SemanticTokenType::TYPE), 0);
     }
     // 3. Module qualifier before `::` (e.g. `io::println`, `Vec::new`).
@@ -628,10 +624,7 @@ fn classify_ident(
         sym.name == t.value
             && matches!(
                 sym.kind,
-                SymKind::Function
-                    | SymKind::Method
-                    | SymKind::StaticFunc
-                    | SymKind::ExternFn
+                SymKind::Function | SymKind::Method | SymKind::StaticFunc | SymKind::ExternFn
             )
     }) {
         return (type_index(SemanticTokenType::FUNCTION), 0);
@@ -667,10 +660,11 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 // `func(T): U` is a function type, while `func name(...)`
                 // remains a declaration keyword.
-                "func" if tokens
-                    .get(i + 1)
-                    .map(|next| next.value == "(")
-                    .unwrap_or(false) =>
+                "func"
+                    if tokens
+                        .get(i + 1)
+                        .map(|next| next.value == "(")
+                        .unwrap_or(false) =>
                 {
                     (type_index(SemanticTokenType::TYPE), 0)
                 }
@@ -720,7 +714,12 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 for (off, ident) in format_interpolation_spans(&t.value) {
                     let var_col = content_base + off as u32;
-                    let (ity, imods) = if ident.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                    let (ity, imods) = if ident
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_uppercase())
+                        .unwrap_or(false)
+                    {
                         (type_index(SemanticTokenType::TYPE), 0)
                     } else {
                         // Prefer declared variable type when known via symbol table.
@@ -739,7 +738,16 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 parts.sort_by_key(|p| p.0);
                 for (col, len, ty, md) in parts {
-                    push_sem(&mut out, &mut prev_line, &mut prev_start, line, col, len, ty, md);
+                    push_sem(
+                        &mut out,
+                        &mut prev_line,
+                        &mut prev_start,
+                        line,
+                        col,
+                        len,
+                        ty,
+                        md,
+                    );
                 }
                 continue; // for-loop advances `i`
             }
@@ -1388,7 +1396,9 @@ fn scan_extern_block(tokens: &[Token], extern_idx: usize, symbols: &mut Vec<Symb
     let mut j = extern_idx + 1;
     // Skip linkage string if present
     if let Some(t) = tokens.get(j) {
-        if matches!(t.r#type, TokenType::String | TokenType::FormatString) || t.value.starts_with('"') {
+        if matches!(t.r#type, TokenType::String | TokenType::FormatString)
+            || t.value.starts_with('"')
+        {
             j += 1;
         }
     }
@@ -1457,7 +1467,9 @@ fn find_return_type(tokens: &[Token], func_idx: usize) -> Option<String> {
         let mut paren = 0i32;
         while j < tokens.len() {
             let t = &tokens[j];
-            if t.value == "(" { paren += 1; }
+            if t.value == "(" {
+                paren += 1;
+            }
             if t.value == ")" {
                 if paren == 0 {
                     break;
@@ -1467,7 +1479,10 @@ fn find_return_type(tokens: &[Token], func_idx: usize) -> Option<String> {
             if t.value == "{" || t.value == ";" || t.r#type == TokenType::EndOfLine {
                 break;
             }
-            if !type_str.is_empty() && t.r#type != TokenType::Operator && t.value != "[" && t.value != "]"
+            if !type_str.is_empty()
+                && t.r#type != TokenType::Operator
+                && t.value != "["
+                && t.value != "]"
             {
                 type_str.push(' ');
             }
@@ -1493,7 +1508,10 @@ fn find_type_alias_rhs(tokens: &[Token], type_idx: usize) -> Option<String> {
             if t.value == ";" || t.value == "{" || t.r#type == TokenType::EndOfLine {
                 break;
             }
-            if !type_str.is_empty() && t.r#type != TokenType::Operator && t.value != "[" && t.value != "]"
+            if !type_str.is_empty()
+                && t.r#type != TokenType::Operator
+                && t.value != "["
+                && t.value != "]"
             {
                 type_str.push(' ');
             }
@@ -1520,7 +1538,10 @@ fn find_var_type(tokens: &[Token], var_idx: usize) -> Option<String> {
                     if t.value == "=" || t.value == ";" || t.r#type == TokenType::EndOfLine {
                         break;
                     }
-                    if !type_str.is_empty() && t.r#type != TokenType::Operator && t.value != "[" && t.value != "]"
+                    if !type_str.is_empty()
+                        && t.r#type != TokenType::Operator
+                        && t.value != "["
+                        && t.value != "]"
                     {
                         type_str.push(' ');
                     }
@@ -1606,7 +1627,10 @@ fn extract_parameters(tokens: &[Token], func_idx: usize, symbols: &mut Vec<Symbo
 /// Parse the signatures of all callables declared in a token stream.
 /// Returns a map keyed by function name. Handles `func name(...): Ret` and
 /// `static func name(...): Ret`.
-fn collect_signatures(tokens: &[Token], source: &str) -> std::collections::HashMap<String, FuncSignature> {
+fn collect_signatures(
+    tokens: &[Token],
+    source: &str,
+) -> std::collections::HashMap<String, FuncSignature> {
     use std::collections::HashMap;
     let mut sigs = HashMap::new();
     let mut i = 0;
@@ -1716,14 +1740,22 @@ fn collect_signatures(tokens: &[Token], source: &str) -> std::collections::HashM
                         if tk.value == "," || tk.value == ")" || tk.r#type == TokenType::EndOfLine {
                             break;
                         }
-                        if !ty.is_empty() && tk.r#type != TokenType::Operator && tk.value != "[" && tk.value != "]" {
+                        if !ty.is_empty()
+                            && tk.r#type != TokenType::Operator
+                            && tk.value != "["
+                            && tk.value != "]"
+                        {
                             ty.push(' ');
                         }
                         ty.push_str(&tk.value);
                         k += 1;
                     }
                     let name = t.value.clone();
-                    let ty = if ty.trim().is_empty() { None } else { Some(ty.trim().to_string()) };
+                    let ty = if ty.trim().is_empty() {
+                        None
+                    } else {
+                        Some(ty.trim().to_string())
+                    };
                     let label = match &ty {
                         Some(t) => format!("{}: {}", name, t),
                         None => name.clone(),
@@ -1746,13 +1778,23 @@ fn collect_signatures(tokens: &[Token], source: &str) -> std::collections::HashM
             let mut paren = 0i32;
             while j2 < tokens.len() {
                 let t = &tokens[j2];
-                if t.value == "(" { paren += 1; }
+                if t.value == "(" {
+                    paren += 1;
+                }
                 if t.value == ")" {
-                    if paren == 0 { break; }
+                    if paren == 0 {
+                        break;
+                    }
                     paren -= 1;
                 }
-                if t.value == "{" || t.value == ";" || t.r#type == TokenType::EndOfLine { break; }
-                if !rt.is_empty() && t.r#type != TokenType::Operator && t.value != "[" && t.value != "]" {
+                if t.value == "{" || t.value == ";" || t.r#type == TokenType::EndOfLine {
+                    break;
+                }
+                if !rt.is_empty()
+                    && t.r#type != TokenType::Operator
+                    && t.value != "["
+                    && t.value != "]"
+                {
                     rt.push(' ');
                 }
                 rt.push_str(&t.value);
@@ -1926,7 +1968,11 @@ fn signature_help_for(sig: &FuncSignature, active_param: u32) -> SignatureHelp {
 }
 
 /// Compute folding ranges from matching `{`/`}` pairs (multi-line only).
-fn mk_inlay_hint(position: Position, label: impl Into<InlayHintLabel>, kind: InlayHintKind) -> InlayHint {
+fn mk_inlay_hint(
+    position: Position,
+    label: impl Into<InlayHintLabel>,
+    kind: InlayHintKind,
+) -> InlayHint {
     InlayHint {
         position,
         label: label.into(),
@@ -2062,7 +2108,12 @@ fn infer_expr_type(
             // Constructor / function call `f(...)`. Resolve the return type.
             return Some(ret_type(&t.value).unwrap_or_else(|| {
                 // Known uppercase type constructor (e.g. `Range(...)`) → itself.
-                if t.value.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                if t.value
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false)
+                {
                     t.value.clone()
                 } else {
                     "unknown".to_string()
@@ -2073,7 +2124,12 @@ fn infer_expr_type(
         if let Some(sym) = state.find_definition(&t.value) {
             return sym.type_info.clone();
         }
-        if t.value.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+        if t.value
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_uppercase())
+            .unwrap_or(false)
+        {
             return Some(t.value.clone());
         }
         return None;
@@ -2085,9 +2141,11 @@ fn infer_expr_type(
 /// parameter list rather than a call. This distinguishes `func add(a: int)`
 /// (a declaration — no call argument hints) from `add(x, 1)` (a real call).
 fn is_declaration_call_paren(tokens: &[Token], ident_idx: usize) -> bool {
-    let prev1 = tokens.get(ident_idx.wrapping_sub(1)).map(|x| x.value.as_str());
-    let prev2 = ident_idx >= 2
-        && tokens.get(ident_idx - 2).map(|x| x.value.as_str()) == Some("func");
+    let prev1 = tokens
+        .get(ident_idx.wrapping_sub(1))
+        .map(|x| x.value.as_str());
+    let prev2 =
+        ident_idx >= 2 && tokens.get(ident_idx - 2).map(|x| x.value.as_str()) == Some("func");
     matches!(
         prev1,
         Some("func") | Some("static") | Some("constructor") | Some("operator")
@@ -2136,10 +2194,7 @@ fn argument_position_hints(
             } else if !is_punctuation(&t.value) {
                 if let Some(pname) = sig.param_names.get(param_idx) {
                     hints.push(mk_inlay_hint(
-                        Position::new(
-                            (t.line as u32).saturating_sub(1),
-                            t.col.max(0) as u32,
-                        ),
+                        Position::new((t.line as u32).saturating_sub(1), t.col.max(0) as u32),
                         InlayHintLabel::String(format!("{}:", pname)),
                         InlayHintKind::PARAMETER,
                     ));
@@ -2149,8 +2204,7 @@ fn argument_position_hints(
         }
         // Skip to end of current argument expression: stop at top-level comma/close.
         if depth == 0 {
-            let is_arg_end = t.value == ","
-                || t.value == ")";
+            let is_arg_end = t.value == "," || t.value == ")";
             if is_arg_end {
                 j += 1;
                 continue;
@@ -2162,7 +2216,10 @@ fn argument_position_hints(
 }
 
 fn is_punctuation(v: &str) -> bool {
-    matches!(v, "(" | ")" | "[" | "]" | "," | ":" | "::" | "." | ";" | "{ " | "}")
+    matches!(
+        v,
+        "(" | ")" | "[" | "]" | "," | ":" | "::" | "." | ";" | "{ " | "}"
+    )
 }
 
 /// True when the source position (`line` 0-based, `col` 0-based) lies inside a
@@ -2235,16 +2292,19 @@ fn source_in_comment(source: &str, line: usize, col: usize) -> bool {
     }
     // Unterminated block comment at EOF: treat as spanning to end of last line.
     if in_block {
-        blocks.push((block_start.0, block_start.1, lines.len() - 1, lines[lines.len() - 1].len()));
+        blocks.push((
+            block_start.0,
+            block_start.1,
+            lines.len() - 1,
+            lines[lines.len() - 1].len(),
+        ));
     }
     // Check the target position.
     for &(sl, sc, el, ec) in &blocks {
         let inside = if sl == el {
             line == sl && col >= sc && col < ec
         } else {
-            (line > sl && line < el)
-                || (line == sl && col >= sc)
-                || (line == el && col < ec)
+            (line > sl && line < el) || (line == sl && col >= sc) || (line == el && col < ec)
         };
         if inside {
             return true;
@@ -2270,7 +2330,10 @@ fn build_import_action(uri: &url::Url, module: &str, state: &DocState) -> CodeAc
     }
     let text = format!("import {};\n", module);
     let edit = TextEdit {
-        range: Range::new(insert_import_position(&state.source), insert_import_position(&state.source)),
+        range: Range::new(
+            insert_import_position(&state.source),
+            insert_import_position(&state.source),
+        ),
         new_text: text,
     };
     let mut changes = std::collections::HashMap::new();
@@ -2295,7 +2358,10 @@ fn build_import_from_action(
 ) -> CodeAction {
     let text = format!("from {} import {};\n", module, name);
     let edit = TextEdit {
-        range: Range::new(insert_import_position(&state.source), insert_import_position(&state.source)),
+        range: Range::new(
+            insert_import_position(&state.source),
+            insert_import_position(&state.source),
+        ),
         new_text: text,
     };
     let mut changes = std::collections::HashMap::new();
@@ -2425,7 +2491,11 @@ fn resolve_module_file(
     if let Some(parent) = PathBuf::from(file_path).parent() {
         roots.push(parent.to_path_buf());
     }
-    roots.extend(build_lib_paths(file_path, workspace_roots).into_iter().map(PathBuf::from));
+    roots.extend(
+        build_lib_paths(file_path, workspace_roots)
+            .into_iter()
+            .map(PathBuf::from),
+    );
 
     for root in roots {
         for candidate in [
@@ -2455,11 +2525,7 @@ fn lex_source(source: &str) -> Vec<Token> {
     tokens
 }
 
-fn analyze_document(
-    uri: &str,
-    source: &str,
-    workspace_roots: &[PathBuf],
-) -> DocState {
+fn analyze_document(uri: &str, source: &str, workspace_roots: &[PathBuf]) -> DocState {
     let file_path = uri_to_path(uri);
     let error_fmt = ErrorFormatter::new(&file_path, source);
 
@@ -2489,11 +2555,7 @@ fn analyze_document(
     let signatures = collect_signatures(&tokens, source);
     let func_types = signatures
         .iter()
-        .filter_map(|(name, sig)| {
-            sig.return_type
-                .clone()
-                .map(|rt| (name.clone(), rt))
-        })
+        .filter_map(|(name, sig)| sig.return_type.clone().map(|rt| (name.clone(), rt)))
         .collect();
 
     DocState {
@@ -2507,9 +2569,7 @@ fn analyze_document(
 }
 
 fn uri_to_path(uri: &str) -> String {
-    uri.strip_prefix("file://")
-        .unwrap_or(uri)
-        .to_string()
+    uri.strip_prefix("file://").unwrap_or(uri).to_string()
 }
 
 /// Convert a filesystem path back into a `file://` URI (the inverse of
@@ -2524,21 +2584,17 @@ fn token_to_range(token: &Token) -> Range {
     let line = (token.line as u32).saturating_sub(1);
     let start_col = token.col as u32;
     let end_col = start_col + token.value.len() as u32;
-    Range::new(
-        Position::new(line, start_col),
-        Position::new(line, end_col),
-    )
+    Range::new(Position::new(line, start_col), Position::new(line, end_col))
 }
 
 /// Expand an error position (1-based line, 0-based col) to a range that covers
 /// the identifier or the nearest token on that line. Falls back to col..col+1.
-fn error_range(
-    source: &str,
-    tokens: &[Token],
-    line: i32,
-    col: i32,
-) -> Range {
-    let lsp_line = if line > 0 { (line as u32).saturating_sub(1) } else { 0 };
+fn error_range(source: &str, tokens: &[Token], line: i32, col: i32) -> Range {
+    let lsp_line = if line > 0 {
+        (line as u32).saturating_sub(1)
+    } else {
+        0
+    };
     let start_col = col.max(0) as u32;
 
     // Try exact token match on that (1-based) line
@@ -2552,7 +2608,11 @@ fn error_range(
         }
         // Otherwise: the first token whose col is >= start_col on that line
         let candidates: Vec<_> = tokens.iter().filter(|t| t.line == line).collect();
-        if let Some(tok) = candidates.iter().find(|t| t.col >= col).or_else(|| candidates.last()) {
+        if let Some(tok) = candidates
+            .iter()
+            .find(|t| t.col >= col)
+            .or_else(|| candidates.last())
+        {
             return token_to_range(tok);
         }
     }
@@ -2735,15 +2795,15 @@ impl LanguageServer for GobolLsp {
                     ..Default::default()
                 }),
                 rename_provider: Some(OneOf::Left(true)),
-                code_action_provider: Some(
-                    CodeActionProviderCapability::Options(CodeActionOptions {
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
                         code_action_kinds: Some(vec![
                             CodeActionKind::QUICKFIX,
                             CodeActionKind::REFACTOR,
                         ]),
                         ..Default::default()
-                    }),
-                ),
+                    },
+                )),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
@@ -2860,7 +2920,9 @@ impl LanguageServer for GobolLsp {
                     .unwrap_or_default();
 
                 let signature = match sym.kind {
-                    SymKind::Function | SymKind::Method | SymKind::ExternFn
+                    SymKind::Function
+                    | SymKind::Method
+                    | SymKind::ExternFn
                     | SymKind::StaticFunc => {
                         if let Some(ty) = sym.type_info.as_ref() {
                             format!("func {}(): {}", sym.name, ty)
@@ -2871,7 +2933,12 @@ impl LanguageServer for GobolLsp {
                     SymKind::Struct => format!("struct {}", sym.name),
                     SymKind::Enum => format!("enum {}", sym.name),
                     SymKind::EnumVariant => {
-                        format!("{}::{} (variant of {})", sym.parent.as_deref().unwrap_or("?"), sym.name, sym.parent.as_deref().unwrap_or("?"))
+                        format!(
+                            "{}::{} (variant of {})",
+                            sym.parent.as_deref().unwrap_or("?"),
+                            sym.name,
+                            sym.parent.as_deref().unwrap_or("?")
+                        )
                     }
                     SymKind::Trait => format!("trait {}", sym.name),
                     SymKind::TypeAlias => {
@@ -2900,22 +2967,14 @@ impl LanguageServer for GobolLsp {
                 // local function-like symbol. Replace that placeholder with
                 // the real imported declaration so types get the correct
                 // hover kind, definition, and documentation.
-                if let Some(module) = sym
-                    .parent
-                    .as_ref()
-                    .and_then(|p| state.module_imported(p))
-                {
+                if let Some(module) = sym.parent.as_ref().and_then(|p| state.module_imported(p)) {
                     if let Some((_n, _m, imported_kind, imported_ty, _u, _l, _c, doc)) =
                         self.resolve_imported_symbol(&uri, &token.value).await
                     {
                         let imported_type = imported_ty.unwrap_or_else(|| "-".to_string());
                         hover_text = format!(
                             "**{}** imported from `{}`\n\n```gobol\n{} {}\n```\n\nType: `{}`",
-                            imported_kind,
-                            module,
-                            imported_kind,
-                            token.value,
-                            imported_type
+                            imported_kind, module, imported_kind, token.value, imported_type
                         );
                         if let Some(doc) = doc {
                             if !doc.trim().is_empty() {
@@ -2969,8 +3028,9 @@ impl LanguageServer for GobolLsp {
             .find_qualifier_before_colon_colon(&uri, pos.position)
             .await
         {
-            if let Some((_name, module, kind, ty, _file, _line, _col, doc)) =
-                self.resolve_qualified_symbol(&uri, &qualifier, &token.value).await
+            if let Some((_name, module, kind, ty, _file, _line, _col, doc)) = self
+                .resolve_qualified_symbol(&uri, &qualifier, &token.value)
+                .await
             {
                 hover_text = format!(
                     "**{}** imported from `{}`\n\nType: `{}`",
@@ -3044,11 +3104,7 @@ impl LanguageServer for GobolLsp {
             // If the local symbol is a `from lib import greet` re-export (its
             // parent names an imported module), prefer the definition in that
             // module's source file so Ctrl+Click lands on the real code.
-            if let Some(module) = sym
-                .parent
-                .as_ref()
-                .and_then(|p| state.module_imported(p))
-            {
+            if let Some(module) = sym.parent.as_ref().and_then(|p| state.module_imported(p)) {
                 let loc = self
                     .goto_imported_symbol_in_module(&uri, &module, &token.value)
                     .await;
@@ -3073,10 +3129,7 @@ impl LanguageServer for GobolLsp {
             let end_col = col + sym.name.len() as u32;
             let location = Location {
                 uri: pos.text_document.uri.clone(),
-                range: Range::new(
-                    Position::new(line, col),
-                    Position::new(line, end_col),
-                ),
+                range: Range::new(Position::new(line, col), Position::new(line, end_col)),
             };
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
@@ -3093,10 +3146,7 @@ impl LanguageServer for GobolLsp {
         Ok(None)
     }
 
-    async fn references(
-        &self,
-        params: ReferenceParams,
-    ) -> Result<Option<Vec<Location>>> {
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let pos = params.text_document_position;
         let uri = pos.text_document.uri.to_string();
         let state_guard = self.documents.read().await;
@@ -3118,10 +3168,7 @@ impl LanguageServer for GobolLsp {
                 let end_col = col + t.value.len() as u32;
                 results.push(Location {
                     uri: pos.text_document.uri.clone(),
-                    range: Range::new(
-                        Position::new(line, col),
-                        Position::new(line, end_col),
-                    ),
+                    range: Range::new(Position::new(line, col), Position::new(line, end_col)),
                 });
             }
         }
@@ -3177,11 +3224,12 @@ impl LanguageServer for GobolLsp {
         ))
     }
 
-    async fn signature_help(
-        &self,
-        params: SignatureHelpParams,
-    ) -> Result<Option<SignatureHelp>> {
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let pos = params.text_document_position_params.position;
 
         let Some(state) = self.documents.read().await.get(&uri).cloned() else {
@@ -3189,9 +3237,7 @@ impl LanguageServer for GobolLsp {
         };
 
         // Find the call the cursor is inside and the active parameter index.
-        let Some((callee, active_param)) =
-            call_at(&state.tokens, pos.line, pos.character)
-        else {
+        let Some((callee, active_param)) = call_at(&state.tokens, pos.line, pos.character) else {
             return Ok(None);
         };
 
@@ -3199,10 +3245,7 @@ impl LanguageServer for GobolLsp {
         Ok(sig.map(|s| signature_help_for(&s, active_param)))
     }
 
-    async fn inlay_hint(
-        &self,
-        params: InlayHintParams,
-    ) -> Result<Option<Vec<InlayHint>>> {
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri.to_string();
         let Some(state) = self.documents.read().await.get(&uri).cloned() else {
             return Ok(None);
@@ -3229,10 +3272,7 @@ impl LanguageServer for GobolLsp {
         }))
     }
 
-    async fn rename(
-        &self,
-        params: RenameParams,
-    ) -> Result<Option<WorkspaceEdit>> {
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
         let uri = params.text_document_position.text_document.uri.to_string();
         let pos = params.text_document_position.position;
         let new_name = &params.new_name;
@@ -3269,7 +3309,12 @@ impl LanguageServer for GobolLsp {
             }
             let edits = collect(&doc_state.tokens);
             if !edits.is_empty() {
-                let entry = changes.entry(url::Url::parse(doc_uri).unwrap_or_else(|_| url::Url::parse("file:///").unwrap())).or_default();
+                let entry = changes
+                    .entry(
+                        url::Url::parse(doc_uri)
+                            .unwrap_or_else(|_| url::Url::parse("file:///").unwrap()),
+                    )
+                    .or_default();
                 entry.extend(edits);
             }
         }
@@ -3277,9 +3322,8 @@ impl LanguageServer for GobolLsp {
         // 2. If the rename target resolves to an imported module, apply the
         // rename at the definition site there too (cross-file import rename),
         // and sweep the module's whole source for other references of the name.
-        if let Some((_name, _module, _k, _ty, file_uri, line, col, _doc)) = self
-            .resolve_imported_symbol(&uri, &old)
-            .await
+        if let Some((_name, _module, _k, _ty, file_uri, line, col, _doc)) =
+            self.resolve_imported_symbol(&uri, &old).await
         {
             // Definition site.
             let range = Range::new(
@@ -3325,10 +3369,7 @@ impl LanguageServer for GobolLsp {
         }
     }
 
-    async fn code_action(
-        &self,
-        params: CodeActionParams,
-    ) -> Result<Option<CodeActionResponse>> {
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri.to_string();
         let range = params.range;
         let Some(state) = self.documents.read().await.get(&uri).cloned() else {
@@ -3338,9 +3379,7 @@ impl LanguageServer for GobolLsp {
 
         // Detect an unresolved qualified name directly under the cursor, e.g.
         // `io::println(...)` where `io` is not imported.
-        if let Some(action) = self
-            .code_action_resolve_qualified(&uri, &state, range)
-        {
+        if let Some(action) = self.code_action_resolve_qualified(&uri, &state, range) {
             actions.push(CodeActionOrCommand::CodeAction(action));
         }
 
@@ -3357,10 +3396,7 @@ impl LanguageServer for GobolLsp {
         }
     }
 
-    async fn folding_range(
-        &self,
-        params: FoldingRangeParams,
-    ) -> Result<Option<Vec<FoldingRange>>> {
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let uri = params.text_document.uri.to_string();
         let Some(state) = self.documents.read().await.get(&uri).cloned() else {
             return Ok(None);
@@ -3390,12 +3426,47 @@ impl LanguageServer for GobolLsp {
         let import_ctx = self.is_import_context(&uri, pos).await;
 
         let keywords = &[
-            "func", "var", "val", "struct", "enum", "impl", "trait", "if", "else",
-            "for", "while", "return", "break", "continue", "import", "export",
-            "as", "in", "match", "convert", "operator", "constructor", "new",
-            "static", "type", "where", "loop",
-            "true", "false", "null", "none", "nil", "self", "Self",
-            "int", "float", "str", "bool", "void", "char", "unit",
+            "func",
+            "var",
+            "val",
+            "struct",
+            "enum",
+            "impl",
+            "trait",
+            "if",
+            "else",
+            "for",
+            "while",
+            "return",
+            "break",
+            "continue",
+            "import",
+            "export",
+            "as",
+            "in",
+            "match",
+            "convert",
+            "operator",
+            "constructor",
+            "new",
+            "static",
+            "type",
+            "where",
+            "loop",
+            "true",
+            "false",
+            "null",
+            "none",
+            "nil",
+            "self",
+            "Self",
+            "int",
+            "float",
+            "str",
+            "bool",
+            "void",
+            "char",
+            "unit",
         ];
 
         let mut items: Vec<CompletionItem> = Vec::new();
@@ -3424,8 +3495,10 @@ impl LanguageServer for GobolLsp {
         // seen_labels tracks every completion label emitted so far; the
         // keyword/snippet entries, stdlib modules (import context) and the
         // document/cross-file symbols below all dedup against it.
-        let mut seen_labels: std::collections::HashSet<String> =
-            items.iter().map(|it| it.label.as_str().to_string()).collect();
+        let mut seen_labels: std::collections::HashSet<String> = items
+            .iter()
+            .map(|it| it.label.as_str().to_string())
+            .collect();
 
         // Add stdlib modules when user is typing `import ...`
         if import_ctx {
@@ -3473,33 +3546,60 @@ impl LanguageServer for GobolLsp {
                     if !seen_labels.insert(sym.name.clone()) {
                         continue;
                     }
-                    let mut detail = sym.type_info.clone().unwrap_or_else(|| sym.kind.label().to_string());
+                    let mut detail = sym
+                        .type_info
+                        .clone()
+                        .unwrap_or_else(|| sym.kind.label().to_string());
                     if let Some(ref parent) = sym.parent {
                         detail = format!("{}::{} → {}", parent, sym.name, detail);
                     } else {
                         detail = format!("{}: {}", sym.kind.label(), detail);
                     }
                     // Mark deprecated symbols so editors render a strikethrough.
-                    let tags = sym.deprecated_msg.as_ref().map(|_| vec![CompletionItemTag::DEPRECATED]);
+                    let tags = sym
+                        .deprecated_msg
+                        .as_ref()
+                        .map(|_| vec![CompletionItemTag::DEPRECATED]);
                     let documentation = match (&sym.doc_comment, &sym.deprecated_msg) {
-                        (Some(doc), Some(msg)) => Some(tower_lsp::lsp_types::Documentation::MarkupContent(
-                            tower_lsp::lsp_types::MarkupContent {
-                                kind: tower_lsp::lsp_types::MarkupKind::Markdown,
-                                value: format!("**Deprecated:** {}\n\n{}", if msg.is_empty() { "this item is deprecated".to_string() } else { msg.clone() }, doc),
-                            },
-                        )),
-                        (Some(doc), None) => Some(tower_lsp::lsp_types::Documentation::MarkupContent(
-                            tower_lsp::lsp_types::MarkupContent {
-                                kind: tower_lsp::lsp_types::MarkupKind::Markdown,
-                                value: doc.clone(),
-                            },
-                        )),
-                        (None, Some(msg)) => Some(tower_lsp::lsp_types::Documentation::MarkupContent(
-                            tower_lsp::lsp_types::MarkupContent {
-                                kind: tower_lsp::lsp_types::MarkupKind::Markdown,
-                                value: format!("**Deprecated:** {}", if msg.is_empty() { "this item is deprecated".to_string() } else { msg.clone() }),
-                            },
-                        )),
+                        (Some(doc), Some(msg)) => {
+                            Some(tower_lsp::lsp_types::Documentation::MarkupContent(
+                                tower_lsp::lsp_types::MarkupContent {
+                                    kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                    value: format!(
+                                        "**Deprecated:** {}\n\n{}",
+                                        if msg.is_empty() {
+                                            "this item is deprecated".to_string()
+                                        } else {
+                                            msg.clone()
+                                        },
+                                        doc
+                                    ),
+                                },
+                            ))
+                        }
+                        (Some(doc), None) => {
+                            Some(tower_lsp::lsp_types::Documentation::MarkupContent(
+                                tower_lsp::lsp_types::MarkupContent {
+                                    kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                    value: doc.clone(),
+                                },
+                            ))
+                        }
+                        (None, Some(msg)) => {
+                            Some(tower_lsp::lsp_types::Documentation::MarkupContent(
+                                tower_lsp::lsp_types::MarkupContent {
+                                    kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                    value: format!(
+                                        "**Deprecated:** {}",
+                                        if msg.is_empty() {
+                                            "this item is deprecated".to_string()
+                                        } else {
+                                            msg.clone()
+                                        }
+                                    ),
+                                },
+                            ))
+                        }
                         (None, None) => None,
                     };
                     items.push(CompletionItem {
@@ -3537,16 +3637,14 @@ impl LanguageServer for GobolLsp {
         // Build hierarchical: struct/trait/enum → methods / variants
         let mut top_level: Vec<DocumentSymbol> = Vec::new();
         // Track container -> index in top_level
-        let mut container_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut container_idx: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for sym in &state.symbols {
             let line = (sym.line as u32).saturating_sub(1);
             let col = sym.col as u32;
             let end_col = col + sym.len.max(1) as u32;
-            let range = Range::new(
-                Position::new(line, col),
-                Position::new(line, end_col),
-            );
+            let range = Range::new(Position::new(line, col), Position::new(line, end_col));
             match sym.kind {
                 SymKind::Struct | SymKind::Enum | SymKind::Trait => {
                     container_idx.insert(sym.name.clone(), top_level.len());
@@ -3593,19 +3691,17 @@ impl LanguageServer for GobolLsp {
             let line = (sym.line as u32).saturating_sub(1);
             let col = sym.col as u32;
             let end_col = col + sym.len.max(1) as u32;
-            let range = Range::new(
-                Position::new(line, col),
-                Position::new(line, end_col),
-            );
+            let range = Range::new(Position::new(line, col), Position::new(line, end_col));
             match sym.kind {
                 SymKind::Method | SymKind::StaticFunc | SymKind::EnumVariant => {
                     if let Some(&idx) = container_idx.get(&parent) {
                         if let Some(children) = top_level[idx].children.as_mut() {
                             children.push(DocumentSymbol {
                                 name: sym.name.clone(),
-                                detail: sym.type_info.clone().or_else(|| {
-                                    Some(sym.kind.label().to_string())
-                                }),
+                                detail: sym
+                                    .type_info
+                                    .clone()
+                                    .or_else(|| Some(sym.kind.label().to_string())),
                                 kind: sym.kind.symbol_kind(),
                                 range,
                                 selection_range: range,
@@ -3760,12 +3856,7 @@ impl GobolLsp {
     /// Compute inlay hints for a range: type hints after `var x =`, parameter
     /// name hints in call arguments, and return-type hints for `func f() { e }`
     /// single-expression bodies.
-    fn inlay_hints_for(
-        &self,
-        uri: &str,
-        state: &DocState,
-        range: Range,
-    ) -> Vec<InlayHint> {
+    fn inlay_hints_for(&self, uri: &str, state: &DocState, range: Range) -> Vec<InlayHint> {
         let tokens = &state.tokens;
         let mut hints = Vec::new();
         let start_line = range.start.line;
@@ -3790,7 +3881,9 @@ impl GobolLsp {
                                 // skip explicit type `var x: T =`
                                 let has_explicit = self.var_has_explicit_type(tokens, i);
                                 if !has_explicit {
-                                    if let Some(ty) = infer_expr_type(tokens, i + 3, state, Some(self), Some(uri)) {
+                                    if let Some(ty) =
+                                        infer_expr_type(tokens, i + 3, state, Some(self), Some(uri))
+                                    {
                                         hints.push(mk_inlay_hint(
                                             Position::new(
                                                 (name_tok.line as u32).saturating_sub(1),
@@ -3834,7 +3927,12 @@ impl GobolLsp {
         false
     }
 
-    fn signature_at_index(&self, uri: &str, state: &DocState, ident_idx: usize) -> Option<FuncSignature> {
+    fn signature_at_index(
+        &self,
+        uri: &str,
+        state: &DocState,
+        ident_idx: usize,
+    ) -> Option<FuncSignature> {
         let t = &state.tokens[ident_idx];
         self.signature_for_name_blocking(uri, &t.value, state)
     }
@@ -3881,11 +3979,7 @@ impl GobolLsp {
         None
     }
 
-    async fn code_action_import_bare(
-        &self,
-        uri: &str,
-        state: &DocState,
-    ) -> Option<CodeAction> {
+    async fn code_action_import_bare(&self, uri: &str, state: &DocState) -> Option<CodeAction> {
         // Find a bare call `name(` whose `name` is not defined locally or
         // imported, but is exported by a resolvable module.
         let tokens = &state.tokens;
@@ -3946,11 +4040,7 @@ impl GobolLsp {
     /// Resolve a module name (e.g. `lib` in `import lib;` / `from lib import`)
     /// to the source *file* of that module so Ctrl+Click jumps into it.
     /// Returns `None` if no module file can be located.
-    async fn goto_imported_module_file(
-        &self,
-        uri: &str,
-        module_name: &str,
-    ) -> Option<Location> {
+    async fn goto_imported_module_file(&self, uri: &str, module_name: &str) -> Option<Location> {
         let file_path = uri_to_path(uri);
         let roots = self
             .workspace_roots
@@ -3963,7 +4053,7 @@ impl GobolLsp {
                 uri: path_to_uri(&mod_path_str),
                 range: Range::new(Position::new(0, 0), Position::new(0, 0)),
             });
-            }
+        }
         None
     }
 
@@ -3972,7 +4062,10 @@ impl GobolLsp {
     /// that module's source file.
     async fn goto_imported_symbol(&self, uri: &str, name: &str) -> Option<Location> {
         for module in self.imported_module_names(uri).await {
-            if let Some(loc) = self.goto_imported_symbol_in_module(uri, &module, name).await {
+            if let Some(loc) = self
+                .goto_imported_symbol_in_module(uri, &module, name)
+                .await
+            {
                 return Some(loc);
             }
         }
@@ -3995,13 +4088,9 @@ impl GobolLsp {
                 let line0 = (sym.4 as u32).saturating_sub(1);
                 return Some(Location {
                     uri: sym.3.clone(),
-                    range: Range::new(
-                        Position::new(line0, col),
-                        Position::new(line0, end_col),
-                    ),
+                    range: Range::new(Position::new(line0, col), Position::new(line0, end_col)),
                 });
             }
-
         }
         None
     }
@@ -4011,7 +4100,16 @@ impl GobolLsp {
         uri: &str,
         qualifier: &str,
         name: &str,
-    ) -> Option<(String, String, String, Option<String>, url::Url, i32, i32, Option<String>)> {
+    ) -> Option<(
+        String,
+        String,
+        String,
+        Option<String>,
+        url::Url,
+        i32,
+        i32,
+        Option<String>,
+    )> {
         let mut modules = self.imported_module_names(uri).await;
         modules.extend(self.list_std_modules(uri).into_iter().map(|(name, _)| name));
         modules.push("net".to_string());
@@ -4022,8 +4120,8 @@ impl GobolLsp {
                 if entry.0 != name {
                     continue;
                 }
-                let module_match = module == qualifier
-                    || module.rsplit("::").next() == Some(qualifier);
+                let module_match =
+                    module == qualifier || module.rsplit("::").next() == Some(qualifier);
                 let file = uri_to_path(entry.3.as_str());
                 let source = std::fs::read_to_string(file).ok()?;
                 let symbols = build_symbol_index(&lex_source(&source), &source);
@@ -4058,11 +4156,7 @@ impl GobolLsp {
         })
     }
 
-    async fn find_qualifier_before_colon_colon(
-        &self,
-        uri: &str,
-        pos: Position,
-    ) -> Option<String> {
+    async fn find_qualifier_before_colon_colon(&self, uri: &str, pos: Position) -> Option<String> {
         let state_guard = self.documents.read().await;
         let state = state_guard.get(uri)?;
         let target_line = (pos.line as i32) + 1;
@@ -4302,7 +4396,10 @@ impl GobolLsp {
         };
         // Dedup, preserving order.
         let mut seen = std::collections::HashSet::new();
-        imports.into_iter().filter(|n| seen.insert(n.clone())).collect()
+        imports
+            .into_iter()
+            .filter(|n| seen.insert(n.clone()))
+            .collect()
     }
 
     /// Index the exported symbols of an imported module, returning rich detail
@@ -4349,16 +4446,16 @@ impl GobolLsp {
             let mod_uri = path_to_uri(&mod_path.to_string_lossy());
             for sym in &symbols {
                 if matches!(
-                                sym.kind,
-                                SymKind::Function
-                                    | SymKind::Method
-                                    | SymKind::ExternFn
-                                    | SymKind::StaticFunc
-                                    | SymKind::EnumVariant
-                                    | SymKind::Struct
-                                    | SymKind::Enum
-                                    | SymKind::Trait
-                                    | SymKind::TypeAlias
+                    sym.kind,
+                    SymKind::Function
+                        | SymKind::Method
+                        | SymKind::ExternFn
+                        | SymKind::StaticFunc
+                        | SymKind::EnumVariant
+                        | SymKind::Struct
+                        | SymKind::Enum
+                        | SymKind::Trait
+                        | SymKind::TypeAlias
                 ) {
                     result.push((
                         sym.name.clone(),
@@ -4637,7 +4734,10 @@ fib(10) == 55
         let source = "/// # Title\n/// ## Section\n/// ### Subsection\n/// body\nfunc h() {}\n";
         // func is on line 5
         let doc = extract_doc_comment(source, 5);
-        assert_eq!(doc.as_deref(), Some("# Title\n## Section\n### Subsection\nbody"));
+        assert_eq!(
+            doc.as_deref(),
+            Some("# Title\n## Section\n### Subsection\nbody")
+        );
     }
 
     #[test]
@@ -4677,9 +4777,7 @@ fib(10) == 55
             } else {
                 col = t.delta_start;
             }
-            let name = SEMANTIC_TYPES[t.token_type as usize]
-                .as_str()
-                .to_string();
+            let name = SEMANTIC_TYPES[t.token_type as usize].as_str().to_string();
             out.push((line, col, name));
         }
         out
@@ -4800,7 +4898,9 @@ mod unit_new {
         let mut v = Vec::new();
         loop {
             let t = l.get_next_token();
-            if t.r#type == TokenType::EndOfFile { break; }
+            if t.r#type == TokenType::EndOfFile {
+                break;
+            }
             v.push(t);
         }
         v
@@ -4824,7 +4924,12 @@ mod unit_new {
     fn string_escape_segments() {
         // `\n` split into literal "hi" + "world".
         let segs = string_literal_segments("hi\\nworld", false);
-        assert_eq!(segs, vec![(0usize, 2usize), (4usize, 5usize)], "got {:?}", segs);
+        assert_eq!(
+            segs,
+            vec![(0usize, 2usize), (4usize, 5usize)],
+            "got {:?}",
+            segs
+        );
         // No escapes → single full segment.
         let segs2 = string_literal_segments("plain", false);
         assert_eq!(segs2, vec![(0usize, 5usize)]);
@@ -4834,7 +4939,12 @@ mod unit_new {
         // Format string: interpolation braces excluded, escapes too.
         let segs4 = string_literal_segments("a {name} b", true);
         // literal "a " (0-2) then " b" (after the {name} block ends at 8)
-        assert_eq!(segs4, vec![(0usize, 2usize), (8usize, 2usize)], "got {:?}", segs4);
+        assert_eq!(
+            segs4,
+            vec![(0usize, 2usize), (8usize, 2usize)],
+            "got {:?}",
+            segs4
+        );
     }
 
     #[test]
@@ -4846,11 +4956,16 @@ mod unit_new {
         let symbols = build_symbol_index(&tokens, source);
         let data = build_semantic_tokens(&tokens, &symbols);
 
-        let mut line = 0; let mut col = 0;
+        let mut line = 0;
+        let mut col = 0;
         let mut spans: Vec<(u32, u32, u32)> = Vec::new();
         for st in data {
             line += st.delta_line;
-            if st.delta_line == 0 { col += st.delta_start; } else { col = st.delta_start; }
+            if st.delta_line == 0 {
+                col += st.delta_start;
+            } else {
+                col = st.delta_start;
+            }
             spans.push((line, col, st.length));
         }
         // Only string tokens on line 1; none should cover the `\n` columns.
@@ -4865,7 +4980,9 @@ mod unit_new {
             assert!(
                 !(lo < 18 && hi > 16),
                 "a string token spans the escape region {}-{}: {:?}",
-                lo, hi, line1
+                lo,
+                hi,
+                line1
             );
         }
     }
@@ -4880,20 +4997,37 @@ mod unit_new {
         let data = build_semantic_tokens(&tokens, &symbols);
 
         // Decode to (line, col, typename).
-        let mut line = 0; let mut col = 0;
+        let mut line = 0;
+        let mut col = 0;
         let mut out = Vec::new();
         for st in data {
             line += st.delta_line;
-            if st.delta_line == 0 { col += st.delta_start; } else { col = st.delta_start; }
-            out.push((line, col, SEMANTIC_TYPES[st.token_type as usize].as_str().to_string()));
+            if st.delta_line == 0 {
+                col += st.delta_start;
+            } else {
+                col = st.delta_start;
+            }
+            out.push((
+                line,
+                col,
+                SEMANTIC_TYPES[st.token_type as usize].as_str().to_string(),
+            ));
         }
         // line2: `var s: str = @"hi {name} {zzz}";`
         // name at content base col=?? content_base = @ col + 2. Find `name` token (TYPE).
         // Both name(declared) and zzz(undeclared) should appear; assert presence + types.
         let declared = out.iter().any(|(l, _c, t)| *l == 1 && t == "type");
-        assert!(declared, "expected a `type` token on interpolation of a declared var; got {:?}", out);
+        assert!(
+            declared,
+            "expected a `type` token on interpolation of a declared var; got {:?}",
+            out
+        );
         let has_var = out.iter().any(|(l, _, t)| *l == 1 && t == "variable");
-        assert!(has_var, "expected a `variable` token for undeclared interpolation; got {:?}", out);
+        assert!(
+            has_var,
+            "expected a `variable` token for undeclared interpolation; got {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4968,7 +5102,14 @@ mod unit_new {
     #[test]
     fn import_action_inserts_import() {
         let uri = url::Url::parse("file:///tmp/x.gbl").unwrap();
-        let state = DocState { source: "func main() {}\n".into(), tokens: vec![], symbols: vec![], errors: vec![], signatures: Default::default(), func_types: Default::default() };
+        let state = DocState {
+            source: "func main() {}\n".into(),
+            tokens: vec![],
+            symbols: vec![],
+            errors: vec![],
+            signatures: Default::default(),
+            func_types: Default::default(),
+        };
         let a = build_import_action(&uri, "io", &state);
         assert!(a.title.contains("io"));
         assert!(a.edit.is_some());
@@ -4979,20 +5120,43 @@ mod unit_new {
         let src = "func main() {\n    var a = 1;\n    if true {\n        var b = 2;\n    }\n    var c = a + b;\n}\n";
         let toks = lex(src);
         let syms = build_symbol_index(&toks, src);
-        let state = DocState { source: src.into(), tokens: toks, symbols: syms, errors: vec![], signatures: Default::default(), func_types: Default::default() };
+        let state = DocState {
+            source: src.into(),
+            tokens: toks,
+            symbols: syms,
+            errors: vec![],
+            signatures: Default::default(),
+            func_types: Default::default(),
+        };
 
         // Inside `if` block after `var b`, both a (outer) and b visible.
         let in_block = state.visible_locals(3, 16);
         let names: Vec<&str> = in_block.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"a"), "outer `a` should be visible in inner block: {:?}", names);
-        assert!(names.contains(&"b"), "inner `b` should be visible: {:?}", names);
+        assert!(
+            names.contains(&"a"),
+            "outer `a` should be visible in inner block: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"b"),
+            "inner `b` should be visible: {:?}",
+            names
+        );
 
         // On line 5 (`var c = a + b;`) after the if-block, `b` is NOT visible
         // (declared in a sibling inner block), while `a` still is.
         let after_block = state.visible_locals(5, 5);
         let names2: Vec<&str> = after_block.iter().map(|s| s.name.as_str()).collect();
-        assert!(names2.contains(&"a"), "`a` visible after block: {:?}", names2);
-        assert!(!names2.contains(&"b"), "`b` should not be visible after inner block: {:?}", names2);
+        assert!(
+            names2.contains(&"a"),
+            "`a` visible after block: {:?}",
+            names2
+        );
+        assert!(
+            !names2.contains(&"b"),
+            "`b` should not be visible after inner block: {:?}",
+            names2
+        );
     }
 
     #[test]
@@ -5000,16 +5164,25 @@ mod unit_new {
         // `func add(a: int, b: int)` → add's `(` is a declaration param list.
         let decl = lex("func add(a: int, b: int): int { 0 }");
         // token index of `add` is 1 (func=0, add=1)
-        assert!(is_declaration_call_paren(&decl, 1), "func decl name should be decl-paren");
+        assert!(
+            is_declaration_call_paren(&decl, 1),
+            "func decl name should be decl-paren"
+        );
 
         // static func make() → decl
         let sdecl = lex("static func make(): Point { Point(0) }");
         // static=0 func=1 make=2
-        assert!(is_declaration_call_paren(&sdecl, 2), "static func name should be decl-paren");
+        assert!(
+            is_declaration_call_paren(&sdecl, 2),
+            "static func name should be decl-paren"
+        );
 
         // Real call `add(x, 1)` → NOT decl
         let call = lex("add(x, 1)");
-        assert!(!is_declaration_call_paren(&call, 0), "call should not be decl-paren");
+        assert!(
+            !is_declaration_call_paren(&call, 0),
+            "call should not be decl-paren"
+        );
     }
 
     #[test]
@@ -5018,21 +5191,34 @@ mod unit_new {
         let src = "#[deprecated(\"use new_api()\")]\nfunc legacy(): int { 0 }\n";
         let toks = lex(src);
         let syms = build_symbol_index(&toks, src);
-        let legacy = syms.iter().find(|s| s.name == "legacy").expect("legacy symbol");
+        let legacy = syms
+            .iter()
+            .find(|s| s.name == "legacy")
+            .expect("legacy symbol");
         assert_eq!(legacy.deprecated_msg.as_deref(), Some("use new_api()"));
 
         // Struct deprecated without a message string.
         let src2 = "#[deprecated]\nstruct OldThing {}\n";
         let toks2 = lex(src2);
         let syms2 = build_symbol_index(&toks2, src2);
-        let old = syms2.iter().find(|s| s.name == "OldThing").expect("OldThing symbol");
+        let old = syms2
+            .iter()
+            .find(|s| s.name == "OldThing")
+            .expect("OldThing symbol");
         assert_eq!(old.deprecated_msg.as_deref(), Some(""));
 
         // Normal (non-deprecated) function is not flagged.
         let src3 = "func fresh(): int { 0 }\n";
         let toks3 = lex(src3);
         let syms3 = build_symbol_index(&toks3, src3);
-        assert_eq!(syms3.iter().find(|s| s.name == "fresh").unwrap().deprecated_msg, None);
+        assert_eq!(
+            syms3
+                .iter()
+                .find(|s| s.name == "fresh")
+                .unwrap()
+                .deprecated_msg,
+            None
+        );
     }
 
     #[test]
@@ -5093,8 +5279,14 @@ mod e2e_doc {
     use super::*;
     fn lexall(s: &str) -> Vec<Token> {
         let mut l = Lexer::new(s);
-        let mut v=Vec::new();
-        loop { let t=l.get_next_token(); if t.r#type==TokenType::EndOfFile { break; } v.push(t); }
+        let mut v = Vec::new();
+        loop {
+            let t = l.get_next_token();
+            if t.r#type == TokenType::EndOfFile {
+                break;
+            }
+            v.push(t);
+        }
         v
     }
     #[test]
@@ -5119,7 +5311,10 @@ mod e2e_doc {
         let doc2 = analyze_document("file:///tmp/var.gbl", var_src, &[]);
         // infer call expr type = int
         let toks2 = lexall("var x = 10;");
-        assert_eq!(infer_expr_type(&toks2, 3, &doc2, None, None).as_deref(), Some("int")); // index3 is `10`
+        assert_eq!(
+            infer_expr_type(&toks2, 3, &doc2, None, None).as_deref(),
+            Some("int")
+        ); // index3 is `10`
     }
 
     #[test]
@@ -5129,12 +5324,18 @@ mod e2e_doc {
         let doc = analyze_document("file:///tmp/f.gbl", src, &[]);
         let call = lexall("add(1, 2)");
         // token index 0 is `add`, and the `(` follows.
-        assert_eq!(infer_expr_type(&call, 0, &doc, None, None).as_deref(), Some("int"));
+        assert_eq!(
+            infer_expr_type(&call, 0, &doc, None, None).as_deref(),
+            Some("int")
+        );
         // func_types cache holds add -> int.
         assert_eq!(doc.func_types.get("add").map(|s| s.as_str()), Some("int"));
         // Unknown call (no signature) must never fall back to the bare name.
         let unk = lexall("mystery(1)");
-        assert_eq!(infer_expr_type(&unk, 0, &doc, None, None).as_deref(), Some("unknown"));
+        assert_eq!(
+            infer_expr_type(&unk, 0, &doc, None, None).as_deref(),
+            Some("unknown")
+        );
     }
 
     #[test]
@@ -5155,6 +5356,9 @@ mod e2e_doc {
 
         // A call to it infers its return type.
         let call = lexall("dbl(21)");
-        assert_eq!(infer_expr_type(&call, 0, &doc, None, None).as_deref(), Some("int"));
+        assert_eq!(
+            infer_expr_type(&call, 0, &doc, None, None).as_deref(),
+            Some("int")
+        );
     }
 }

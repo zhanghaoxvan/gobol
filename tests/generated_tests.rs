@@ -411,5 +411,3 @@ fn test_functions_lambda() {
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
 }
-
-

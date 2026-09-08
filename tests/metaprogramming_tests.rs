@@ -18,10 +18,10 @@ fn test_expand_ast_fixture() {
     let path = fixture_path("fixtures/metaprogramming/expand_ast.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
-    result.assert_stdout_contains("z = 15");   // add(x, y)
-    result.assert_stdout_contains("w = 26");   // add(x + 1, y * 2)
-    result.assert_stdout_contains("d = 10");   // dbl(x) -> add(x, x)
-    result.assert_stdout_contains("lit = 7");  // add(3, 4) constant-folds
+    result.assert_stdout_contains("z = 15"); // add(x, y)
+    result.assert_stdout_contains("w = 26"); // add(x + 1, y * 2)
+    result.assert_stdout_contains("d = 10"); // dbl(x) -> add(x, x)
+    result.assert_stdout_contains("lit = 7"); // add(3, 4) constant-folds
 }
 
 /// `file_attrs.gbl` exercises file-level `#![no_gc]` attribute propagation.
@@ -80,8 +80,8 @@ func main() {
 "#;
     let result = run_inline_test(src);
     result.assert_success();
-    result.assert_stdout_contains("d = 10");   // dbl(5) -> 5 + 5
-    result.assert_stdout_contains("q = 12");   // dbl(6) -> 6 + 6
+    result.assert_stdout_contains("d = 10"); // dbl(5) -> 5 + 5
+    result.assert_stdout_contains("q = 12"); // dbl(6) -> 6 + 6
 }
 
 /// All-literal macro calls still constant-fold to a compile-time literal.
@@ -197,7 +197,7 @@ func main() {
     result.assert_stdout_contains("sub = 5");
     result.assert_stdout_contains("mul = 50");
     result.assert_stdout_contains("grouped = 26");
-    result.assert_stdout_contains("precedence = 25");   // 5 + 10*2
+    result.assert_stdout_contains("precedence = 25"); // 5 + 10*2
     result.assert_stdout_contains("cmp = true");
     result.assert_stdout_contains("unary = -5");
 }

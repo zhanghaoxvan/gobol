@@ -25,7 +25,11 @@ impl ErrorFormatter {
         if line > 0 {
             format!(
                 "\u{1b}[1m{}:{}:{}: \u{1b}[31m{}\u{1b}[0m\u{1b}[1m: {}\u{1b}[0m",
-                self.file, line, col + 1, kind, msg
+                self.file,
+                line,
+                col + 1,
+                kind,
+                msg
             )
         } else {
             format!(
@@ -38,10 +42,7 @@ impl ErrorFormatter {
     /// Format: `file:line:col: error: message` (no ANSI)
     pub fn format_header_plain(&self, line: i32, col: i32, kind: &str, msg: &str) -> String {
         if line > 0 {
-            format!(
-                "{}:{}:{}: {}: {}",
-                self.file, line, col + 1, kind, msg
-            )
+            format!("{}:{}:{}: {}: {}", self.file, line, col + 1, kind, msg)
         } else {
             format!("{}: {}: {}", self.file, kind, msg)
         }
@@ -57,16 +58,16 @@ impl ErrorFormatter {
         let span = if span == 0 { 1 } else { span };
 
         let mut out = String::new();
-        
+
         // 行号宽度 + 前缀
         let line_str = format!("{}", line);
         let prefix = format!("  {} | ", line_str);
-        
+
         // 输出源行
         out.push_str(&format!("\u{1b}[34m{}\u{1b}[0m", prefix));
         out.push_str(source_line);
         out.push('\n');
-        
+
         // 下划线：确保前缀长度一致
         let prefix_len = prefix.len();
         let spaces_before_caret = " ".repeat(prefix_len + col);
@@ -114,7 +115,15 @@ impl ErrorFormatter {
     }
 
     /// Full error: header + snippet
-    pub fn format_error(&self, line: i32, col: i32, span: usize, kind: &str, msg: &str, use_color: bool) -> String {
+    pub fn format_error(
+        &self,
+        line: i32,
+        col: i32,
+        span: usize,
+        kind: &str,
+        msg: &str,
+        use_color: bool,
+    ) -> String {
         let header = if use_color {
             self.format_header(line, col, kind, msg)
         } else {

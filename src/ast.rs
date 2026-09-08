@@ -1,4 +1,3 @@
-
 #![allow(dead_code)]
 
 use std::any::Any;
@@ -10,6 +9,7 @@ use std::any::Any;
 pub struct Attribute {
     pub name: String,
     pub value: Option<String>,
+    pub values: Vec<String>,
     pub named: Vec<(String, String)>,
 }
 
@@ -18,12 +18,15 @@ impl Attribute {
         Attribute {
             name: name.into(),
             value: None,
+            values: Vec::new(),
             named: Vec::new(),
         }
     }
 
     pub fn with_value(mut self, value: impl Into<String>) -> Self {
-        self.value = Some(value.into());
+        let value = value.into();
+        self.value = Some(value.clone());
+        self.values.push(value);
         self
     }
 
@@ -37,13 +40,19 @@ impl Attribute {
     }
 
     pub fn get_attr_value<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a str> {
-        attrs.iter().find(|a| a.name == name).and_then(|a| a.value.as_deref())
+        attrs
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(|a| a.value.as_deref())
     }
 
     pub fn get_attr_named<'a>(attrs: &'a [Attribute], name: &str, key: &str) -> Option<&'a str> {
-        attrs.iter()
-        .find(|a| a.name == name)
-        .and_then(|a| a.named.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()))
+        attrs.iter().find(|a| a.name == name).and_then(|a| {
+            a.named
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        })
     }
 }
 
@@ -58,7 +67,10 @@ pub trait Attributable {
     }
 
     fn get_attr_value(&self, name: &str) -> Option<&str> {
-        self.get_attributes().iter().find(|a| a.name == name).and_then(|a| a.value.as_deref())
+        self.get_attributes()
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(|a| a.value.as_deref())
     }
 }
 
@@ -205,8 +217,8 @@ impl Type for BasicType {
 // ==================== ArrayType (完整多维数组支持) ====================
 
 pub struct ArrayType {
-    element_type: Box<dyn Type>,      // 元素类型（可以是基本类型或嵌套数组）
-    size: Option<Box<dyn Expression>>,  // 当前维度的大小
+    element_type: Box<dyn Type>,       // 元素类型（可以是基本类型或嵌套数组）
+    size: Option<Box<dyn Expression>>, // 当前维度的大小
     pub attributes: Vec<Attribute>,
 }
 
@@ -266,7 +278,10 @@ impl ArrayType {
 
     /// 判断是否是多维数组
     pub fn is_multi_dimensional(&self) -> bool {
-        self.element_type.as_type_any().downcast_ref::<ArrayType>().is_some()
+        self.element_type
+            .as_type_any()
+            .downcast_ref::<ArrayType>()
+            .is_some()
     }
 
     /// 获取完整类型名（如 "int[][]"）
@@ -322,7 +337,6 @@ impl PointerType {
     }
 }
 
-
 impl AstNode for PointerType {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
         visitor.visit_pointer_type(self);
@@ -370,9 +384,14 @@ impl_attributable!(NullableType);
 
 impl AstNode for NullableType {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
-        visitor.visit_basic_type(self.inner_type.as_any().downcast_ref::<BasicType>().unwrap_or_else(|| {
-            panic!("NullableType inner must be BasicType");
-        }));
+        visitor.visit_basic_type(
+            self.inner_type
+                .as_any()
+                .downcast_ref::<BasicType>()
+                .unwrap_or_else(|| {
+                    panic!("NullableType inner must be BasicType");
+                }),
+        );
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -459,23 +478,44 @@ impl GenericType {
             attributes: Vec::new(),
         }
     }
-    pub fn get_base_name(&self) -> &str { &self.base_name }
-    pub fn get_type_args(&self) -> &Vec<Box<dyn Type>> { &self.type_args }
+    pub fn get_base_name(&self) -> &str {
+        &self.base_name
+    }
+    pub fn get_type_args(&self) -> &Vec<Box<dyn Type>> {
+        &self.type_args
+    }
 }
 
 impl_attributable!(GenericType);
 
 impl AstNode for GenericType {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
-        visitor.visit_basic_type(self.type_args.first().map(|t| t.as_any().downcast_ref::<BasicType>().unwrap_or_else(|| panic!("expected BasicType"))).unwrap_or_else(|| panic!("expected type arg")));
+        visitor.visit_basic_type(
+            self.type_args
+                .first()
+                .map(|t| {
+                    t.as_any()
+                        .downcast_ref::<BasicType>()
+                        .unwrap_or_else(|| panic!("expected BasicType"))
+                })
+                .unwrap_or_else(|| panic!("expected type arg")),
+        );
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Type for GenericType {
-    fn get_name(&self) -> &str { &self.base_name }
-    fn as_type(&self) -> &dyn Type { self }
-    fn as_type_any(&self) -> &dyn Any { self }
+    fn get_name(&self) -> &str {
+        &self.base_name
+    }
+    fn as_type(&self) -> &dyn Type {
+        self
+    }
+    fn as_type_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 // ==================== Program ====================
@@ -973,7 +1013,11 @@ pub struct StructDefinition {
 }
 
 impl StructDefinition {
-    pub fn new(name: impl Into<String>, fields: Vec<StructField>, generic_params: Vec<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        fields: Vec<StructField>,
+        generic_params: Vec<String>,
+    ) -> Self {
         StructDefinition {
             name: name.into(),
             fields,
@@ -987,21 +1031,33 @@ impl StructDefinition {
         self
     }
 
-    pub fn get_name(&self) -> &str { &self.name }
-    pub fn get_fields(&self) -> &Vec<StructField> { &self.fields }
-    pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
-    pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+    pub fn get_fields(&self) -> &Vec<StructField> {
+        &self.fields
+    }
+    pub fn get_generic_params(&self) -> &Vec<String> {
+        &self.generic_params
+    }
+    pub fn get_attributes(&self) -> &Vec<Attribute> {
+        &self.attributes
+    }
 }
 
 impl AstNode for StructDefinition {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
         visitor.visit_struct_definition(self);
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Statement for StructDefinition {
-    fn as_statement(&self) -> &dyn Statement { self }
+    fn as_statement(&self) -> &dyn Statement {
+        self
+    }
 }
 
 impl_attributable!(StructDefinition);
@@ -1022,7 +1078,11 @@ pub struct ImplBlock {
 }
 
 impl ImplBlock {
-    pub fn new(struct_name: impl Into<String>, generic_params: Vec<String>, items: Vec<ImplItem>) -> Self {
+    pub fn new(
+        struct_name: impl Into<String>,
+        generic_params: Vec<String>,
+        items: Vec<ImplItem>,
+    ) -> Self {
         ImplBlock {
             struct_name: struct_name.into(),
             trait_name: None,
@@ -1041,22 +1101,36 @@ impl ImplBlock {
         self.attributes = attrs;
         self
     }
-    pub fn get_struct_name(&self) -> &str { &self.struct_name }
-    pub fn get_trait_name(&self) -> Option<&str> { self.trait_name.as_deref() }
-    pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
-    pub fn get_items(&self) -> &Vec<ImplItem> { &self.items }
-    pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
+    pub fn get_struct_name(&self) -> &str {
+        &self.struct_name
+    }
+    pub fn get_trait_name(&self) -> Option<&str> {
+        self.trait_name.as_deref()
+    }
+    pub fn get_generic_params(&self) -> &Vec<String> {
+        &self.generic_params
+    }
+    pub fn get_items(&self) -> &Vec<ImplItem> {
+        &self.items
+    }
+    pub fn get_attributes(&self) -> &Vec<Attribute> {
+        &self.attributes
+    }
 }
 
 impl AstNode for ImplBlock {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
         visitor.visit_impl_block(self);
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Statement for ImplBlock {
-    fn as_statement(&self) -> &dyn Statement { self }
+    fn as_statement(&self) -> &dyn Statement {
+        self
+    }
 }
 
 impl_attributable!(ImplBlock);
@@ -1071,7 +1145,11 @@ pub struct TraitMethod {
 }
 
 impl TraitMethod {
-    pub fn new(name: impl Into<String>, parameters: Vec<Box<Parameter>>, return_type: Option<Box<dyn Type>>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        parameters: Vec<Box<Parameter>>,
+        return_type: Option<Box<dyn Type>>,
+    ) -> Self {
         TraitMethod {
             name: name.into(),
             parameters,
@@ -1091,7 +1169,11 @@ pub struct TraitDefinition {
 }
 
 impl TraitDefinition {
-    pub fn new(name: impl Into<String>, methods: Vec<TraitMethod>, generic_params: Vec<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        methods: Vec<TraitMethod>,
+        generic_params: Vec<String>,
+    ) -> Self {
         TraitDefinition {
             name: name.into(),
             methods,
@@ -1105,21 +1187,33 @@ impl TraitDefinition {
         self
     }
 
-    pub fn get_name(&self) -> &str { &self.name }
-    pub fn get_methods(&self) -> &Vec<TraitMethod> { &self.methods }
-    pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
-    pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+    pub fn get_methods(&self) -> &Vec<TraitMethod> {
+        &self.methods
+    }
+    pub fn get_generic_params(&self) -> &Vec<String> {
+        &self.generic_params
+    }
+    pub fn get_attributes(&self) -> &Vec<Attribute> {
+        &self.attributes
+    }
 }
 
 impl AstNode for TraitDefinition {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
         visitor.visit_trait_definition(self);
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Statement for TraitDefinition {
-    fn as_statement(&self) -> &dyn Statement { self }
+    fn as_statement(&self) -> &dyn Statement {
+        self
+    }
 }
 
 impl_attributable!(TraitDefinition);
@@ -1160,7 +1254,11 @@ pub struct EnumDefinition {
 }
 
 impl EnumDefinition {
-    pub fn new(name: impl Into<String>, variants: Vec<EnumVariant>, generic_params: Vec<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        variants: Vec<EnumVariant>,
+        generic_params: Vec<String>,
+    ) -> Self {
         EnumDefinition {
             name: name.into(),
             variants,
@@ -1174,21 +1272,33 @@ impl EnumDefinition {
         self
     }
 
-    pub fn get_name(&self) -> &str { &self.name }
-    pub fn get_variants(&self) -> &Vec<EnumVariant> { &self.variants }
-    pub fn get_generic_params(&self) -> &Vec<String> { &self.generic_params }
-    pub fn get_attributes(&self) -> &Vec<Attribute> { &self.attributes }
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+    pub fn get_variants(&self) -> &Vec<EnumVariant> {
+        &self.variants
+    }
+    pub fn get_generic_params(&self) -> &Vec<String> {
+        &self.generic_params
+    }
+    pub fn get_attributes(&self) -> &Vec<Attribute> {
+        &self.attributes
+    }
 }
 
 impl AstNode for EnumDefinition {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
         visitor.visit_enum_definition(self);
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Statement for EnumDefinition {
-    fn as_statement(&self) -> &dyn Statement { self }
+    fn as_statement(&self) -> &dyn Statement {
+        self
+    }
 }
 
 impl_attributable!(EnumDefinition);
@@ -1849,8 +1959,12 @@ impl PathAccess {
         parts.join("::")
     }
 
-    pub fn get_path(&self) -> &Vec<String> { &self.path }
-    pub fn get_member(&self) -> &str { &self.member }
+    pub fn get_path(&self) -> &Vec<String> {
+        &self.path
+    }
+    pub fn get_member(&self) -> &str {
+        &self.member
+    }
 }
 
 impl_attributable!(PathAccess);
@@ -1859,11 +1973,15 @@ impl AstNode for PathAccess {
     fn accept(&self, visitor: &mut dyn AstVisitor) {
         visitor.visit_path_access(self);
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Expression for PathAccess {
-    fn as_expression(&self) -> &dyn Expression { self }
+    fn as_expression(&self) -> &dyn Expression {
+        self
+    }
 }
 
 // ==================== MemberAccess ====================
@@ -2445,7 +2563,8 @@ impl FormatString {
             let left = expr[..op_start].trim();
             let right = expr[op_end..].trim();
             if !left.is_empty() && !right.is_empty() {
-                if let (Some(l), Some(r)) = (Self::parse_expression(left), Self::parse_value(right)) {
+                if let (Some(l), Some(r)) = (Self::parse_expression(left), Self::parse_value(right))
+                {
                     return Some(Box::new(BinaryExpression::new(Some(l), &op, Some(r))));
                 }
             }
@@ -2471,9 +2590,7 @@ impl FormatString {
         if let Some(last_dot) = expr.rfind('.') {
             let object_part = &expr[..last_dot];
             let member_part = &expr[last_dot + 1..];
-            let valid_member = member_part
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_');
+            let valid_member = member_part.chars().all(|c| c.is_alphanumeric() || c == '_');
             if valid_member {
                 let object = Self::parse_expression(object_part);
                 if let Some(o) = object {
@@ -2486,19 +2603,17 @@ impl FormatString {
         if let Some(as_pos) = expr.rfind(" as ") {
             let lhs = &expr[..as_pos];
             let type_name = expr[as_pos + 4..].trim();
-            if !type_name.is_empty()
-                && type_name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                {
-                    if let Some(lhs_expr) = Self::parse_expression(lhs) {
-                        let tp: Box<dyn Type> = Box::new(BasicType::new(type_name));
-                        return Some(Box::new(CastExpression::new(Some(lhs_expr), tp)));
-                    }
+            if !type_name.is_empty() && type_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                if let Some(lhs_expr) = Self::parse_expression(lhs) {
+                    let tp: Box<dyn Type> = Box::new(BasicType::new(type_name));
+                    return Some(Box::new(CastExpression::new(Some(lhs_expr), tp)));
                 }
+            }
         }
         // 标识符
         let valid_identifier = !expr.is_empty()
-        && (expr.chars().next().unwrap().is_alphabetic() || expr.starts_with('_'))
-        && expr.chars().all(|c| c.is_alphanumeric() || c == '_');
+            && (expr.chars().next().unwrap().is_alphabetic() || expr.starts_with('_'))
+            && expr.chars().all(|c| c.is_alphanumeric() || c == '_');
         if valid_identifier {
             return Some(Box::new(Identifier::new(expr)));
         }
@@ -2509,8 +2624,9 @@ impl FormatString {
         let open = s.find('(')?;
         let mut depth = 0;
         for (i, c) in s[open..].char_indices() {
-            if c == '(' { depth += 1; }
-            else if c == ')' {
+            if c == '(' {
+                depth += 1;
+            } else if c == ')' {
                 depth -= 1;
                 if depth == 0 {
                     return Some((open, open + i));
@@ -2658,28 +2774,26 @@ impl FormatString {
             if close_idx == rest.len() - 1 {
                 let type_name = rest[..open_idx].trim();
                 if type_name.is_empty()
-                    || !type_name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_')
-                    {
-                        return None;
-                    }
-                    let args_str = &rest[open_idx + 1..close_idx];
+                    || !type_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                {
+                    return None;
+                }
+                let args_str = &rest[open_idx + 1..close_idx];
                 let args = Self::parse_arg_list(args_str);
                 return Some(Box::new(FunctionCall::new(
                     Some(Box::new(Identifier::new(type_name))),
-                                                       args,
+                    args,
                 )));
             }
         }
         // new Type (no args)
         let valid_identifier = !rest.is_empty()
-        && (rest.chars().next().unwrap().is_alphabetic() || rest.starts_with('_'))
-        && rest.chars().all(|c| c.is_alphanumeric() || c == '_');
+            && (rest.chars().next().unwrap().is_alphabetic() || rest.starts_with('_'))
+            && rest.chars().all(|c| c.is_alphanumeric() || c == '_');
         if valid_identifier {
             return Some(Box::new(FunctionCall::new(
                 Some(Box::new(Identifier::new(rest))),
-                                                   Some(Vec::new()),
+                Some(Vec::new()),
             )));
         }
         None
@@ -2781,7 +2895,10 @@ impl Expression for ArrayLiteral {
 
 pub enum StructFieldInit {
     /// Named field: `x: 10`
-    Named { name: String, value: Box<dyn Expression> },
+    Named {
+        name: String,
+        value: Box<dyn Expression>,
+    },
     /// Positional field: `10` (matched to field by position)
     Positional(Box<dyn Expression>),
 }

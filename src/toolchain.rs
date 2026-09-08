@@ -180,9 +180,11 @@ mod tests {
     #[test]
     fn non_windows_target_needs_no_toolchain() {
         // Unix host triple → no bootstrapping required.
-        assert!(detect_for_target("x86_64-unknown-linux-gnu")
-            .unwrap()
-            .is_none());
+        assert!(
+            detect_for_target("x86_64-unknown-linux-gnu")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

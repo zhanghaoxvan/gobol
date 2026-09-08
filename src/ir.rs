@@ -67,37 +67,98 @@ pub struct IRBlock {
 
 #[derive(Debug, Clone)]
 pub enum IRStmt {
-    Declaration { name: String, ty: DataType, init: Option<IRExpr> },
+    Declaration {
+        name: String,
+        ty: DataType,
+        init: Option<IRExpr>,
+    },
     Expression(IRExpr),
     Return(Option<IRExpr>),
-    If { cond: IRExpr, then_block: IRBlock, else_block: Option<IRBlock> },
-    While { cond: IRExpr, body: IRBlock },
+    If {
+        cond: IRExpr,
+        then_block: IRBlock,
+        else_block: Option<IRBlock>,
+    },
+    While {
+        cond: IRExpr,
+        body: IRBlock,
+    },
     Break,
     Continue,
-    Assignment { target: IRExpr, value: IRExpr },
-    Call { func: String, args: Vec<IRExpr>, generic_args: Vec<DataType> },
-    MethodCall { object: Box<IRExpr>, method: String, args: Vec<IRExpr>, generic_args: Vec<DataType> },
-    For { vars: Vec<String>, iterable: IRExpr, body: IRBlock },
+    Assignment {
+        target: IRExpr,
+        value: IRExpr,
+    },
+    Call {
+        func: String,
+        args: Vec<IRExpr>,
+        generic_args: Vec<DataType>,
+    },
+    MethodCall {
+        object: Box<IRExpr>,
+        method: String,
+        args: Vec<IRExpr>,
+        generic_args: Vec<DataType>,
+    },
+    For {
+        vars: Vec<String>,
+        iterable: IRExpr,
+        body: IRBlock,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum IRExpr {
     Literal(LitValue),
     Variable(String),
-    Binary { op: String, left: Box<IRExpr>, right: Box<IRExpr> },
-    Unary { op: String, operand: Box<IRExpr> },
-    Call { func: String, args: Vec<IRExpr>, generic_args: Vec<DataType> },
-    MethodCall { object: Box<IRExpr>, method: String, args: Vec<IRExpr>, generic_args: Vec<DataType> },
-    MemberAccess { object: Box<IRExpr>, member: String },
-    ArrayIndex { array: Box<IRExpr>, index: Box<IRExpr> },
+    Binary {
+        op: String,
+        left: Box<IRExpr>,
+        right: Box<IRExpr>,
+    },
+    Unary {
+        op: String,
+        operand: Box<IRExpr>,
+    },
+    Call {
+        func: String,
+        args: Vec<IRExpr>,
+        generic_args: Vec<DataType>,
+    },
+    MethodCall {
+        object: Box<IRExpr>,
+        method: String,
+        args: Vec<IRExpr>,
+        generic_args: Vec<DataType>,
+    },
+    MemberAccess {
+        object: Box<IRExpr>,
+        member: String,
+    },
+    ArrayIndex {
+        array: Box<IRExpr>,
+        index: Box<IRExpr>,
+    },
     ArrayLiteral(Vec<IRExpr>),
-    StructLiteral { name: String, fields: Vec<(String, IRExpr)> },
-    Cast { expr: Box<IRExpr>, target: DataType },
-    Assignment { target: Box<IRExpr>, value: Box<IRExpr> },
+    StructLiteral {
+        name: String,
+        fields: Vec<(String, IRExpr)>,
+    },
+    Cast {
+        expr: Box<IRExpr>,
+        target: DataType,
+    },
+    Assignment {
+        target: Box<IRExpr>,
+        value: Box<IRExpr>,
+    },
     /// Address of a named function (used to pass functions as arguments).
     FuncRef(String),
     /// Call a function through a pointer value (e.g. a `func(...)` parameter).
-    IndirectCall { callee: Box<IRExpr>, args: Vec<IRExpr> },
+    IndirectCall {
+        callee: Box<IRExpr>,
+        args: Vec<IRExpr>,
+    },
     None,
 }
 
@@ -116,7 +177,7 @@ pub enum LitValue {
 pub struct IRBuilder {
     // 输出
     ir: GobolIR,
-    
+
     // 当前状态
     current_function: Option<String>,
     current_struct: Option<String>,
@@ -127,14 +188,14 @@ pub struct IRBuilder {
     in_function: bool,
     in_impl: bool,
     block_depth: usize,
-    
+
     // 泛型上下文
     generic_stack: Vec<HashMap<String, DataType>>,
-    
+
     // 类型环境
     structs: HashMap<String, IRStruct>,
     methods: HashMap<String, Vec<IRFunction>>,
-    
+
     // 错误收集
     errors: Vec<String>,
 
@@ -154,6 +215,7 @@ pub struct IRBuilder {
     var_types: HashMap<String, DataType>,
     // Module-level mutable `var` declarations collected during build().
     globals: Vec<(String, DataType, Option<IRExpr>)>,
+    target: String,
 }
 
 impl IRBuilder {
@@ -186,7 +248,36 @@ impl IRBuilder {
             lambda_counter: 0,
             var_types: HashMap::new(),
             globals: Vec::new(),
+            target: String::new(),
         }
+    }
+
+    pub fn set_target(&mut self, target: impl Into<String>) {
+        self.target = target.into();
+    }
+
+    fn platform_matches(&self, attrs: &[Attribute]) -> bool {
+        let platforms: Vec<&str> = attrs
+            .iter()
+            .filter(|a| a.name == "platform")
+            .flat_map(|a| a.values.iter().map(String::as_str))
+            .collect();
+        if platforms.is_empty() {
+            return true;
+        }
+        let target = self.target.to_ascii_lowercase();
+        let unix = target.contains("linux")
+            || target.contains("darwin")
+            || target.contains("bsd")
+            || target.contains("solaris");
+        platforms
+            .iter()
+            .any(|p| match p.to_ascii_lowercase().as_str() {
+                "windows" => target.contains("windows"),
+                "macos" => target.contains("darwin") || target.contains("macos"),
+                "unix" | "posix" => unix,
+                other => target.contains(other),
+            })
     }
 
     /// Set the current source file path for `file()` macro in #[expand] context.
@@ -219,10 +310,14 @@ impl IRBuilder {
         // 第四遍：收集 extern 块
         for stmt in program.get_statements() {
             if let Some(extern_block) = stmt.as_any().downcast_ref::<ExternBlock>() {
+                if !self.platform_matches(extern_block.get_attributes()) {
+                    continue;
+                }
                 for func in extern_block.get_functions() {
                     let name = func.get_name().to_string();
 
-                    let params: Vec<IRParam> = func.get_params()
+                    let params: Vec<IRParam> = func
+                        .get_params()
                         .iter()
                         .map(|p| {
                             let pname = p.get_name().to_string();
@@ -253,7 +348,8 @@ impl IRBuilder {
         // 存储，与函数局部变量不同。`visit_declaration` 在非函数上下文里
         // 会把它们记录到 self.globals。
         {
-            let decls: Vec<&Box<dyn Statement>> = program.get_statements()
+            let decls: Vec<&Box<dyn Statement>> = program
+                .get_statements()
                 .iter()
                 .filter(|stmt| stmt.as_any().downcast_ref::<Declaration>().is_some())
                 .collect();
@@ -402,11 +498,11 @@ impl IRBuilder {
                 self.collect_generic_names(p.get_type(), &mut params);
             }
         }
-        
+
         if let Some(ret) = func.get_return_type() {
             self.collect_generic_names(Some(ret), &mut params);
         }
-        
+
         params.dedup();
         params
     }
@@ -511,7 +607,9 @@ impl IRBuilder {
             let cond = self.build_match_condition(&scrutinee, &arm.pattern);
 
             // Build arm body with assignment to temp variable
-            let mut then_block = IRBlock { statements: Vec::new() };
+            let mut then_block = IRBlock {
+                statements: Vec::new(),
+            };
 
             if let Some(body) = &arm.body {
                 let mut sub_builder = IRBuilder::new();
@@ -525,7 +623,9 @@ impl IRBuilder {
                             // 从 scrutinee 中提取 payload 并绑定到变量
                             // 这将在 IR 生成中处理
                             // 暂时在 sub_builder 中声明变量
-                            sub_builder.var_types.insert(bind_name.clone(), DataType::Int);
+                            sub_builder
+                                .var_types
+                                .insert(bind_name.clone(), DataType::Int);
                         }
                     }
                 }
@@ -567,7 +667,9 @@ impl IRBuilder {
                 else_block: else_block.take(),
             };
 
-            let mut block = IRBlock { statements: Vec::new() };
+            let mut block = IRBlock {
+                statements: Vec::new(),
+            };
             block.statements.push(if_stmt);
             else_block = Some(block);
         }
@@ -578,14 +680,15 @@ impl IRBuilder {
         }
 
         // 5. Generate a Return statement so the sub-builder logic can extract the result
-        self.current_block.push(IRStmt::Return(Some(IRExpr::Variable(tmp_name))));
+        self.current_block
+            .push(IRStmt::Return(Some(IRExpr::Variable(tmp_name))));
     }
-
-
 
     #[allow(dead_code)]
     fn build_arm_body(&mut self, arm: &MatchArm) -> IRBlock {
-        let mut block = IRBlock { statements: Vec::new() };
+        let mut block = IRBlock {
+            statements: Vec::new(),
+        };
 
         // 如果是变量模式，在 body 中声明变量
         if let MatchPattern::Variable(name) = &arm.pattern {
@@ -630,9 +733,7 @@ impl IRBuilder {
 
     fn build_match_condition(&mut self, scrutinee: &IRExpr, pattern: &MatchPattern) -> IRExpr {
         match pattern {
-            MatchPattern::Wildcard => {
-                IRExpr::Literal(LitValue::Bool(true))
-            }
+            MatchPattern::Wildcard => IRExpr::Literal(LitValue::Bool(true)),
             MatchPattern::Literal(lit) => {
                 let lit_expr = match lit {
                     RtValueSimple::Int(n) => IRExpr::Literal(LitValue::Int(*n)),
@@ -653,13 +754,19 @@ impl IRBuilder {
                     right: Box::new(lit_expr),
                 }
             }
-            MatchPattern::Variable(_name) => {
-                IRExpr::Literal(LitValue::Bool(true))
-            }
-            MatchPattern::EnumVariant { enum_name, variant_name, variant_index, .. } => {
+            MatchPattern::Variable(_name) => IRExpr::Literal(LitValue::Bool(true)),
+            MatchPattern::EnumVariant {
+                enum_name,
+                variant_name,
+                variant_index,
+                ..
+            } => {
                 // 如果 variant_index 是 0（占位），从 variant_indices 中查找
                 let idx = if *variant_index == 0 {
-                    if let Some(&idx) = self.variant_indices.get(&(enum_name.clone(), variant_name.clone())) {
+                    if let Some(&idx) = self
+                        .variant_indices
+                        .get(&(enum_name.clone(), variant_name.clone()))
+                    {
                         idx
                     } else {
                         // Patterns parsed without a resolvable enum path still
@@ -806,12 +913,21 @@ impl IRBuilder {
                 op: op.clone(),
                 operand: Box::new(self.subst_expr(operand, env)),
             },
-            IRExpr::Call { func, args, generic_args } => IRExpr::Call {
+            IRExpr::Call {
+                func,
+                args,
+                generic_args,
+            } => IRExpr::Call {
                 func: func.clone(),
                 args: args.iter().map(|a| self.subst_expr(a, env)).collect(),
                 generic_args: generic_args.clone(),
             },
-            IRExpr::MethodCall { object, method, args, generic_args } => IRExpr::MethodCall {
+            IRExpr::MethodCall {
+                object,
+                method,
+                args,
+                generic_args,
+            } => IRExpr::MethodCall {
                 object: Box::new(self.subst_expr(object, env)),
                 method: method.clone(),
                 args: args.iter().map(|a| self.subst_expr(a, env)).collect(),
@@ -861,7 +977,11 @@ impl IRBuilder {
             return expr.clone();
         }
         match expr {
-            IRExpr::Call { func, args, generic_args } => {
+            IRExpr::Call {
+                func,
+                args,
+                generic_args,
+            } => {
                 // First recurse into the arguments.
                 let new_args: Vec<IRExpr> = args
                     .iter()
@@ -886,13 +1006,22 @@ impl IRBuilder {
             IRExpr::Binary { op, left, right } => {
                 let l = self.expand_nested_macros(left, depth, max_depth);
                 let r = self.expand_nested_macros(right, depth, max_depth);
-                IRExpr::Binary { op: op.clone(), left: Box::new(l), right: Box::new(r) }
+                IRExpr::Binary {
+                    op: op.clone(),
+                    left: Box::new(l),
+                    right: Box::new(r),
+                }
             }
             IRExpr::Unary { op, operand } => IRExpr::Unary {
                 op: op.clone(),
                 operand: Box::new(self.expand_nested_macros(operand, depth, max_depth)),
             },
-            IRExpr::MethodCall { object, method, args, generic_args } => {
+            IRExpr::MethodCall {
+                object,
+                method,
+                args,
+                generic_args,
+            } => {
                 let o = self.expand_nested_macros(object, depth, max_depth);
                 let new_args: Vec<IRExpr> = args
                     .iter()
@@ -901,7 +1030,12 @@ impl IRBuilder {
                         self.expand_nested_macros(&mut a, depth, max_depth)
                     })
                     .collect();
-                IRExpr::MethodCall { object: Box::new(o), method: method.clone(), args: new_args, generic_args: generic_args.clone() }
+                IRExpr::MethodCall {
+                    object: Box::new(o),
+                    method: method.clone(),
+                    args: new_args,
+                    generic_args: generic_args.clone(),
+                }
             }
             IRExpr::MemberAccess { object, member } => IRExpr::MemberAccess {
                 object: Box::new(self.expand_nested_macros(object, depth, max_depth)),
@@ -926,7 +1060,10 @@ impl IRBuilder {
                     .iter()
                     .map(|(n, e)| {
                         let mut e = e.clone();
-                        (n.clone(), self.expand_nested_macros(&mut e, depth, max_depth))
+                        (
+                            n.clone(),
+                            self.expand_nested_macros(&mut e, depth, max_depth),
+                        )
                     })
                     .collect(),
             },
@@ -947,7 +1084,10 @@ impl IRBuilder {
                         self.expand_nested_macros(&mut a, depth, max_depth)
                     })
                     .collect();
-                IRExpr::IndirectCall { callee: Box::new(c), args: new_args }
+                IRExpr::IndirectCall {
+                    callee: Box::new(c),
+                    args: new_args,
+                }
             }
             // Leaves — no nested calls to expand.
             _ => expr.clone(),
@@ -983,7 +1123,11 @@ impl IRBuilder {
                         }
                     }
                 }
-                IRStmt::If { cond, then_block, else_block } => {
+                IRStmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
                     let cond_val = self.eval_ir_expr(cond, bindings)?;
                     let is_true = match cond_val {
                         LitValue::Bool(b) => b,
@@ -1023,11 +1167,24 @@ impl IRBuilder {
             // Operator-trait method calls (e.g. `a.add(b)`) are produced by
             // the IR builder for every arithmetic/comparison operator. Fold
             // them back to the matching binary operation at compile time.
-            IRExpr::MethodCall { object, method, args, .. } => {
+            IRExpr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 let op = match method.as_str() {
-                    "add" => "+", "sub" => "-", "mul" => "*", "div" => "/",
-                    "rem" => "%", "eq" => "==", "ne" => "!=",
-                    "lt" => "<", "gt" => ">", "le" => "<=", "ge" => ">=",
+                    "add" => "+",
+                    "sub" => "-",
+                    "mul" => "*",
+                    "div" => "/",
+                    "rem" => "%",
+                    "eq" => "==",
+                    "ne" => "!=",
+                    "lt" => "<",
+                    "gt" => ">",
+                    "le" => "<=",
+                    "ge" => ">=",
                     _ => return None,
                 };
                 let l = self.eval_ir_expr(object, bindings)?;
@@ -1039,9 +1196,7 @@ impl IRBuilder {
                 Some(LitValue::Str(self.current_file.clone()))
             }
             // line() macro: returns current line number (best-effort: 0)
-            IRExpr::Call { func, .. } if func == "line" => {
-                Some(LitValue::Int(0))
-            }
+            IRExpr::Call { func, .. } if func == "line" => Some(LitValue::Int(0)),
             _ => None,
         }
     }
@@ -1052,8 +1207,20 @@ impl IRBuilder {
                 "+" => Some(LitValue::Int(a + b)),
                 "-" => Some(LitValue::Int(a - b)),
                 "*" => Some(LitValue::Int(a * b)),
-                "/" => if b != 0 { Some(LitValue::Int(a / b)) } else { None },
-                "%" => if b != 0 { Some(LitValue::Int(a % b)) } else { None },
+                "/" => {
+                    if b != 0 {
+                        Some(LitValue::Int(a / b))
+                    } else {
+                        None
+                    }
+                }
+                "%" => {
+                    if b != 0 {
+                        Some(LitValue::Int(a % b))
+                    } else {
+                        None
+                    }
+                }
                 "==" => Some(LitValue::Bool(a == b)),
                 "!=" => Some(LitValue::Bool(a != b)),
                 "<" => Some(LitValue::Bool(a < b)),
@@ -1068,7 +1235,13 @@ impl IRBuilder {
                 "+" => Some(LitValue::Float(a + b)),
                 "-" => Some(LitValue::Float(a - b)),
                 "*" => Some(LitValue::Float(a * b)),
-                "/" => if b != 0.0 { Some(LitValue::Float(a / b)) } else { None },
+                "/" => {
+                    if b != 0.0 {
+                        Some(LitValue::Float(a / b))
+                    } else {
+                        None
+                    }
+                }
                 "==" => Some(LitValue::Bool(a == b)),
                 "!=" => Some(LitValue::Bool(a != b)),
                 "<" => Some(LitValue::Bool(a < b)),
@@ -1165,7 +1338,10 @@ impl IRBuilder {
                 DataType::Int
             }
             IRExpr::Binary { op, left, right } => {
-                if matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||") {
+                if matches!(
+                    op.as_str(),
+                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+                ) {
                     return DataType::Bool;
                 }
                 let lt = self.infer_expr_type(left);
@@ -1225,7 +1401,8 @@ impl IRBuilder {
         self.lambda_counter += 1;
 
         // Collect lambda parameter names (these are bound, not captured).
-        let param_names: Vec<String> = lambda.get_parameters()
+        let param_names: Vec<String> = lambda
+            .get_parameters()
             .map(|ps| ps.iter().map(|p| p.get_name().to_string()).collect())
             .unwrap_or_default();
 
@@ -1247,17 +1424,24 @@ impl IRBuilder {
         // Build the full parameter list: captured vars first, then lambda params.
         let mut params: Vec<IRParam> = Vec::new();
         for (cn, ct) in &captured {
-            params.push(IRParam { name: cn.clone(), ty: ct.clone() });
+            params.push(IRParam {
+                name: cn.clone(),
+                ty: ct.clone(),
+            });
         }
         if let Some(ps) = lambda.get_parameters() {
             for p in ps {
                 let pname = p.get_name().to_string();
                 let pty = self.ast_type_to_data_type(p.get_type());
-                params.push(IRParam { name: pname, ty: pty });
+                params.push(IRParam {
+                    name: pname,
+                    ty: pty,
+                });
             }
         }
 
-        let return_type = lambda.get_return_type()
+        let return_type = lambda
+            .get_return_type()
             .map(|t| self.ast_type_to_data_type(Some(t)))
             .unwrap_or(DataType::None_);
 
@@ -1337,13 +1521,12 @@ impl AstVisitor for IRBuilder {
 
         self.push_generic_scope(&generic_params);
 
-        let fields: Vec<IRField> = node.get_fields()
+        let fields: Vec<IRField> = node
+            .get_fields()
             .iter()
-            .map(|f| {
-                IRField {
-                    name: f.name.clone(),
-                    ty: self.ast_type_to_data_type(f.field_type.as_deref()),
-                }
+            .map(|f| IRField {
+                name: f.name.clone(),
+                ty: self.ast_type_to_data_type(f.field_type.as_deref()),
             })
             .collect();
 
@@ -1376,7 +1559,8 @@ impl AstVisitor for IRBuilder {
         let mut variant_idx = 0i32;
         for variant in node.get_variants() {
             // ---- 存储变体索引 ----
-            self.variant_indices.insert((name.clone(), variant.name.clone()), variant_idx);
+            self.variant_indices
+                .insert((name.clone(), variant.name.clone()), variant_idx);
 
             if let Some(ref payload) = variant.payload_type {
                 let payload_ty = self.ast_type_to_data_type(Some(payload.as_ref()));
@@ -1447,7 +1631,9 @@ impl AstVisitor for IRBuilder {
                 generic_params: generic_params.clone(),
                 params,
                 return_type: DataType::Struct(name.clone()),
-                body: Some(IRBlock { statements: body_stmts }),
+                body: Some(IRBlock {
+                    statements: body_stmts,
+                }),
                 is_main: false,
                 is_method: true,
                 struct_name: Some(name.clone()),
@@ -1506,7 +1692,7 @@ impl AstVisitor for IRBuilder {
         self.push_generic_scope(&generic_params);
 
         let mut methods = Vec::new();
-        
+
         for item in node.get_items() {
             match item {
                 ImplItem::Method(func) | ImplItem::Convert(func) => {
@@ -1517,10 +1703,10 @@ impl AstVisitor for IRBuilder {
                     let prev_ir_func = self.current_ir_function.take();
                     let prev_expr_stack = std::mem::take(&mut self.expr_stack);
                     let prev_in_function = self.in_function;
-                    
+
                     // 处理方法
                     func.accept(self);
-                    
+
                     // 提取方法
                     if let Some(mut ir_func) = self.current_ir_function.take() {
                         ir_func.body = Some(IRBlock {
@@ -1528,7 +1714,7 @@ impl AstVisitor for IRBuilder {
                         });
                         ir_func.struct_name = Some(full_struct_name.clone());
                         ir_func.is_method = true;
-                        
+
                         // 保存方法名供后续查找
                         let _method_name = ir_func.name.clone();
                         methods.push(ir_func.clone());
@@ -1537,7 +1723,7 @@ impl AstVisitor for IRBuilder {
                             .or_insert_with(Vec::new)
                             .push(ir_func);
                     }
-                    
+
                     // 恢复状态
                     self.current_function = prev_function;
                     self.current_function_return = prev_return;
@@ -1577,7 +1763,8 @@ impl AstVisitor for IRBuilder {
         self.var_types.clear();
 
         // 解析参数
-        let mut params: Vec<IRParam> = node.get_parameters()
+        let mut params: Vec<IRParam> = node
+            .get_parameters()
             .map(|ps| {
                 ps.iter()
                     .map(|p| {
@@ -1602,10 +1789,13 @@ impl AstVisitor for IRBuilder {
         // prepend self as the first parameter
         if is_method && !params.iter().any(|p| p.name == "self") {
             if let Some(ref sname) = self.current_struct {
-                params.insert(0, IRParam {
-                    name: "self".to_string(),
-                    ty: DataType::Struct(sname.clone()),
-                });
+                params.insert(
+                    0,
+                    IRParam {
+                        name: "self".to_string(),
+                        ty: DataType::Struct(sname.clone()),
+                    },
+                );
             }
         }
 
@@ -1655,18 +1845,20 @@ impl AstVisitor for IRBuilder {
         // Capture #[expand] function body for compile-time evaluation.
         // The body IR is cloned before finish_function moves current_block.
         if Attribute::has_attr(node.get_attributes(), "expand") {
-            let param_names: Vec<String> = params.iter()
+            let param_names: Vec<String> = params
+                .iter()
                 .filter(|p| p.name != "self")
                 .map(|p| p.name.clone())
                 .collect();
             let body_block = IRBlock {
                 statements: self.current_block.clone(),
             };
-            self.expand_functions.insert(name.clone(), (param_names, body_block));
+            self.expand_functions
+                .insert(name.clone(), (param_names, body_block));
         }
 
         self.pop_generic_scope();
-        
+
         // 如果是普通函数，立即结束；方法由 impl 块处理
         if !is_method {
             self.finish_function();
@@ -1699,19 +1891,20 @@ impl AstVisitor for IRBuilder {
                 };
                 // Check if element type is also an array (for 2D)
                 let inner_arr = arr.get_element_type();
-                let inner_size = if let Some(inner) = inner_arr.as_type_any().downcast_ref::<ArrayType>() {
-                    if let Some(size_expr) = inner.get_size() {
-                        if let Some(num) = size_expr.as_any().downcast_ref::<NumberLiteral>() {
-                            Some(num.get_value() as i64)
+                let inner_size =
+                    if let Some(inner) = inner_arr.as_type_any().downcast_ref::<ArrayType>() {
+                        if let Some(size_expr) = inner.get_size() {
+                            if let Some(num) = size_expr.as_any().downcast_ref::<NumberLiteral>() {
+                                Some(num.get_value() as i64)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
                 (outer_size, inner_size)
             } else {
                 (None, None)
@@ -1732,7 +1925,10 @@ impl AstVisitor for IRBuilder {
             // that push a single value onto expr_stack skip the sub-builder.
             let is_stmt_like = init_expr.as_any().downcast_ref::<Block>().is_some()
                 || init_expr.as_any().downcast_ref::<IfStatement>().is_some()
-                || init_expr.as_any().downcast_ref::<MatchExpression>().is_some();
+                || init_expr
+                    .as_any()
+                    .downcast_ref::<MatchExpression>()
+                    .is_some();
             if is_stmt_like {
                 let mut sub = IRBuilder::new();
                 sub.generic_stack = self.generic_stack.clone();
@@ -1829,7 +2025,11 @@ impl AstVisitor for IRBuilder {
         if !self.in_function && node.get_keyword() == "var" {
             self.globals.push((name, ty, init));
         } else {
-            self.current_block.push(IRStmt::Declaration { name: name.clone(), ty: ty.clone(), init });
+            self.current_block.push(IRStmt::Declaration {
+                name: name.clone(),
+                ty: ty.clone(),
+                init,
+            });
             self.var_types.insert(name, ty);
         }
     }
@@ -1890,7 +2090,11 @@ impl AstVisitor for IRBuilder {
             None
         };
 
-        self.current_block.push(IRStmt::If { cond, then_block, else_block });
+        self.current_block.push(IRStmt::If {
+            cond,
+            then_block,
+            else_block,
+        });
     }
 
     fn visit_while_statement(&mut self, node: &WhileStatement) {
@@ -1998,7 +2202,7 @@ impl AstVisitor for IRBuilder {
 
     fn visit_binary_expression(&mut self, node: &BinaryExpression) {
         let op = node.get_operator().to_string();
-        
+
         // 处理赋值
         if op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=" {
             let right = node.get_right().unwrap();
@@ -2015,7 +2219,7 @@ impl AstVisitor for IRBuilder {
                 right_val
             } else {
                 let real_op = &op[..1]; // "+=" → "+", "-=" → "-", etc.
-                left.accept(self);  // push left again as the value operand
+                left.accept(self); // push left again as the value operand
                 let left_val = self.pop_expr();
                 // Convert to method call via trait
                 let method = Self::operator_to_method(real_op);
@@ -2035,20 +2239,23 @@ impl AstVisitor for IRBuilder {
                 }
             };
 
-            self.push_expr(IRExpr::Assignment { target: Box::new(target), value: Box::new(value) });
+            self.push_expr(IRExpr::Assignment {
+                target: Box::new(target),
+                value: Box::new(value),
+            });
             return;
         }
-        
+
         // 处理 && 和 || (短路求值)
         if op == "&&" || op == "||" {
             let left = node.get_left().unwrap();
             left.accept(self);
             let left_expr = self.pop_expr();
-            
+
             let right = node.get_right().unwrap();
             right.accept(self);
             let right_expr = self.pop_expr();
-            
+
             self.push_expr(IRExpr::Binary {
                 op,
                 left: Box::new(left_expr),
@@ -2056,7 +2263,7 @@ impl AstVisitor for IRBuilder {
             });
             return;
         }
-        
+
         // Operand expressions
         let left = node.get_left().unwrap();
         left.accept(self);
@@ -2111,9 +2318,9 @@ impl AstVisitor for IRBuilder {
         let expr = node.get_expression().unwrap();
         expr.accept(self);
         let expr_expr = self.pop_expr();
-        
+
         let target = self.ast_type_to_data_type(Some(node.get_target_type()));
-        
+
         self.push_expr(IRExpr::Cast {
             expr: Box::new(expr_expr),
             target,
@@ -2138,7 +2345,8 @@ impl AstVisitor for IRBuilder {
             // to it, prepending captured variables as leading arguments.
             if let Some(lambda) = callee_expr.as_any().downcast_ref::<Lambda>() {
                 let (func_name, captured) = self.compile_lambda_function(lambda);
-                let mut full_args: Vec<IRExpr> = captured.iter()
+                let mut full_args: Vec<IRExpr> = captured
+                    .iter()
                     .map(|(n, _)| IRExpr::Variable(n.clone()))
                     .collect();
                 full_args.extend(args);
@@ -2174,7 +2382,8 @@ impl AstVisitor for IRBuilder {
                 // Check both the full name (e.g. "mymodule::my_func") and
                 // the short member name (e.g. "my_func").
                 let member_name = path_access.get_member();
-                if let Some(val) = self.try_expand_call(&func_name, &args)
+                if let Some(val) = self
+                    .try_expand_call(&func_name, &args)
                     .or_else(|| self.try_expand_call(member_name, &args))
                 {
                     // Literal constant folding (all-args-literal path).
@@ -2183,7 +2392,8 @@ impl AstVisitor for IRBuilder {
                 }
                 // AST-level macro expansion: substitute argument expressions
                 // into the macro body (works for non-literal arguments too).
-                if let Some(expanded) = self.try_expand_call_ast(&func_name, &args)
+                if let Some(expanded) = self
+                    .try_expand_call_ast(&func_name, &args)
                     .or_else(|| self.try_expand_call_ast(member_name, &args))
                 {
                     self.push_expr(expanded);
@@ -2265,7 +2475,7 @@ impl AstVisitor for IRBuilder {
         obj.accept(self);
         let object = self.pop_expr();
         let member = node.get_member().to_string();
-        
+
         self.push_expr(IRExpr::MemberAccess {
             object: Box::new(object),
             member,
@@ -2276,11 +2486,11 @@ impl AstVisitor for IRBuilder {
         let array = node.get_array().unwrap();
         array.accept(self);
         let array_expr = self.pop_expr();
-        
+
         let index = node.get_index().unwrap();
         index.accept(self);
         let index_expr = self.pop_expr();
-        
+
         self.push_expr(IRExpr::ArrayIndex {
             array: Box::new(array_expr),
             index: Box::new(index_expr),
@@ -2299,7 +2509,7 @@ impl AstVisitor for IRBuilder {
     fn visit_struct_literal(&mut self, node: &StructLiteral) {
         let name = node.get_type_name().to_string();
         let mut fields = Vec::new();
-        
+
         for field in node.get_fields() {
             match field {
                 StructFieldInit::Named { name: fname, value } => {
@@ -2312,7 +2522,7 @@ impl AstVisitor for IRBuilder {
                 }
             }
         }
-        
+
         self.push_expr(IRExpr::StructLiteral { name, fields });
     }
 
@@ -2364,20 +2574,26 @@ impl AstVisitor for IRBuilder {
 
         // 3. Build if-else chain (iterating arms from back to front)
         let mut else_block = None;
-        
+
         for arm in arms.iter().rev() {
             // Build condition
             let cond = self.build_match_condition(&scrutinee, &arm.pattern);
-            
+
             // Build arm body with assignment to temp variable
-            let mut then_block = IRBlock { statements: Vec::new() };
+            let mut then_block = IRBlock {
+                statements: Vec::new(),
+            };
 
             if let Some(body) = &arm.body {
                 let mut sub_builder = IRBuilder::new();
                 sub_builder.generic_stack = self.generic_stack.clone();
                 sub_builder.block_depth = 2;
 
-                if let MatchPattern::EnumVariant { payload: Some(payload), .. } = &arm.pattern {
+                if let MatchPattern::EnumVariant {
+                    payload: Some(payload),
+                    ..
+                } = &arm.pattern
+                {
                     if let MatchPattern::Variable(bind_name) = payload.as_ref() {
                         sub_builder.current_block.push(IRStmt::Declaration {
                             name: bind_name.clone(),
@@ -2387,7 +2603,9 @@ impl AstVisitor for IRBuilder {
                                 member: "_0".to_string(),
                             }),
                         });
-                        sub_builder.var_types.insert(bind_name.clone(), DataType::Int);
+                        sub_builder
+                            .var_types
+                            .insert(bind_name.clone(), DataType::Int);
                     }
                 }
 
@@ -2432,9 +2650,11 @@ impl AstVisitor for IRBuilder {
                 then_block,
                 else_block: else_block.take(),
             };
-            
+
             // Wrap in a Block
-            let mut block = IRBlock { statements: Vec::new() };
+            let mut block = IRBlock {
+                statements: Vec::new(),
+            };
             block.statements.push(if_stmt);
             else_block = Some(block);
         }
@@ -2445,7 +2665,8 @@ impl AstVisitor for IRBuilder {
         }
 
         // 5. Generate a Return statement so the sub-builder logic can extract the result
-        self.current_block.push(IRStmt::Return(Some(IRExpr::Variable(tmp_name))));
+        self.current_block
+            .push(IRStmt::Return(Some(IRExpr::Variable(tmp_name))));
     }
 
     fn visit_try_operator(&mut self, node: &TryOperator) {
@@ -2485,10 +2706,12 @@ impl AstVisitor for IRBuilder {
             };
 
             // then-block: return __tmp (the whole Result, as Err)
-            let mut then_block = IRBlock { statements: Vec::new() };
-            then_block.statements.push(IRStmt::Return(Some(
-                IRExpr::Variable(tmp_name.clone()),
-            )));
+            let mut then_block = IRBlock {
+                statements: Vec::new(),
+            };
+            then_block
+                .statements
+                .push(IRStmt::Return(Some(IRExpr::Variable(tmp_name.clone()))));
 
             // Push the if statement
             self.current_block.push(IRStmt::If {
@@ -2536,16 +2759,16 @@ impl AstVisitor for IRBuilder {
         // 格式字符串转换为字符串拼接
         let template = node.get_value();
         let vars = node.get_variables();
-        
+
         if vars.is_empty() {
             self.push_expr(IRExpr::Literal(LitValue::Str(template.to_string())));
             return;
         }
-        
+
         // 构建字符串拼接表达式
         let mut expr = IRExpr::Literal(LitValue::Str(String::new()));
         let mut last_pos = 0;
-        
+
         for var in vars {
             let pos = var.pos_in_value as usize;
             // 添加字面量部分
@@ -2578,8 +2801,9 @@ impl AstVisitor for IRBuilder {
             let chars: Vec<char> = template.chars().collect();
             let mut i = pos;
             while i < chars.len() {
-                if chars[i] == '{' { depth += 1; }
-                else if chars[i] == '}' { 
+                if chars[i] == '{' {
+                    depth += 1;
+                } else if chars[i] == '}' {
                     depth -= 1;
                     if depth == 0 {
                         last_pos = i + 1;
@@ -2589,7 +2813,7 @@ impl AstVisitor for IRBuilder {
                 i += 1;
             }
         }
-        
+
         // 添加剩余字面量
         if last_pos < template.len() {
             let lit = &template[last_pos..];
@@ -2599,7 +2823,7 @@ impl AstVisitor for IRBuilder {
                 right: Box::new(IRExpr::Literal(LitValue::Str(lit.to_string()))),
             };
         }
-        
+
         self.push_expr(expr);
     }
 
@@ -2656,7 +2880,11 @@ impl AstVisitor for IRBuilder {
 /// Walk a block and collect free variable names (identifiers not bound by
 /// `bound` or by inner declarations). Results are appended to `free` in
 /// first-use order without duplicates.
-fn collect_free_vars_from_block(block: &Block, bound: &mut HashSet<String>, free: &mut Vec<String>) {
+fn collect_free_vars_from_block(
+    block: &Block,
+    bound: &mut HashSet<String>,
+    free: &mut Vec<String>,
+) {
     // Inner block scope: local declarations only shadow within this block,
     // so clone the bound set so siblings don't see each other's locals.
     let mut local_bound = bound.clone();
@@ -2665,7 +2893,11 @@ fn collect_free_vars_from_block(block: &Block, bound: &mut HashSet<String>, free
     }
 }
 
-fn collect_free_vars_from_stmt(stmt: &dyn Statement, bound: &mut HashSet<String>, free: &mut Vec<String>) {
+fn collect_free_vars_from_stmt(
+    stmt: &dyn Statement,
+    bound: &mut HashSet<String>,
+    free: &mut Vec<String>,
+) {
     let any = stmt.as_any();
     if let Some(decl) = any.downcast_ref::<Declaration>() {
         if let Some(init) = decl.get_initializer() {
@@ -2731,7 +2963,11 @@ fn collect_free_vars_from_stmt(stmt: &dyn Statement, bound: &mut HashSet<String>
     }
 }
 
-fn collect_free_vars_from_expr(expr: &dyn Expression, bound: &HashSet<String>, free: &mut Vec<String>) {
+fn collect_free_vars_from_expr(
+    expr: &dyn Expression,
+    bound: &HashSet<String>,
+    free: &mut Vec<String>,
+) {
     let any = expr.as_any();
     if let Some(id) = any.downcast_ref::<Identifier>() {
         let name = id.get_name();
@@ -2741,16 +2977,24 @@ fn collect_free_vars_from_expr(expr: &dyn Expression, bound: &HashSet<String>, f
         return;
     }
     if let Some(bin) = any.downcast_ref::<BinaryExpression>() {
-        if let Some(l) = bin.get_left() { collect_free_vars_from_expr(l, bound, free); }
-        if let Some(r) = bin.get_right() { collect_free_vars_from_expr(r, bound, free); }
+        if let Some(l) = bin.get_left() {
+            collect_free_vars_from_expr(l, bound, free);
+        }
+        if let Some(r) = bin.get_right() {
+            collect_free_vars_from_expr(r, bound, free);
+        }
         return;
     }
     if let Some(un) = any.downcast_ref::<UnaryExpression>() {
-        if let Some(o) = un.get_operand() { collect_free_vars_from_expr(o, bound, free); }
+        if let Some(o) = un.get_operand() {
+            collect_free_vars_from_expr(o, bound, free);
+        }
         return;
     }
     if let Some(cast) = any.downcast_ref::<CastExpression>() {
-        if let Some(e) = cast.get_expression() { collect_free_vars_from_expr(e, bound, free); }
+        if let Some(e) = cast.get_expression() {
+            collect_free_vars_from_expr(e, bound, free);
+        }
         return;
     }
     if let Some(call) = any.downcast_ref::<FunctionCall>() {
@@ -2769,16 +3013,24 @@ fn collect_free_vars_from_expr(expr: &dyn Expression, bound: &HashSet<String>, f
         return;
     }
     if let Some(mem) = any.downcast_ref::<MemberAccess>() {
-        if let Some(o) = mem.get_object() { collect_free_vars_from_expr(o, bound, free); }
+        if let Some(o) = mem.get_object() {
+            collect_free_vars_from_expr(o, bound, free);
+        }
         return;
     }
     if let Some(arr) = any.downcast_ref::<ArrayIndex>() {
-        if let Some(a) = arr.get_array() { collect_free_vars_from_expr(a, bound, free); }
-        if let Some(i) = arr.get_index() { collect_free_vars_from_expr(i, bound, free); }
+        if let Some(a) = arr.get_array() {
+            collect_free_vars_from_expr(a, bound, free);
+        }
+        if let Some(i) = arr.get_index() {
+            collect_free_vars_from_expr(i, bound, free);
+        }
         return;
     }
     if let Some(grp) = any.downcast_ref::<GroupedExpression>() {
-        if let Some(e) = grp.get_expression() { collect_free_vars_from_expr(e, bound, free); }
+        if let Some(e) = grp.get_expression() {
+            collect_free_vars_from_expr(e, bound, free);
+        }
         return;
     }
     if let Some(arr_lit) = any.downcast_ref::<ArrayLiteral>() {
@@ -2807,7 +3059,9 @@ fn collect_free_vars_from_expr(expr: &dyn Expression, bound: &HashSet<String>, f
         return;
     }
     if let Some(try_op) = any.downcast_ref::<TryOperator>() {
-        if let Some(e) = try_op.get_inner() { collect_free_vars_from_expr(e, bound, free); }
+        if let Some(e) = try_op.get_inner() {
+            collect_free_vars_from_expr(e, bound, free);
+        }
         return;
     }
     if let Some(fmt) = any.downcast_ref::<FormatString>() {
@@ -2820,7 +3074,9 @@ fn collect_free_vars_from_expr(expr: &dyn Expression, bound: &HashSet<String>, f
         return;
     }
     if let Some(m) = any.downcast_ref::<MatchExpression>() {
-        if let Some(s) = m.get_scrutinee() { collect_free_vars_from_expr(s, bound, free); }
+        if let Some(s) = m.get_scrutinee() {
+            collect_free_vars_from_expr(s, bound, free);
+        }
         for arm in m.get_arms() {
             // Variable patterns bind a name, so add it to a local bound set.
             let mut arm_bound = bound.clone();
@@ -2893,7 +3149,7 @@ impl Monomorphizer {
     /// 对 IR 进行单态化，展开所有泛型函数。
     pub fn monomorphize(&mut self, ir: &GobolIR) -> GobolIR {
         let mut result = ir.clone();
-        
+
         // 收集需要单态化的泛型模板（按名字索引），以及所有函数的返回类型
         //（供调用点实参推断使用）。泛型模板必须是顶层、带函数体。
         let mut generic_by_name: HashMap<String, IRFunction> = HashMap::new();
@@ -2981,7 +3237,11 @@ impl Monomorphizer {
                         self.rewrite_expr(e, generic_by_name, returns_by_name);
                     }
                 }
-                IRStmt::If { cond, then_block, else_block } => {
+                IRStmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
                     self.rewrite_expr(cond, generic_by_name, returns_by_name);
                     self.rewrite_block(then_block, generic_by_name, returns_by_name);
                     if let Some(else_block) = else_block {
@@ -3000,7 +3260,11 @@ impl Monomorphizer {
                     self.rewrite_expr(target, generic_by_name, returns_by_name);
                     self.rewrite_expr(value, generic_by_name, returns_by_name);
                 }
-                IRStmt::Call { func, args, generic_args } => {
+                IRStmt::Call {
+                    func,
+                    args,
+                    generic_args,
+                } => {
                     for a in args.iter_mut() {
                         self.rewrite_expr(a, generic_by_name, returns_by_name);
                     }
@@ -3012,7 +3276,12 @@ impl Monomorphizer {
                         returns_by_name,
                     );
                 }
-                IRStmt::MethodCall { object, method, args, generic_args } => {
+                IRStmt::MethodCall {
+                    object,
+                    method,
+                    args,
+                    generic_args,
+                } => {
                     self.rewrite_expr(object, generic_by_name, returns_by_name);
                     for a in args.iter_mut() {
                         self.rewrite_expr(a, generic_by_name, returns_by_name);
@@ -3052,7 +3321,11 @@ impl Monomorphizer {
         returns_by_name: &mut HashMap<String, DataType>,
     ) {
         match expr {
-            IRExpr::Call { func, args, generic_args } => {
+            IRExpr::Call {
+                func,
+                args,
+                generic_args,
+            } => {
                 for a in args.iter_mut() {
                     self.rewrite_expr(a, generic_by_name, returns_by_name);
                 }
@@ -3065,7 +3338,12 @@ impl Monomorphizer {
                     returns_by_name,
                 );
             }
-            IRExpr::MethodCall { object, method, args, generic_args } => {
+            IRExpr::MethodCall {
+                object,
+                method,
+                args,
+                generic_args,
+            } => {
                 self.rewrite_expr(object, generic_by_name, returns_by_name);
                 for a in args.iter_mut() {
                     self.rewrite_expr(a, generic_by_name, returns_by_name);
@@ -3148,8 +3426,7 @@ impl Monomorphizer {
         let Some(template) = generic_by_name.get(&key_name) else {
             return;
         };
-        let Some(type_args) =
-            self.infer_type_args(template, args, generic_args, &*returns_by_name)
+        let Some(type_args) = self.infer_type_args(template, args, generic_args, &*returns_by_name)
         else {
             // 类型参数无法推断：保留原调用，并把模板记入 deferred 以便兜底。
             self.deferred.insert(key_name);
@@ -3294,12 +3571,7 @@ impl Monomorphizer {
         type_map: &mut HashMap<String, DataType>,
     ) -> bool {
         match pattern {
-            DataType::Struct(name)
-                if !matches!(
-                    actual,
-                    DataType::None_ | DataType::Unknown
-                ) =>
-            {
+            DataType::Struct(name) if !matches!(actual, DataType::None_ | DataType::Unknown) => {
                 match type_map.get(name) {
                     Some(existing) if existing != actual => true,
                     Some(_) => false,
@@ -3339,9 +3611,11 @@ impl Monomorphizer {
             IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
-            IRExpr::Variable(name) => {
-                self.var_types.get(name).cloned().unwrap_or(DataType::Unknown)
-            }
+            IRExpr::Variable(name) => self
+                .var_types
+                .get(name)
+                .cloned()
+                .unwrap_or(DataType::Unknown),
             IRExpr::StructLiteral { name, .. } => DataType::Struct(name.clone()),
             IRExpr::Binary { op, left, right } => {
                 // 比较 / 逻辑运算符结果恒为 Bool。
@@ -3358,9 +3632,7 @@ impl Monomorphizer {
                     return DataType::Float;
                 }
                 // 字符串拼接（+）：任一侧为 Str 即结果为 Str。
-                if op == "+"
-                    && (matches!(lt, DataType::Str) || matches!(rt, DataType::Str))
-                {
+                if op == "+" && (matches!(lt, DataType::Str) || matches!(rt, DataType::Str)) {
                     return DataType::Str;
                 }
                 // 一侧类型无法确定时，尽量采用已知的一侧；两侧都确定且一致时
@@ -3375,7 +3647,10 @@ impl Monomorphizer {
                 rt
             }
             IRExpr::Unary { operand, .. } => self.infer_concrete_type(operand, returns_by_name),
-            IRExpr::Call { func, .. } => returns_by_name.get(func).cloned().unwrap_or(DataType::Unknown),
+            IRExpr::Call { func, .. } => returns_by_name
+                .get(func)
+                .cloned()
+                .unwrap_or(DataType::Unknown),
             IRExpr::MethodCall { object, method, .. } => {
                 if method == "new" {
                     if let IRExpr::Variable(name) = object.as_ref() {
@@ -3464,7 +3739,11 @@ impl Monomorphizer {
                 IRStmt::Expression(e) => self.substitute_in_expr(e, type_map),
                 IRStmt::Return(Some(e)) => self.substitute_in_expr(e, type_map),
                 IRStmt::Return(None) => {}
-                IRStmt::If { cond, then_block, else_block } => {
+                IRStmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
                     self.substitute_in_expr(cond, type_map);
                     self.substitute_in_block(then_block, type_map);
                     if let Some(else_block) = else_block {
@@ -3483,7 +3762,9 @@ impl Monomorphizer {
                     self.substitute_in_expr(target, type_map);
                     self.substitute_in_expr(value, type_map);
                 }
-                IRStmt::Call { args, generic_args, .. } => {
+                IRStmt::Call {
+                    args, generic_args, ..
+                } => {
                     for a in args.iter_mut() {
                         self.substitute_in_expr(a, type_map);
                     }
@@ -3491,7 +3772,12 @@ impl Monomorphizer {
                         *ga = self.substitute_type(ga, type_map);
                     }
                 }
-                IRStmt::MethodCall { object, args, generic_args, .. } => {
+                IRStmt::MethodCall {
+                    object,
+                    args,
+                    generic_args,
+                    ..
+                } => {
                     self.substitute_in_expr(object, type_map);
                     for a in args.iter_mut() {
                         self.substitute_in_expr(a, type_map);
@@ -3507,7 +3793,9 @@ impl Monomorphizer {
 
     fn substitute_in_expr(&self, expr: &mut IRExpr, type_map: &HashMap<String, DataType>) {
         match expr {
-            IRExpr::Call { args, generic_args, .. } => {
+            IRExpr::Call {
+                args, generic_args, ..
+            } => {
                 for a in args.iter_mut() {
                     self.substitute_in_expr(a, type_map);
                 }
@@ -3515,7 +3803,12 @@ impl Monomorphizer {
                     *ga = self.substitute_type(ga, type_map);
                 }
             }
-            IRExpr::MethodCall { object, args, generic_args, .. } => {
+            IRExpr::MethodCall {
+                object,
+                args,
+                generic_args,
+                ..
+            } => {
                 self.substitute_in_expr(object, type_map);
                 for a in args.iter_mut() {
                     self.substitute_in_expr(a, type_map);

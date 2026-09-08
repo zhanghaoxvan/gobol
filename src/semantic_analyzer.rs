@@ -20,8 +20,13 @@ fn resolve_enum_payload_type(scrutinee: &DataType, declared: &DataType) -> DataT
         return declared.clone();
     };
     let args = name[open + 1..].trim_end_matches('>');
-    let index = if matches!(declared, DataType::Struct(n) if n == "T") { 0 } else { 1 };
-    args.split(',').nth(index)
+    let index = if matches!(declared, DataType::Struct(n) if n == "T") {
+        0
+    } else {
+        1
+    };
+    args.split(',')
+        .nth(index)
         .map(|arg| match arg.trim() {
             "int" => DataType::Int,
             "float" => DataType::Float,
@@ -74,6 +79,8 @@ pub struct SemanticAnalyzer {
     pub structured_errors: Vec<(i32, i32, String)>,
     /// External libraries to link (e.g. "C", "m") from extern "C" blocks.
     pub extern_libs: Vec<String>,
+    pub extern_links: Vec<ExternLink>,
+    target: String,
     /// Tracks (struct_name, method_name, param_count) triples already declared
     /// via impl blocks. Prevents duplicate method definitions when a module is
     /// loaded multiple times or when multiple modules impl the same struct,
@@ -88,6 +95,15 @@ pub struct SemanticAnalyzer {
     enum_info: HashMap<String, (Vec<String>, Vec<Option<DataType>>)>,
     /// 当前 match 中绑定的变量: arm_index -> (pattern_path -> var_name)
     match_bindings: Vec<HashMap<String, DataType>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternLink {
+    pub name: String,
+    pub kind: String,
+    pub rename: Option<String>,
+    pub version: Option<String>,
+    pub optional: bool,
 }
 
 /// Registered trait method signature for validation
@@ -133,6 +149,8 @@ impl SemanticAnalyzer {
             pending_trait_impls: Vec::new(),
             structured_errors: Vec::new(),
             extern_libs: Vec::new(),
+            extern_links: Vec::new(),
+            target: String::new(),
             impl_methods: HashSet::new(),
             generic_signatures: HashMap::new(),
             enum_info: HashMap::new(),
@@ -152,8 +170,49 @@ impl SemanticAnalyzer {
         self.build_mode = mode;
     }
 
+    pub fn set_target(&mut self, target: impl Into<String>) {
+        self.target = target.into();
+    }
+
     pub fn get_extern_libs(&self) -> &Vec<String> {
         &self.extern_libs
+    }
+
+    pub fn get_extern_links(&self) -> &Vec<ExternLink> {
+        &self.extern_links
+    }
+
+    fn platform_matches(&self, attrs: &[Attribute]) -> bool {
+        let platforms: Vec<&str> = attrs
+            .iter()
+            .filter(|a| a.name == "platform")
+            .flat_map(|a| {
+                if a.values.is_empty() {
+                    a.value.iter().map(String::as_str).collect::<Vec<_>>()
+                } else {
+                    a.values.iter().map(String::as_str).collect()
+                }
+            })
+            .collect();
+        if platforms.is_empty() {
+            return true;
+        }
+        let target = self.target.to_ascii_lowercase();
+        let is_windows = target.contains("windows");
+        let is_macos = target.contains("apple-darwin") || target.contains("macos");
+        let is_unix = target.contains("linux")
+            || target.contains("darwin")
+            || target.contains("bsd")
+            || target.contains("solaris")
+            || target.contains("unix");
+        platforms
+            .iter()
+            .any(|platform| match platform.to_ascii_lowercase().as_str() {
+                "windows" => is_windows,
+                "macos" => is_macos,
+                "unix" | "posix" => is_unix,
+                value => target.contains(value),
+            })
     }
 
     /// Maps an arithmetic/comparison operator to its trait method name.
@@ -178,28 +237,35 @@ impl SemanticAnalyzer {
     /// These are hardcoded so they're always available regardless of trait.gbl loading.
     fn register_std_traits(&mut self) {
         let std_traits: &[(&str, &[(&str, usize)])] = &[
-            ("std::ops::Add", &[("add", 2)]),       // add(self, other)
-            ("std::ops::Sub", &[("sub", 2)]),       // sub(self, other)
-            ("std::ops::Mul", &[("mul", 2)]),       // mul(self, other)
-            ("std::ops::Div", &[("div", 2)]),       // div(self, other)
-            ("std::ops::Rem", &[("rem", 2)]),       // rem(self, other)
-            ("std::cmp::Eq", &[("eq", 2)]),         // eq(self, other)
-            ("std::cmp::Cmp", &[
-                ("lt", 2), ("le", 2), ("gt", 2), ("ge", 2),
-            ]),
-            ("std::mem::Drop", &[("drop", 1)]),     // drop(self)
+            ("std::ops::Add", &[("add", 2)]), // add(self, other)
+            ("std::ops::Sub", &[("sub", 2)]), // sub(self, other)
+            ("std::ops::Mul", &[("mul", 2)]), // mul(self, other)
+            ("std::ops::Div", &[("div", 2)]), // div(self, other)
+            ("std::ops::Rem", &[("rem", 2)]), // rem(self, other)
+            ("std::cmp::Eq", &[("eq", 2)]),   // eq(self, other)
+            (
+                "std::cmp::Cmp",
+                &[("lt", 2), ("le", 2), ("gt", 2), ("ge", 2)],
+            ),
+            ("std::mem::Drop", &[("drop", 1)]), // drop(self)
         ];
         for (name, methods) in std_traits {
             if !self.trait_defs.contains_key(*name) {
-                self.trait_defs.insert(name.to_string(), TraitDefInfo {
-                    name: name.to_string(),
-                    methods: methods.iter().map(|(n, pc)| TraitMethodSig {
-                        name: n.to_string(),
-                        param_count: *pc,
-                        dynamic: false,
-                    }).collect(),
-                    generic_params: vec!["T".to_string()],
-                });
+                self.trait_defs.insert(
+                    name.to_string(),
+                    TraitDefInfo {
+                        name: name.to_string(),
+                        methods: methods
+                            .iter()
+                            .map(|(n, pc)| TraitMethodSig {
+                                name: n.to_string(),
+                                param_count: *pc,
+                                dynamic: false,
+                            })
+                            .collect(),
+                        generic_params: vec!["T".to_string()],
+                    },
+                );
             }
         }
     }
@@ -301,15 +367,12 @@ impl SemanticAnalyzer {
     /// Ensure a visibility set exists for `module` and seed it with the
     /// auto-loaded modules.
     fn ensure_visible(&mut self, module: &str) {
-        self.visible_modules
-            .entry(module.to_string())
-            .or_default();
-        let seed: std::collections::HashSet<String> =
-            Self::auto_visible_modules().iter().map(|s| s.to_string()).collect();
-        self.visible_modules
-            .get_mut(module)
-            .unwrap()
-            .extend(seed);
+        self.visible_modules.entry(module.to_string()).or_default();
+        let seed: std::collections::HashSet<String> = Self::auto_visible_modules()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        self.visible_modules.get_mut(module).unwrap().extend(seed);
     }
 
     /// After `current_module` imports `mod`, register it (plus its short name
@@ -355,12 +418,19 @@ impl SemanticAnalyzer {
 
     pub fn analyze(&mut self, program: &Program) -> bool {
         // Register compiler-level builtins (panic / exit — handled by codegen).
-        self.env.declare_function("panic", &DataType::None_, &self.current_module);
-        self.env.declare_function("exit", &DataType::None_, &self.current_module);
+        self.env
+            .declare_function("panic", &DataType::None_, &self.current_module);
+        self.env
+            .declare_function("exit", &DataType::None_, &self.current_module);
         // Runtime intrinsics used by std library implementations
-        self.env.declare_function("gobol_array_elem_addr", &DataType::Int, &self.current_module);
+        self.env.declare_function(
+            "gobol_array_elem_addr",
+            &DataType::Int,
+            &self.current_module,
+        );
         // Array allocation intrinsic used by std library (e.g. Vec::push)
-        self.env.declare_function("__new_array", &DataType::Unknown, &self.current_module);
+        self.env
+            .declare_function("__new_array", &DataType::Unknown, &self.current_module);
         // Seed this program's module visibility for the bare-qualifier gate.
         let cur_module = self.current_module.clone();
         self.ensure_visible(&cur_module);
@@ -435,15 +505,12 @@ impl SemanticAnalyzer {
                 }
                 self.current_generic_params = combined;
                 let return_type = self.get_data_type_from_ast(func.get_return_type());
-                self.env.declare_function(func.get_name(), &return_type, &self.current_module);
+                self.env
+                    .declare_function(func.get_name(), &return_type, &self.current_module);
                 // Record the generic signature so call sites can resolve the
                 // concrete return type (e.g. `identity(3.5): float`).
                 if !func.get_generic_params().is_empty() {
-                    self.record_generic_signature(
-                        func.get_name(),
-                        func,
-                        return_type.clone(),
-                    );
+                    self.record_generic_signature(func.get_name(), func, return_type.clone());
                 }
                 self.current_generic_params = prev_generic;
             } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
@@ -454,7 +521,8 @@ impl SemanticAnalyzer {
                     let field_type = self.get_data_type_from_ast(field.field_type.as_deref());
                     fields.insert(field.name.clone(), field_type);
                 }
-                self.struct_fields.insert(struct_def.get_name().to_string(), fields);
+                self.struct_fields
+                    .insert(struct_def.get_name().to_string(), fields);
                 self.env.declare_module(struct_def.get_name());
                 self.current_generic_params = prev_generic;
             } else if let Some(enum_def) = stmt.as_any().downcast_ref::<EnumDefinition>() {
@@ -500,10 +568,11 @@ impl SemanticAnalyzer {
                             let struct_name = impl_block.get_struct_name().to_string();
                             let method_name = func.get_name().to_string();
                             let arity = func.get_parameters().map(|p| p.len()).unwrap_or(0);
-                            if !self
-                                .impl_methods
-                                .insert((struct_name.clone(), method_name.clone(), arity))
-                            {
+                            if !self.impl_methods.insert((
+                                struct_name.clone(),
+                                method_name.clone(),
+                                arity,
+                            )) {
                                 continue;
                             }
                             let prev_fn_generic = self.current_generic_params.clone();
@@ -513,8 +582,11 @@ impl SemanticAnalyzer {
                                 }
                             }
                             let return_type = self.get_data_type_from_ast(func.get_return_type());
-                            self.env
-                                .declare_function(&method_name, &return_type, &self.current_module);
+                            self.env.declare_function(
+                                &method_name,
+                                &return_type,
+                                &self.current_module,
+                            );
                             if let Some(ref struct_name) = self.current_impl_struct {
                                 self.env
                                     .declare_function(&method_name, &return_type, struct_name);
@@ -548,7 +620,10 @@ impl SemanticAnalyzer {
             #[cfg(debug_assertions)]
             println!("Semantic analysis passed!");
         } else {
-            eprintln!("Semantic analysis failed with {} error(s):", self.errors.len());
+            eprintln!(
+                "Semantic analysis failed with {} error(s):",
+                self.errors.len()
+            );
             for err in &self.errors {
                 eprintln!("{}", err);
             }
@@ -558,7 +633,10 @@ impl SemanticAnalyzer {
     fn error(&mut self, msg: &str) {
         self.has_error = true;
         #[cfg(debug_assertions)]
-        eprintln!("[SEM ERROR] {} | current_module={} current_impl={:?}", msg, self.current_module, self.current_impl_struct);
+        eprintln!(
+            "[SEM ERROR] {} | current_module={} current_impl={:?}",
+            msg, self.current_module, self.current_impl_struct
+        );
         self.structured_errors.push((0, 0, msg.to_string()));
         if let Some(ref f) = self.error_formatter {
             let formatted = f.format_error(0, 0, 0, "error", msg, true);
@@ -673,12 +751,7 @@ impl SemanticAnalyzer {
     /// can resolve a concrete return type by unifying argument types with the
     /// generic parameter types (e.g. `identity<T>(x: T) -> T` called as
     /// `identity(3.5)` resolves to `float`).
-    fn record_generic_signature(
-        &mut self,
-        name: &str,
-        func: &Function,
-        return_type: DataType,
-    ) {
+    fn record_generic_signature(&mut self, name: &str, func: &Function, return_type: DataType) {
         // Collect the declared parameter types. Generic type parameters resolve
         // to `Struct("T")` because `get_data_type_from_ast` runs under
         // `current_generic_params`, so the stored param types keep a reference
@@ -760,12 +833,8 @@ impl SemanticAnalyzer {
                 // variable). In both cases we unify the array's element pattern
                 // against the element type we have.
                 match actual {
-                    DataType::Array(a) => {
-                        self.unify_generic_pattern(inner, a, bindings)
-                    }
-                    other => {
-                        self.unify_generic_pattern(inner, other, bindings)
-                    }
+                    DataType::Array(a) => self.unify_generic_pattern(inner, a, bindings),
+                    other => self.unify_generic_pattern(inner, other, bindings),
                 }
             }
             DataType::Nullable(inner) => {
@@ -785,10 +854,7 @@ impl SemanticAnalyzer {
         bindings: &HashMap<String, DataType>,
     ) -> DataType {
         match dt {
-            DataType::Struct(name) => bindings
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| dt.clone()),
+            DataType::Struct(name) => bindings.get(name).cloned().unwrap_or_else(|| dt.clone()),
             DataType::Array(inner) => {
                 DataType::Array(Box::new(self.substitute_generic_types(inner, bindings)))
             }
@@ -807,7 +873,12 @@ impl SemanticAnalyzer {
         }
     }
 
-    fn check_type_compatibility(&mut self, target: DataType, source: DataType, context: &str) -> bool {
+    fn check_type_compatibility(
+        &mut self,
+        target: DataType,
+        source: DataType,
+        context: &str,
+    ) -> bool {
         if Environment::is_type_compatible(&target, &source) {
             return true;
         }
@@ -833,7 +904,10 @@ impl SemanticAnalyzer {
     /// Returns the resolved filesystem path together with its raw content so
     /// callers can resolve relative `#include` directives against the header's
     /// own directory.
-    fn resolve_header_file(&self, path: &str) -> Result<(std::path::PathBuf, String), std::io::Error> {
+    fn resolve_header_file(
+        &self,
+        path: &str,
+    ) -> Result<(std::path::PathBuf, String), std::io::Error> {
         let p = Path::new(path);
 
         // 1. Try as-is (absolute or CWD-relative)
@@ -895,7 +969,11 @@ impl SemanticAnalyzer {
             return None;
         }
         let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if s.is_empty() { None } else { Some(std::path::PathBuf::from(s)) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(s))
+        }
     }
 
     /// Read a C header and recursively inline `#include "..."` directives so
@@ -1011,8 +1089,8 @@ impl SemanticAnalyzer {
             if &bytes[i..i + needle.len()] == needle {
                 // Check word boundary before the match: preceding char must
                 // not be an identifier character (letter, digit, or _).
-                let prev_ok = i == 0
-                    || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
+                let prev_ok =
+                    i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
                 // Check that the char after the match is `(` (allowing
                 // optional whitespace — space, tab, CR, LF, form-feed,
                 // vertical-tab. C declarations commonly split across lines,
@@ -1148,9 +1226,10 @@ impl SemanticAnalyzer {
         // We need to know upfront whether this module contains any export(...)
         // statement to decide between "explicit export list" mode and
         // "default export all" mode (minus #[no_export] items).
-        let has_explicit_export = prog.get_statements().iter().any(|stmt| {
-            stmt.as_any().downcast_ref::<ExportStatement>().is_some()
-        });
+        let has_explicit_export = prog
+            .get_statements()
+            .iter()
+            .any(|stmt| stmt.as_any().downcast_ref::<ExportStatement>().is_some());
 
         // Collect names of top-level defs that carry #[no_export].
         // These are excluded from the default-export path even when no explicit
@@ -1213,7 +1292,8 @@ impl SemanticAnalyzer {
                     let module_symbols = self.env.get_module_symbols(mod_name);
                     for (name, sym) in module_symbols {
                         let return_type = sym.data_type.clone();
-                        self.env.declare_function(&name, &return_type, &self.current_module);
+                        self.env
+                            .declare_function(&name, &return_type, &self.current_module);
                         declared_funcs.push((name, return_type));
                     }
                 } else {
@@ -1223,20 +1303,27 @@ impl SemanticAnalyzer {
                         if let Some(sym) = self.env.lookup_symbol(&qualified) {
                             let return_type = sym.data_type.clone();
                             let effective_name = alias.as_ref().unwrap_or(member_name);
-                            self.env.declare_function(effective_name, &return_type, &self.current_module);
+                            self.env.declare_function(
+                                effective_name,
+                                &return_type,
+                                &self.current_module,
+                            );
                             declared_funcs.push((effective_name.to_string(), return_type));
                         }
                     }
                 }
             } else if let Some(func) = stmt.as_any().downcast_ref::<Function>() {
-                if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                if self.build_mode == BuildMode::Release
+                    && Attribute::has_attr(func.get_attributes(), "debug")
+                {
                     continue;
                 }
                 let func_name = func.get_name().to_string();
                 let prev_generic = self.current_generic_params.clone();
                 self.current_generic_params = func.get_generic_params().clone();
                 let return_type = self.get_data_type_from_ast(func.get_return_type());
-                self.env.declare_function(&func_name, &return_type, &self.current_module);
+                self.env
+                    .declare_function(&func_name, &return_type, &self.current_module);
                 declared_funcs.push((func_name, return_type));
                 self.current_generic_params = prev_generic;
             } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
@@ -1254,23 +1341,34 @@ impl SemanticAnalyzer {
                 self.current_generic_params = prev_generic;
             } else if let Some(impl_block) = stmt.as_any().downcast_ref::<ImplBlock>() {
                 let prev_impl = self.current_impl_struct.clone();
-                self.current_impl_struct = Some(impl_block.get_struct_name().split('<').next().unwrap_or(impl_block.get_struct_name()).to_string());
+                self.current_impl_struct = Some(
+                    impl_block
+                        .get_struct_name()
+                        .split('<')
+                        .next()
+                        .unwrap_or(impl_block.get_struct_name())
+                        .to_string(),
+                );
                 let prev_impl_generic = self.current_generic_params.clone();
                 self.current_generic_params = impl_block.get_generic_params().clone();
 
                 // If this is `impl Trait for Type`, defer validation until after all modules loaded
                 if let Some(trait_name) = impl_block.get_trait_name() {
-                    let method_names: Vec<String> = impl_block.get_items().iter().filter_map(|item| {
-                        match item {
+                    let method_names: Vec<String> = impl_block
+                        .get_items()
+                        .iter()
+                        .filter_map(|item| match item {
                             ImplItem::Method(func) | ImplItem::Convert(func) => {
-                                if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                                if self.build_mode == BuildMode::Release
+                                    && Attribute::has_attr(func.get_attributes(), "debug")
+                                {
                                     None
                                 } else {
                                     Some(func.get_name().to_string())
                                 }
                             }
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     self.pending_trait_impls.push((
                         impl_block.get_struct_name().to_string(),
                         trait_name.to_string(),
@@ -1281,7 +1379,9 @@ impl SemanticAnalyzer {
                 for item in impl_block.get_items() {
                     match item {
                         ImplItem::Method(func) | ImplItem::Convert(func) => {
-                            if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                            if self.build_mode == BuildMode::Release
+                                && Attribute::has_attr(func.get_attributes(), "debug")
+                            {
                                 continue;
                             }
                             let func_name = func.get_name().to_string();
@@ -1291,11 +1391,12 @@ impl SemanticAnalyzer {
                             // re-exports a module, while still allowing overloaded
                             // methods (same name, different arity).
                             let struct_name = impl_block.get_struct_name().to_string();
-                            let arity = func
-                                .get_parameters()
-                                .map(|p| p.len())
-                                .unwrap_or(0);
-                            if !self.impl_methods.insert((struct_name.clone(), func_name.clone(), arity)) {
+                            let arity = func.get_parameters().map(|p| p.len()).unwrap_or(0);
+                            if !self.impl_methods.insert((
+                                struct_name.clone(),
+                                func_name.clone(),
+                                arity,
+                            )) {
                                 continue;
                             }
                             let prev_generic = self.current_generic_params.clone();
@@ -1310,10 +1411,15 @@ impl SemanticAnalyzer {
                             }
                             self.current_generic_params = combined;
                             let return_type = self.get_data_type_from_ast(func.get_return_type());
-                            self.env.declare_function(&func_name, &return_type, &self.current_module);
+                            self.env.declare_function(
+                                &func_name,
+                                &return_type,
+                                &self.current_module,
+                            );
                             // Also register with struct name prefix for Type::method() calls
                             if let Some(ref struct_name) = self.current_impl_struct {
-                                self.env.declare_function(&func_name, &return_type, struct_name);
+                                self.env
+                                    .declare_function(&func_name, &return_type, struct_name);
                             }
                             declared_funcs.push((func_name, return_type));
                             self.current_generic_params = prev_generic;
@@ -1331,7 +1437,8 @@ impl SemanticAnalyzer {
                 for func in extern_block.get_functions() {
                     let func_name = func.get_name().to_string();
                     let return_type = self.get_data_type_from_ast(func.get_return_type());
-                    self.env.declare_function(&func_name, &return_type, &self.current_module);
+                    self.env
+                        .declare_function(&func_name, &return_type, &self.current_module);
                     declared_funcs.push((func_name, return_type));
                 }
             } else if let Some(enum_def) = stmt.as_any().downcast_ref::<EnumDefinition>() {
@@ -1339,18 +1446,23 @@ impl SemanticAnalyzer {
                 declared_structs.push(enum_def.get_name().to_string());
             } else if let Some(trait_def) = stmt.as_any().downcast_ref::<TraitDefinition>() {
                 // Register trait definition for `impl Trait for Type` validation
-                let methods: Vec<TraitMethodSig> = trait_def.get_methods().iter().map(|m| {
-                    TraitMethodSig {
+                let methods: Vec<TraitMethodSig> = trait_def
+                    .get_methods()
+                    .iter()
+                    .map(|m| TraitMethodSig {
                         name: m.name.clone(),
                         param_count: m.parameters.len(),
                         dynamic: Attribute::has_attr(&m.attributes, "dynamic"),
-                    }
-                }).collect();
-                self.trait_defs.insert(trait_def.get_name().to_string(), TraitDefInfo {
-                    name: trait_def.get_name().to_string(),
-                    methods,
-                    generic_params: trait_def.get_generic_params().clone(),
-                });
+                    })
+                    .collect();
+                self.trait_defs.insert(
+                    trait_def.get_name().to_string(),
+                    TraitDefInfo {
+                        name: trait_def.get_name().to_string(),
+                        methods,
+                        generic_params: trait_def.get_generic_params().clone(),
+                    },
+                );
                 declared_traits.push(trait_def.get_name().to_string());
             } else if let Some(export_stmt) = stmt.as_any().downcast_ref::<ExportStatement>() {
                 for name in export_stmt.get_names() {
@@ -1358,14 +1470,19 @@ impl SemanticAnalyzer {
                     let short = parts.last().unwrap_or(&"");
                     let original_key = if parts.len() > 1 {
                         let mod_part = parts[0];
-                        let resolved_mod = self.module_aliases.get(mod_part).map(|s| s.as_str()).unwrap_or(mod_part);
+                        let resolved_mod = self
+                            .module_aliases
+                            .get(mod_part)
+                            .map(|s| s.as_str())
+                            .unwrap_or(mod_part);
                         format!("{}::{}", resolved_mod, short)
                     } else {
                         format!("{}::{}", self.current_module, name)
                     };
                     if let Some(sym) = self.env.lookup_symbol(&original_key) {
                         let return_type = sym.data_type.clone();
-                        self.env.declare_function(short, &return_type, &self.current_module);
+                        self.env
+                            .declare_function(short, &return_type, &self.current_module);
                     }
                 }
             }
@@ -1387,7 +1504,8 @@ impl SemanticAnalyzer {
                 }
                 // Make accessible as bare `name` key too (this mirrors what
                 // the explicit export loop in Phase 2 does).
-                self.env.declare_function(name, return_type, &self.current_module);
+                self.env
+                    .declare_function(name, return_type, &self.current_module);
             }
             for name in &declared_structs {
                 if no_export_names.contains(name.as_str()) {
@@ -1423,7 +1541,11 @@ impl SemanticAnalyzer {
         // (`std::io::...`) always works. This mirrors how the environment
         // registers module-scoped functions.
         if module_name.contains("::") {
-            let short = module_name.rsplit("::").next().unwrap_or(&module_name).to_string();
+            let short = module_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(&module_name)
+                .to_string();
             if !short.is_empty() && short != module_name {
                 self.env.declare_module(&short);
                 for (name, ret) in &declared_funcs {
@@ -1467,7 +1589,6 @@ impl AstVisitor for SemanticAnalyzer {
         #[cfg(debug_assertions)]
         println!("  Struct definition: {}", struct_name);
 
-
         // Push generic scope so that type params like T are resolved in field types
         let prev_generic = self.current_generic_params.clone();
         self.current_generic_params = node.get_generic_params().clone();
@@ -1486,7 +1607,11 @@ impl AstVisitor for SemanticAnalyzer {
         let enum_name = node.get_name().to_string();
         let generic_params = node.get_generic_params().clone();
         #[cfg(debug_assertions)]
-        println!("  Enum definition: {} ({} variants)", enum_name, node.get_variants().len());
+        println!(
+            "  Enum definition: {} ({} variants)",
+            enum_name,
+            node.get_variants().len()
+        );
 
         let prev_generic = self.current_generic_params.clone();
         self.current_generic_params = generic_params.clone();
@@ -1513,7 +1638,8 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         // ---- 存储到 enum_info ----
-        self.enum_info.insert(enum_name.clone(), (variant_names, variant_payloads));
+        self.enum_info
+            .insert(enum_name.clone(), (variant_names, variant_payloads));
 
         self.struct_fields.insert(enum_name.clone(), fields);
         self.env.declare_module(&enum_name);
@@ -1522,8 +1648,13 @@ impl AstVisitor for SemanticAnalyzer {
             let ctor_name = variant.name.clone();
             let return_type = DataType::Struct(enum_name.clone());
 
-            self.env.declare_function(&ctor_name, &return_type, &enum_name);
-            self.env.declare_function(&format!("{}::{}", enum_name, ctor_name), &return_type, &self.current_module);
+            self.env
+                .declare_function(&ctor_name, &return_type, &enum_name);
+            self.env.declare_function(
+                &format!("{}::{}", enum_name, ctor_name),
+                &return_type,
+                &self.current_module,
+            );
         }
 
         self.current_generic_params = prev_generic;
@@ -1539,17 +1670,19 @@ impl AstVisitor for SemanticAnalyzer {
         // queued this block in pending_trait_impls).
         if let Some(trait_name) = node.get_trait_name() {
             if let Some(trait_info) = self.lookup_trait(trait_name) {
-                let impl_methods: HashMap<String, Vec<usize>> = node.get_items().iter()
-                    .filter_map(|item| {
-                        match item {
-                            ImplItem::Method(func) | ImplItem::Convert(func) => {
-                                if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
-                                    None
-                                } else {
-                                    let name = func.get_name().to_string();
-                                    let param_count = func.get_parameters().iter().len();
-                                    Some((name, param_count))
-                                }
+                let impl_methods: HashMap<String, Vec<usize>> = node
+                    .get_items()
+                    .iter()
+                    .filter_map(|item| match item {
+                        ImplItem::Method(func) | ImplItem::Convert(func) => {
+                            if self.build_mode == BuildMode::Release
+                                && Attribute::has_attr(func.get_attributes(), "debug")
+                            {
+                                None
+                            } else {
+                                let name = func.get_name().to_string();
+                                let param_count = func.get_parameters().iter().len();
+                                Some((name, param_count))
                             }
                         }
                     })
@@ -1562,7 +1695,9 @@ impl AstVisitor for SemanticAnalyzer {
                     if !impl_methods.contains_key(&required.name) {
                         self.error(&format!(
                             "Trait '{}' requires method '{}', but it is missing in impl for '{}'",
-                            trait_name, required.name, node.get_struct_name()
+                            trait_name,
+                            required.name,
+                            node.get_struct_name()
                         ));
                         // #[dynamic] methods can have any signature — skip param check
                         if required.dynamic {
@@ -1576,7 +1711,13 @@ impl AstVisitor for SemanticAnalyzer {
 
         let prev_impl = self.current_impl_struct.clone();
         let prev_generic = self.current_generic_params.clone();
-        self.current_impl_struct = Some(node.get_struct_name().split('<').next().unwrap_or(node.get_struct_name()).to_string());
+        self.current_impl_struct = Some(
+            node.get_struct_name()
+                .split('<')
+                .next()
+                .unwrap_or(node.get_struct_name())
+                .to_string(),
+        );
         self.current_generic_params = node.get_generic_params().clone();
 
         // === Pass 1: Register all method names (without analyzing bodies) ===
@@ -1586,16 +1727,18 @@ impl AstVisitor for SemanticAnalyzer {
         for item in node.get_items() {
             match item {
                 ImplItem::Method(func) | ImplItem::Convert(func) => {
-                    if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                    if self.build_mode == BuildMode::Release
+                        && Attribute::has_attr(func.get_attributes(), "debug")
+                    {
                         continue;
                     }
                     let struct_name = node.get_struct_name().to_string();
                     let method_name = func.get_name().to_string();
-                    let arity = func
-                        .get_parameters()
-                        .map(|p| p.len())
-                        .unwrap_or(0);
-                    if !self.impl_methods.insert((struct_name.clone(), method_name.clone(), arity)) {
+                    let arity = func.get_parameters().map(|p| p.len()).unwrap_or(0);
+                    if !self
+                        .impl_methods
+                        .insert((struct_name.clone(), method_name.clone(), arity))
+                    {
                         continue;
                     }
                     let prev_fn_generic = self.current_generic_params.clone();
@@ -1605,9 +1748,11 @@ impl AstVisitor for SemanticAnalyzer {
                         }
                     }
                     let return_type = self.get_data_type_from_ast(func.get_return_type());
-                    self.env.declare_function(&method_name, &return_type, &self.current_module);
+                    self.env
+                        .declare_function(&method_name, &return_type, &self.current_module);
                     if let Some(ref struct_name) = self.current_impl_struct {
-                        self.env.declare_function(&method_name, &return_type, struct_name);
+                        self.env
+                            .declare_function(&method_name, &return_type, struct_name);
                     }
                     self.current_generic_params = prev_fn_generic;
                 }
@@ -1618,17 +1763,19 @@ impl AstVisitor for SemanticAnalyzer {
         for item in node.get_items() {
             match item {
                 ImplItem::Method(func) | ImplItem::Convert(func) => {
-                    if self.build_mode == BuildMode::Release && Attribute::has_attr(func.get_attributes(), "debug") {
+                    if self.build_mode == BuildMode::Release
+                        && Attribute::has_attr(func.get_attributes(), "debug")
+                    {
                         continue;
                     }
                     let struct_name = node.get_struct_name().to_string();
                     let method_name = func.get_name().to_string();
-                    let arity = func
-                        .get_parameters()
-                        .map(|p| p.len())
-                        .unwrap_or(0);
+                    let arity = func.get_parameters().map(|p| p.len()).unwrap_or(0);
                     // Skip if not registered in pass 1 (dedup)
-                    if !self.impl_methods.contains(&(struct_name, method_name, arity)) {
+                    if !self
+                        .impl_methods
+                        .contains(&(struct_name, method_name, arity))
+                    {
                         continue;
                     }
                     let prev_fn_generic = self.current_generic_params.clone();
@@ -1651,18 +1798,23 @@ impl AstVisitor for SemanticAnalyzer {
         #[cfg(debug_assertions)]
         println!("  Trait definition: {}", node.get_name());
 
-        let methods: Vec<TraitMethodSig> = node.get_methods().iter().map(|m| {
-            TraitMethodSig {
+        let methods: Vec<TraitMethodSig> = node
+            .get_methods()
+            .iter()
+            .map(|m| TraitMethodSig {
                 name: m.name.clone(),
                 param_count: m.parameters.len(),
                 dynamic: Attribute::has_attr(&m.attributes, "dynamic"),
-            }
-        }).collect();
-        self.trait_defs.insert(node.get_name().to_string(), TraitDefInfo {
-            name: node.get_name().to_string(),
-            methods,
-            generic_params: node.get_generic_params().clone(),
-        });
+            })
+            .collect();
+        self.trait_defs.insert(
+            node.get_name().to_string(),
+            TraitDefInfo {
+                name: node.get_name().to_string(),
+                methods,
+                generic_params: node.get_generic_params().clone(),
+            },
+        );
     }
 
     fn visit_export_statement(&mut self, _node: &ExportStatement) {
@@ -1673,6 +1825,10 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_extern_block(&mut self, node: &ExternBlock) {
         #[cfg(debug_assertions)]
         println!("  Extern block: lib={:?}", node.get_library());
+
+        if !self.platform_matches(node.get_attributes()) {
+            return;
+        }
 
         // Every extern "C" block MUST specify a #[header("path")] attribute
         // pointing to the C header that declares these functions. The header
@@ -1708,6 +1864,61 @@ impl AstVisitor for SemanticAnalyzer {
             if lib != "C" && !self.extern_libs.iter().any(|l| l == lib) {
                 self.extern_libs.push(lib.to_string());
             }
+
+            for attr in node.get_attributes().iter().filter(|a| a.name == "link") {
+                let Some(name) = attr
+                    .named
+                    .iter()
+                    .find(|(key, _)| key == "name")
+                    .map(|(_, value)| value.clone())
+                else {
+                    self.error("#[link] requires a name=\"...\" argument");
+                    continue;
+                };
+                let kind = attr
+                    .named
+                    .iter()
+                    .find(|(key, _)| key == "kind")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_else(|| "dylib".to_string());
+                if !matches!(kind.as_str(), "dylib" | "static" | "framework") {
+                    self.error(&format!("unsupported #[link] kind '{}'", kind));
+                    continue;
+                }
+                if kind == "framework"
+                    && !self.target.to_ascii_lowercase().contains("darwin")
+                    && !self.target.to_ascii_lowercase().contains("macos")
+                {
+                    self.error("#[link(kind = \"framework\")] is only supported on macOS");
+                    continue;
+                }
+                let rename = attr
+                    .named
+                    .iter()
+                    .find(|(key, _)| key == "rename")
+                    .map(|(_, value)| value.clone());
+                let version = attr
+                    .named
+                    .iter()
+                    .find(|(key, _)| key == "version")
+                    .map(|(_, value)| value.clone());
+                let optional = attr
+                    .named
+                    .iter()
+                    .find(|(key, _)| key == "optional")
+                    .map(|(_, value)| value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let link = ExternLink {
+                    name,
+                    kind,
+                    rename,
+                    version,
+                    optional,
+                };
+                if !self.extern_links.contains(&link) {
+                    self.extern_links.push(link);
+                }
+            }
         }
 
         for func in node.get_functions() {
@@ -1727,7 +1938,8 @@ impl AstVisitor for SemanticAnalyzer {
             let return_type = self.get_data_type_from_ast(func.get_return_type());
             // Register extern "C" functions in the current module so that
             // call sites (e.g. `printf(...)`) resolve to `<module>::printf`.
-            self.env.declare_function(&func_name, &return_type, &self.current_module);
+            self.env
+                .declare_function(&func_name, &return_type, &self.current_module);
             func.accept(self);
         }
     }
@@ -1735,12 +1947,17 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_import_statement(&mut self, node: &ImportStatement) {
         let module_name = node.get_module_name();
         #[cfg(debug_assertions)]
-        println!("  Import module: {} (alias: {:?})", module_name, node.get_alias());
+        println!(
+            "  Import module: {} (alias: {:?})",
+            module_name,
+            node.get_alias()
+        );
 
         self.load_module(&module_name);
         self.note_import(&module_name);
         if let Some(alias) = node.get_alias() {
-            self.module_aliases.insert(alias.to_string(), module_name.clone());
+            self.module_aliases
+                .insert(alias.to_string(), module_name.clone());
             // Also make the alias usable as a bare qualifier.
             self.ensure_visible(&self.current_module.clone());
             self.visible_modules
@@ -1752,7 +1969,12 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_from_import_statement(&mut self, node: &FromImportStatement) {
         let module_name = node.get_module();
         #[cfg(debug_assertions)]
-        println!("  From-import: module={}, wildcard={}, members={:?}", module_name, node.is_wildcard(), node.get_members());
+        println!(
+            "  From-import: module={}, wildcard={}, members={:?}",
+            module_name,
+            node.is_wildcard(),
+            node.get_members()
+        );
 
         // First, ensure the module is loaded (this registers all its
         // public symbols under `module::member` keys).
@@ -1764,7 +1986,8 @@ impl AstVisitor for SemanticAnalyzer {
             let module_symbols = self.env.get_module_symbols(module_name);
             for (name, sym) in module_symbols {
                 let return_type = sym.data_type.clone();
-                self.env.declare_function(&name, &return_type, &self.current_module);
+                self.env
+                    .declare_function(&name, &return_type, &self.current_module);
             }
             return;
         }
@@ -1777,7 +2000,8 @@ impl AstVisitor for SemanticAnalyzer {
                 let return_type = sym.data_type.clone();
                 // Use alias if provided, otherwise use original name
                 let effective_name = alias.as_ref().unwrap_or(member_name);
-                self.env.declare_function(effective_name, &return_type, &self.current_module);
+                self.env
+                    .declare_function(effective_name, &return_type, &self.current_module);
             } else {
                 self.error(&format!(
                     "Cannot import '{}' from module '{}': member not found",
@@ -1788,7 +2012,9 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_function(&mut self, node: &Function) {
-        if self.build_mode == BuildMode::Release && Attribute::has_attr(node.get_attributes(), "debug") {
+        if self.build_mode == BuildMode::Release
+            && Attribute::has_attr(node.get_attributes(), "debug")
+        {
             return;
         }
         let func_name = node.get_name().to_string();
@@ -1826,7 +2052,10 @@ impl AstVisitor for SemanticAnalyzer {
 
         let return_type = self.get_data_type_from_ast(node.get_return_type());
 
-        if !self.env.declare_function(&func_name, &return_type, &self.current_module) {
+        if !self
+            .env
+            .declare_function(&func_name, &return_type, &self.current_module)
+        {
             self.error(&format!(
                 "Failed to declare function '{}.{}'",
                 self.current_module, func_name
@@ -1838,7 +2067,8 @@ impl AstVisitor for SemanticAnalyzer {
 
         // Also register with struct name prefix for Type.method() calls
         if let Some(ref struct_name) = self.current_impl_struct {
-            self.env.declare_function(&func_name, &return_type, struct_name);
+            self.env
+                .declare_function(&func_name, &return_type, struct_name);
         }
 
         // Save context
@@ -1867,9 +2097,11 @@ impl AstVisitor for SemanticAnalyzer {
             let stmts = body.get_statements();
             if let Some(last) = stmts.last() {
                 if let Some(es) = last.as_any().downcast_ref::<ExpressionStatement>() {
-                    if es.tail || es.get_expression().map_or(false, |expr| {
-                        expr.as_any().downcast_ref::<MatchExpression>().is_some()
-                    }) {
+                    if es.tail
+                        || es.get_expression().map_or(false, |expr| {
+                            expr.as_any().downcast_ref::<MatchExpression>().is_some()
+                        })
+                    {
                         has_tail_expr = true;
                     }
                 }
@@ -1951,7 +2183,9 @@ impl AstVisitor for SemanticAnalyzer {
         let param_type = self.get_data_type_from_ast(node.get_type());
 
         // Array parameters are always mutable (reference type)
-        let is_array = node.get_type().map_or(false, |t| t.as_type_any().downcast_ref::<ArrayType>().is_some());
+        let is_array = node.get_type().map_or(false, |t| {
+            t.as_type_any().downcast_ref::<ArrayType>().is_some()
+        });
         // For array parameters, store the element type (unwrap Array wrapper)
         let stored_type = if is_array {
             if let DataType::Array(elem) = &param_type {
@@ -1962,7 +2196,8 @@ impl AstVisitor for SemanticAnalyzer {
         } else {
             param_type.clone()
         };
-        self.env.declare_variable(param_name, &stored_type, is_array);
+        self.env
+            .declare_variable(param_name, &stored_type, is_array);
         // Mark as array if the parameter type is an array
         if is_array {
             if let Some(sym) = self.env.lookup_symbol_mut(param_name) {
@@ -1970,7 +2205,11 @@ impl AstVisitor for SemanticAnalyzer {
             }
         }
         #[cfg(debug_assertions)]
-        println!("    Parameter: {} : {}", param_name, data_type_to_string(param_type));
+        println!(
+            "    Parameter: {} : {}",
+            param_name,
+            data_type_to_string(param_type)
+        );
     }
 
     fn visit_block(&mut self, node: &Block) {
@@ -2013,7 +2252,10 @@ impl AstVisitor for SemanticAnalyzer {
                             }
 
                             // Check if size is constant
-                            if let Some(num) = (size as &dyn AstNode).as_any().downcast_ref::<NumberLiteral>() {
+                            if let Some(num) = (size as &dyn AstNode)
+                                .as_any()
+                                .downcast_ref::<NumberLiteral>()
+                            {
                                 constant_sizes.push(num.get_value() as i32);
                                 expr_sizes.push(Box::new(NumberLiteral::new(0.0))); // placeholder
                             } else {
@@ -2032,7 +2274,8 @@ impl AstVisitor for SemanticAnalyzer {
                 let elem_type = self.get_data_type_from_ast(innermost);
 
                 if all_constant {
-                    self.env.declare_array_constant(&var_name, &elem_type, &constant_sizes, is_mut);
+                    self.env
+                        .declare_array_constant(&var_name, &elem_type, &constant_sizes, is_mut);
                 } else {
                     // For non-constant arrays
                     self.env.declare_variable(&var_name, &elem_type, is_mut);
@@ -2078,7 +2321,7 @@ impl AstVisitor for SemanticAnalyzer {
         if let Some(cond) = node.get_condition() {
             cond.accept(self);
             let cond_type = self.get_current_type();
-            self.type_stack.pop();  // Pop condition type after use
+            self.type_stack.pop(); // Pop condition type after use
 
             if cond_type != DataType::Bool
                 && cond_type != DataType::Unknown
@@ -2104,7 +2347,7 @@ impl AstVisitor for SemanticAnalyzer {
         if let Some(cond) = node.get_condition() {
             cond.accept(self);
             let cond_type = self.get_current_type();
-            self.type_stack.pop();  // Pop condition type after use
+            self.type_stack.pop(); // Pop condition type after use
 
             if cond_type != DataType::Bool && !Environment::is_numeric_type(&cond_type) {
                 self.error("While condition must be boolean or numeric type");
@@ -2126,12 +2369,13 @@ impl AstVisitor for SemanticAnalyzer {
         self.env.enter_scope();
 
         // Declare index variable (first) as Int
-        self.env.declare_variable(&loop_vars[0], &DataType::Int, false);
+        self.env
+            .declare_variable(&loop_vars[0], &DataType::Int, false);
 
         if let Some(iter) = node.get_iterable() {
             iter.accept(self);
             let iter_type = self.get_current_type();
-            self.type_stack.pop();  // Pop iterable type after use
+            self.type_stack.pop(); // Pop iterable type after use
             // Accept Range, Str, array types, generic type params (like T in T[]),
             // Unknown, and variables that are arrays
             let iter_is_valid = matches!(iter_type, DataType::Int)
@@ -2145,7 +2389,9 @@ impl AstVisitor for SemanticAnalyzer {
                 // Check if the iterable is a variable that is an array
                 let is_array_var = if let Some(iter_expr) = node.get_iterable() {
                     if let Some(id) = iter_expr.as_any().downcast_ref::<crate::ast::Identifier>() {
-                        self.env.lookup_symbol(id.get_name()).map_or(false, |s| s.is_array)
+                        self.env
+                            .lookup_symbol(id.get_name())
+                            .map_or(false, |s| s.is_array)
                     } else {
                         false
                     }
@@ -2258,11 +2504,10 @@ impl AstVisitor for SemanticAnalyzer {
         // then module-prefixed name (for module-level functions).
         // This ensures local parameters like `index: int` are found before
         // module-level methods like `vec::index` (Vec::index).
-        let sym = self.env.lookup_symbol(name)
-            .or_else(|| {
-                let full_name = format!("{}::{}", self.current_module, name);
-                self.env.lookup_symbol(&full_name)
-            });
+        let sym = self.env.lookup_symbol(name).or_else(|| {
+            let full_name = format!("{}::{}", self.current_module, name);
+            self.env.lookup_symbol(&full_name)
+        });
 
         match sym {
             Some(s) => self.type_stack.push(s.data_type.clone()),
@@ -2293,9 +2538,10 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_array_literal(&mut self, node: &ArrayLiteral) {
         let mut first = true;
         let mut elem_type = DataType::Unknown;
-        let contains_nested_array = node.get_elements().iter().any(|elem| {
-            elem.as_any().downcast_ref::<ArrayLiteral>().is_some()
-        });
+        let contains_nested_array = node
+            .get_elements()
+            .iter()
+            .any(|elem| elem.as_any().downcast_ref::<ArrayLiteral>().is_some());
         for elem in node.get_elements() {
             elem.accept(self);
             let et = self.get_current_type();
@@ -2304,8 +2550,10 @@ impl AstVisitor for SemanticAnalyzer {
                 elem_type = et;
                 first = false;
             } else if !contains_nested_array
-                && !(matches!((&elem_type, &et), (DataType::Str, DataType::Bool)
-                    | (DataType::Bool, DataType::Str)))
+                && !(matches!(
+                    (&elem_type, &et),
+                    (DataType::Str, DataType::Bool) | (DataType::Bool, DataType::Str)
+                ))
                 && !Environment::is_type_compatible(&elem_type, &et)
             {
                 self.error(&format!(
@@ -2371,7 +2619,10 @@ impl AstVisitor for SemanticAnalyzer {
                             if sym.is_mut {
                                 is_assignable = true;
                             } else {
-                                self.error(&format!("Cannot assign to constant variable '{}'", name));
+                                self.error(&format!(
+                                    "Cannot assign to constant variable '{}'",
+                                    name
+                                ));
                             }
                         }
                     }
@@ -2402,22 +2653,31 @@ impl AstVisitor for SemanticAnalyzer {
                     }
 
                     // Check if the base is a struct field (e.g., _data in impl block)
-                    let is_struct_field_array = if let Some(arr_id) = array.as_any().downcast_ref::<Identifier>() {
-                        self.current_impl_struct.as_ref().map_or(false, |s| {
-                            self.struct_fields.get(s).map_or(false, |f| f.contains_key(arr_id.get_name()))
-                        })
-                    } else {
-                        false
-                    };
+                    let is_struct_field_array =
+                        if let Some(arr_id) = array.as_any().downcast_ref::<Identifier>() {
+                            self.current_impl_struct.as_ref().map_or(false, |s| {
+                                self.struct_fields
+                                    .get(s)
+                                    .map_or(false, |f| f.contains_key(arr_id.get_name()))
+                            })
+                        } else {
+                            false
+                        };
 
                     if is_struct_field_array {
                         is_assignable = true;
                     } else if let Some(arr_id) = array.as_any().downcast_ref::<Identifier>() {
                         if let Some(sym) = self.env.lookup_symbol(arr_id.get_name()) {
                             if !sym.is_mut {
-                                self.error(&format!("Cannot assign to constant array '{}'", arr_id.get_name()));
+                                self.error(&format!(
+                                    "Cannot assign to constant array '{}'",
+                                    arr_id.get_name()
+                                ));
                             } else if !sym.is_array {
-                                self.error(&format!("Cannot index non-array variable '{}'", arr_id.get_name()));
+                                self.error(&format!(
+                                    "Cannot index non-array variable '{}'",
+                                    arr_id.get_name()
+                                ));
                             } else {
                                 is_assignable = true;
                             }
@@ -2490,7 +2750,8 @@ impl AstVisitor for SemanticAnalyzer {
             }
 
             // Numeric operands: hardcoded path
-            if Environment::is_numeric_type(&left_type) && Environment::is_numeric_type(&right_type) {
+            if Environment::is_numeric_type(&left_type) && Environment::is_numeric_type(&right_type)
+            {
                 if left_type == DataType::Float || right_type == DataType::Float {
                     self.type_stack.push(DataType::Float);
                 } else {
@@ -2532,7 +2793,9 @@ impl AstVisitor for SemanticAnalyzer {
                     var_name = id.get_name().to_string();
                     // Check if it's a bare struct field first
                     let is_field = self.current_impl_struct.as_ref().map_or(false, |s| {
-                        self.struct_fields.get(s).map_or(false, |f| f.contains_key(&var_name))
+                        self.struct_fields
+                            .get(s)
+                            .map_or(false, |f| f.contains_key(&var_name))
                     });
                     if is_field {
                         is_assignable = true;
@@ -2540,7 +2803,10 @@ impl AstVisitor for SemanticAnalyzer {
                         if sym.is_mut {
                             is_assignable = true;
                         } else {
-                            self.error(&format!("Cannot assign to constant variable '{}'", var_name));
+                            self.error(&format!(
+                                "Cannot assign to constant variable '{}'",
+                                var_name
+                            ));
                         }
                     } else {
                         self.error(&format!("Undeclared variable '{}'", var_name));
@@ -2562,7 +2828,7 @@ impl AstVisitor for SemanticAnalyzer {
 
             // 检查类型兼容性
             let base_op = &op[0..1];
-            
+
             // 字符串拼接
             if base_op == "+" && (left_type == DataType::Str || right_type == DataType::Str) {
                 self.type_stack.push(DataType::Str);
@@ -2570,7 +2836,9 @@ impl AstVisitor for SemanticAnalyzer {
             }
 
             // 数值运算
-            if !Environment::is_numeric_type(&left_type) || !Environment::is_numeric_type(&right_type) {
+            if !Environment::is_numeric_type(&left_type)
+                || !Environment::is_numeric_type(&right_type)
+            {
                 self.error(&format!("Operator '{}' requires numeric operands", op));
                 self.type_stack.push(DataType::Unknown);
                 return;
@@ -2582,7 +2850,8 @@ impl AstVisitor for SemanticAnalyzer {
 
         if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
             // Nullable and None_ comparisons: e.g., opt == null, opt != null
-            let is_nullable = matches!(left_type, DataType::Nullable(_)) || matches!(right_type, DataType::Nullable(_));
+            let is_nullable = matches!(left_type, DataType::Nullable(_))
+                || matches!(right_type, DataType::Nullable(_));
             let has_none = left_type == DataType::None_ || right_type == DataType::None_;
             if is_nullable || has_none {
                 if op == "==" || op == "!=" {
@@ -2651,7 +2920,8 @@ impl AstVisitor for SemanticAnalyzer {
         if op == ".." {
             // Range literal: a..b → Range struct. Ensure Range is declared.
             if !self.struct_fields.contains_key("Range") {
-                self.struct_fields.insert("Range".to_string(), HashMap::new());
+                self.struct_fields
+                    .insert("Range".to_string(), HashMap::new());
                 self.env.declare_module("Range");
             }
             self.type_stack.push(DataType::Struct("Range".to_string()));
@@ -2745,7 +3015,9 @@ impl AstVisitor for SemanticAnalyzer {
                         let member_name = member.get_member().to_string();
 
                         // Reject dot notation for module access (e.g., io.println → io::println)
-                        let is_module = self.env.lookup_symbol(&obj_name)
+                        let is_module = self
+                            .env
+                            .lookup_symbol(&obj_name)
                             .map_or(false, |s| s.symbol_type == SymbolType::Module);
                         if is_module && obj_name != "self" {
                             self.error(&format!(
@@ -2764,7 +3036,9 @@ impl AstVisitor for SemanticAnalyzer {
                                     module_name = obj_name;
                                 }
                             } else {
-                                module_name = self.env.lookup_symbol(&obj_name)
+                                module_name = self
+                                    .env
+                                    .lookup_symbol(&obj_name)
                                     .and_then(|s| match &s.data_type {
                                         DataType::Struct(name) => Some(name.clone()),
                                         _ => None,
@@ -2796,8 +3070,16 @@ impl AstVisitor for SemanticAnalyzer {
         // Check if it's a struct constructor call (e.g. Point(1, 2) or vec::VecIterator(...))
         // Also check bare identifier that matches a struct name (e.g., VecIterator(...))
         // Strip generic parameters from func_name (e.g., "VecIterator<T>" → "VecIterator")
-        let func_name_bare = func_name.split('<').next().unwrap_or(&func_name).to_string();
-        let constructor_name = func_name_bare.split("::").last().unwrap_or(&func_name_bare).to_string();
+        let func_name_bare = func_name
+            .split('<')
+            .next()
+            .unwrap_or(&func_name)
+            .to_string();
+        let constructor_name = func_name_bare
+            .split("::")
+            .last()
+            .unwrap_or(&func_name_bare)
+            .to_string();
         let is_struct_ctor = self.struct_fields.contains_key(&func_name_bare)
             || self.struct_fields.contains_key(&constructor_name);
         if is_struct_ctor {
@@ -2821,9 +3103,14 @@ impl AstVisitor for SemanticAnalyzer {
         // inference for declarations such as `var x = Range::new(0, 10);`
         // without requiring a type annotation.
         // Also handle `new T[n]` where T is a generic type parameter.
-        let module_name_bare = module_name.split('<').next().unwrap_or(&module_name).to_string();
-        if func_name == "new" && (self.struct_fields.contains_key(&module_name_bare)
-            || self.current_generic_params.contains(&module_name_bare))
+        let module_name_bare = module_name
+            .split('<')
+            .next()
+            .unwrap_or(&module_name)
+            .to_string();
+        if func_name == "new"
+            && (self.struct_fields.contains_key(&module_name_bare)
+                || self.current_generic_params.contains(&module_name_bare))
         {
             if let Some(args) = node.get_arguments() {
                 for arg in args {
@@ -2831,7 +3118,8 @@ impl AstVisitor for SemanticAnalyzer {
                     self.type_stack.pop();
                 }
             }
-            self.type_stack.push(DataType::Struct(module_name_bare.clone()));
+            self.type_stack
+                .push(DataType::Struct(module_name_bare.clone()));
             return;
         }
 
@@ -2847,7 +3135,8 @@ impl AstVisitor for SemanticAnalyzer {
                 }
             }
             if !self.struct_fields.contains_key("Range") {
-                self.struct_fields.insert("Range".to_string(), HashMap::new());
+                self.struct_fields
+                    .insert("Range".to_string(), HashMap::new());
                 self.env.declare_module("range");
             }
             self.type_stack.push(DataType::Struct("Range".to_string()));
@@ -2857,9 +3146,7 @@ impl AstVisitor for SemanticAnalyzer {
         // Compile-time macros `file()` and `line()` are valid inside #[expand]
         // functions. They are folded to literals by the IR builder; here we
         // only need to give them a type so semantic analysis passes.
-        if (func_name == "file" || func_name == "line")
-            && module_name == self.current_module
-        {
+        if (func_name == "file" || func_name == "line") && module_name == self.current_module {
             if let Some(args) = node.get_arguments() {
                 for arg in args {
                     arg.accept(self);
@@ -2875,7 +3162,9 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         // Resolve module aliases (e.g., "import lib.math as m" → "m" maps to "lib.math")
-        let resolved_module = self.module_aliases.get(&module_name)
+        let resolved_module = self
+            .module_aliases
+            .get(&module_name)
             .cloned()
             .unwrap_or_else(|| module_name.clone());
 
@@ -2883,12 +3172,18 @@ impl AstVisitor for SemanticAnalyzer {
         // name so that `Result<U, E>::Ok` resolves the same way `Result::Ok`
         // does. Variant constructors and methods are registered under the
         // bare type name, never the monomorphised form.
-        let resolved_module_bare = resolved_module.split('<').next().unwrap_or(&resolved_module).to_string();
+        let resolved_module_bare = resolved_module
+            .split('<')
+            .next()
+            .unwrap_or(&resolved_module)
+            .to_string();
 
         // Build lookup name. For method calls (obj.method), resolve via struct type
         let full_name = if resolved_module_bare != self.current_module {
             // Check if resolved_module is a variable (not a module) → method dispatch
-            let is_var = self.env.lookup_symbol(&resolved_module_bare)
+            let is_var = self
+                .env
+                .lookup_symbol(&resolved_module_bare)
                 .map_or(false, |s| s.symbol_type != SymbolType::Module);
             if is_var {
                 // For struct types, look up method in current module
@@ -2932,7 +3227,9 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         // Try qualified lookup, then short-name lookup
-        let sym_data_type = self.env.lookup_symbol(&full_name)
+        let sym_data_type = self
+            .env
+            .lookup_symbol(&full_name)
             .or_else(|| self.env.lookup_symbol(&func_name))
             .map(|s| s.data_type.clone());
 
@@ -3021,16 +3318,19 @@ impl AstVisitor for SemanticAnalyzer {
             let dispatch_struct = if module_name == "self" {
                 self.current_impl_struct.clone()
             } else {
-                self.env.lookup_symbol(&module_name)
-                    .and_then(|s| if let DataType::Struct(ref sn) = s.data_type {
+                self.env.lookup_symbol(&module_name).and_then(|s| {
+                    if let DataType::Struct(ref sn) = s.data_type {
                         Some(sn.clone())
                     } else {
                         None
-                    })
+                    }
+                })
             };
             if let Some(struct_name) = dispatch_struct {
                 let struct_method = format!("{}::{}", struct_name, func_name);
-                let method_type = self.env.lookup_symbol(&struct_method)
+                let method_type = self
+                    .env
+                    .lookup_symbol(&struct_method)
                     .map(|s| s.data_type.clone());
                 if let Some(dt) = method_type {
                     if let Some(args) = node.get_arguments() {
@@ -3043,7 +3343,9 @@ impl AstVisitor for SemanticAnalyzer {
                     return;
                 }
                 // Also try without struct prefix (bare method name) for generic impls
-                let bare_method_type = self.env.lookup_symbol(&func_name)
+                let bare_method_type = self
+                    .env
+                    .lookup_symbol(&func_name)
                     .map(|s| s.data_type.clone());
                 if let Some(dt) = bare_method_type {
                     if let Some(args) = node.get_arguments() {
@@ -3057,7 +3359,9 @@ impl AstVisitor for SemanticAnalyzer {
                 }
                 // Try looking up in current module with struct name prefix (e.g., vec::push)
                 let current_module_method = format!("{}::{}", self.current_module, func_name);
-                let current_method_type = self.env.lookup_symbol(&current_module_method)
+                let current_method_type = self
+                    .env
+                    .lookup_symbol(&current_module_method)
                     .map(|s| s.data_type.clone());
                 if let Some(dt) = current_method_type {
                     if let Some(args) = node.get_arguments() {
@@ -3070,8 +3374,14 @@ impl AstVisitor for SemanticAnalyzer {
                     return;
                 }
                 // Also try with bare struct name (e.g., "Vec" instead of "Vec<T>")
-                let bare_struct_method = format!("{}::{}", struct_name.split('<').next().unwrap_or(&struct_name), func_name);
-                let bare_struct_method_type = self.env.lookup_symbol(&bare_struct_method)
+                let bare_struct_method = format!(
+                    "{}::{}",
+                    struct_name.split('<').next().unwrap_or(&struct_name),
+                    func_name
+                );
+                let bare_struct_method_type = self
+                    .env
+                    .lookup_symbol(&bare_struct_method)
                     .map(|s| s.data_type.clone());
                 if let Some(dt) = bare_struct_method_type {
                     if let Some(args) = node.get_arguments() {
@@ -3100,7 +3410,8 @@ impl AstVisitor for SemanticAnalyzer {
                 // Resolve the concrete return type for top-level generic calls
                 // (e.g. `identity(3.5): float`) by unifying argument types with
                 // the generic signature's parameter types.
-                let resolved = self.resolve_generic_call_type(&full_name, &func_name, &arg_types)
+                let resolved = self
+                    .resolve_generic_call_type(&full_name, &func_name, &arg_types)
                     .unwrap_or(dt.clone());
                 self.type_stack.push(resolved);
             }
@@ -3110,9 +3421,8 @@ impl AstVisitor for SemanticAnalyzer {
                 // type path. Preserve their source-level result types even
                 // when the imported method symbol is not present.
                 let intrinsic_type = match func_name.as_str() {
-                    "connect" | "bind" | "accept" | "set_keepalive"
-                    | "set_read_timeout" | "set_write_timeout"
-                    | "close" | "local_addr" | "remote_addr" => {
+                    "connect" | "bind" | "accept" | "set_keepalive" | "set_read_timeout"
+                    | "set_write_timeout" | "close" | "local_addr" | "remote_addr" => {
                         Some(DataType::Struct("Result".to_string()))
                     }
                     "is_alive" => Some(DataType::Bool),
@@ -3141,10 +3451,18 @@ impl AstVisitor for SemanticAnalyzer {
                 self.env.enter_scope();
 
                 // 处理枚举变体模式
-                if let MatchPattern::EnumVariant { enum_name, variant_name, payload, .. } = &arm.pattern {
+                if let MatchPattern::EnumVariant {
+                    enum_name,
+                    variant_name,
+                    payload,
+                    ..
+                } = &arm.pattern
+                {
                     let resolved_enum_name = if enum_name.is_empty() {
                         match &scrut_type {
-                            DataType::Struct(name) => name.split('<').next().unwrap_or(name).to_string(),
+                            DataType::Struct(name) => {
+                                name.split('<').next().unwrap_or(name).to_string()
+                            }
                             _ => {
                                 self.error("Pattern must match a enum type");
                                 String::new()
@@ -3154,7 +3472,9 @@ impl AstVisitor for SemanticAnalyzer {
                         enum_name.split('<').next().unwrap_or(enum_name).to_string()
                     };
 
-                    if let Some((variant_names, payload_types)) = self.enum_info.get(&resolved_enum_name) {
+                    if let Some((variant_names, payload_types)) =
+                        self.enum_info.get(&resolved_enum_name)
+                    {
                         let mut idx = None;
                         for (i, vname) in variant_names.iter().enumerate() {
                             if vname == variant_name {
@@ -3166,7 +3486,10 @@ impl AstVisitor for SemanticAnalyzer {
                         let idx = match idx {
                             Some(i) => i,
                             None => {
-                                self.error(&format!("Variant '{}' not found in enum '{}'", variant_name, resolved_enum_name));
+                                self.error(&format!(
+                                    "Variant '{}' not found in enum '{}'",
+                                    variant_name, resolved_enum_name
+                                ));
                                 continue;
                             }
                         };
@@ -3175,9 +3498,8 @@ impl AstVisitor for SemanticAnalyzer {
                             if let Some(expected_type) = &payload_types[idx] {
                                 match payload_pattern.as_ref() {
                                     MatchPattern::Variable(var_name) => {
-                                        let binding_type = resolve_enum_payload_type(
-                                            &scrut_type, expected_type
-                                        );
+                                        let binding_type =
+                                            resolve_enum_payload_type(&scrut_type, expected_type);
                                         self.env.declare_variable(var_name, &binding_type, false);
                                         let mut bindings = HashMap::new();
                                         bindings.insert(var_name.clone(), binding_type);
@@ -3188,13 +3510,22 @@ impl AstVisitor for SemanticAnalyzer {
                                     _ => {}
                                 }
                             } else {
-                                self.error(&format!("Variant '{}::{}' does not take a payload", resolved_enum_name, variant_name));
+                                self.error(&format!(
+                                    "Variant '{}::{}' does not take a payload",
+                                    resolved_enum_name, variant_name
+                                ));
                             }
                         } else if payload_types[idx].is_some() {
-                            self.error(&format!("Variant '{}::{}' requires a payload", resolved_enum_name, variant_name));
+                            self.error(&format!(
+                                "Variant '{}::{}' requires a payload",
+                                resolved_enum_name, variant_name
+                            ));
                         }
                     } else if !resolved_enum_name.is_empty() {
-                        self.error(&format!("Unknown enum type '{}' in match pattern", resolved_enum_name));
+                        self.error(&format!(
+                            "Unknown enum type '{}' in match pattern",
+                            resolved_enum_name
+                        ));
                     }
                 }
 
@@ -3205,9 +3536,14 @@ impl AstVisitor for SemanticAnalyzer {
 
                 // 检查 body
                 if let Some(ref body) = arm.body {
-                    let arm_returns = body.as_any().downcast_ref::<Block>()
-                        .map_or(false, |block| block.get_statements().iter()
-                            .any(|stmt| stmt.as_any().downcast_ref::<ReturnStatement>().is_some()));
+                    let arm_returns =
+                        body.as_any()
+                            .downcast_ref::<Block>()
+                            .map_or(false, |block| {
+                                block.get_statements().iter().any(|stmt| {
+                                    stmt.as_any().downcast_ref::<ReturnStatement>().is_some()
+                                })
+                            });
                     body.accept(self);
                     // A `return expr` arm has no expression type on the
                     // stack, but its type is the enclosing function's return
@@ -3234,7 +3570,6 @@ impl AstVisitor for SemanticAnalyzer {
                             {
                                 self.error("Match arms have incompatible types");
                             }
-
                         }
                     }
                 }
@@ -3250,7 +3585,7 @@ impl AstVisitor for SemanticAnalyzer {
             }
         }
     }
-    
+
     fn visit_try_operator(&mut self, node: &TryOperator) {
         // Visit the inner expression to get its type
         if let Some(inner) = node.get_inner() {
@@ -3293,7 +3628,8 @@ impl AstVisitor for SemanticAnalyzer {
         };
 
         let field_names: Vec<String> = struct_fields.keys().cloned().collect();
-        let mut named_assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut named_assigned: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut positional_index = 0;
 
@@ -3302,10 +3638,7 @@ impl AstVisitor for SemanticAnalyzer {
                 StructFieldInit::Named { name, value } => {
                     // Verify field exists
                     if !struct_fields.contains_key(name) {
-                        self.error(&format!(
-                            "Struct '{}' has no field '{}'",
-                            type_name, name
-                        ));
+                        self.error(&format!("Struct '{}' has no field '{}'", type_name, name));
                         self.type_stack.push(DataType::Unknown);
                         return;
                     }
@@ -3326,7 +3659,10 @@ impl AstVisitor for SemanticAnalyzer {
                     let value_type = self.get_current_type();
                     self.type_stack.pop();
 
-                    let expected_type = struct_fields.get(name).cloned().unwrap_or(DataType::Unknown);
+                    let expected_type = struct_fields
+                        .get(name)
+                        .cloned()
+                        .unwrap_or(DataType::Unknown);
                     if expected_type != DataType::Unknown && value_type != DataType::Unknown {
                         self.check_type_compatibility(
                             expected_type,
@@ -3341,7 +3677,9 @@ impl AstVisitor for SemanticAnalyzer {
                     if let Some(id) = value.as_any().downcast_ref::<Identifier>() {
                         let id_name = id.get_name();
                         let full_name = format!("{}::{}", self.current_module, id_name);
-                        if let Some(sym) = self.env.lookup_symbol(&full_name)
+                        if let Some(sym) = self
+                            .env
+                            .lookup_symbol(&full_name)
                             .or_else(|| self.env.lookup_symbol(id_name))
                         {
                             if let DataType::Struct(ref s) = sym.data_type {
@@ -3387,7 +3725,10 @@ impl AstVisitor for SemanticAnalyzer {
                         covered.insert(field_name.clone());
                         positional_index += 1;
 
-                        let expected_type = struct_fields.get(field_name).cloned().unwrap_or(DataType::Unknown);
+                        let expected_type = struct_fields
+                            .get(field_name)
+                            .cloned()
+                            .unwrap_or(DataType::Unknown);
                         if expected_type != DataType::Unknown && value_type != DataType::Unknown {
                             self.check_type_compatibility(
                                 expected_type,
@@ -3432,7 +3773,10 @@ impl AstVisitor for SemanticAnalyzer {
                                 self.type_stack.push(field_type.clone());
                                 return;
                             }
-                            self.error(&format!("Struct '{}' has no field '{}'", struct_name, member));
+                            self.error(&format!(
+                                "Struct '{}' has no field '{}'",
+                                struct_name, member
+                            ));
                             self.type_stack.push(DataType::Unknown);
                             return;
                         }
@@ -3444,7 +3788,9 @@ impl AstVisitor for SemanticAnalyzer {
 
                 // Check module-level lookup via dot (deprecated — use ::)
                 let full_name = format!("{}::{}", obj_name, member);
-                let module_sym_type = self.env.lookup_symbol(&full_name)
+                let module_sym_type = self
+                    .env
+                    .lookup_symbol(&full_name)
                     .map(|s| s.data_type.clone());
                 if let Some(dt) = module_sym_type {
                     self.error(&format!(
@@ -3461,7 +3807,8 @@ impl AstVisitor for SemanticAnalyzer {
                         if let Some(field_type) = fields.get(member) {
                             // _-prefixed fields are private to the struct's impl blocks
                             if member.starts_with('_') {
-                                let in_own_impl = self.current_impl_struct.as_deref() == Some(struct_name.as_str());
+                                let in_own_impl = self.current_impl_struct.as_deref()
+                                    == Some(struct_name.as_str());
                                 if !in_own_impl {
                                     self.error(&format!(
                                         "Private field '{}' of struct '{}' is not accessible here",
@@ -3474,7 +3821,10 @@ impl AstVisitor for SemanticAnalyzer {
                             self.type_stack.push(field_type.clone());
                             return;
                         }
-                        self.error(&format!("Struct '{}' has no field '{}'", struct_name, member));
+                        self.error(&format!(
+                            "Struct '{}' has no field '{}'",
+                            struct_name, member
+                        ));
                         self.type_stack.push(DataType::Unknown);
                         return;
                     }
@@ -3502,7 +3852,8 @@ impl AstVisitor for SemanticAnalyzer {
         }
         // Range literal a..b produces a `Range` struct value, not an Int.
         if !self.struct_fields.contains_key("Range") {
-            self.struct_fields.insert("Range".to_string(), HashMap::new());
+            self.struct_fields
+                .insert("Range".to_string(), HashMap::new());
             self.env.declare_module("Range");
         }
         self.type_stack.push(DataType::Struct("Range".to_string()));
@@ -3520,11 +3871,12 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_pointer_type(&mut self, node: &PointerType) {
         let pointee = node.get_pointee();
         pointee.accept(self);
-        
+
         let inner_type = self.get_current_type();
         self.type_stack.pop();
-        
-        self.type_stack.push(DataType::Pointer(Box::new(inner_type)));
+
+        self.type_stack
+            .push(DataType::Pointer(Box::new(inner_type)));
     }
 
     fn visit_array_type(&mut self, node: &ArrayType) {
@@ -3563,7 +3915,9 @@ impl AstVisitor for SemanticAnalyzer {
                 let id_name = id.get_name();
                 // Check if it's a struct field (e.g., _data in impl block) — type already on stack
                 let is_struct_field = self.current_impl_struct.as_ref().map_or(false, |s| {
-                    self.struct_fields.get(s).map_or(false, |f| f.contains_key(id_name))
+                    self.struct_fields
+                        .get(s)
+                        .map_or(false, |f| f.contains_key(id_name))
                 });
                 if is_struct_field {
                     // Unwrap Nullable if the struct field is a nullable array (T[]? → T)
@@ -3597,7 +3951,82 @@ impl AstVisitor for SemanticAnalyzer {
 // These tests are for macOS and will not be used unless something went wrong with macOS
 #[cfg(test)]
 mod tests {
-    // use super::*;
+    use super::*;
+    use crate::ast_builder::AstBuilder;
+    use crate::lexer::Lexer;
+
+    #[test]
+    fn platform_matches_supported_target_groups() {
+        let mut analyzer = SemanticAnalyzer::new();
+        let attrs = vec![
+            Attribute::new("platform")
+                .with_value("linux")
+                .with_value("unix"),
+        ];
+
+        analyzer.set_target("x86_64-unknown-linux-gnu");
+        assert!(analyzer.platform_matches(&attrs));
+
+        analyzer.set_target("x86_64-pc-windows-msvc");
+        assert!(!analyzer.platform_matches(&attrs));
+
+        let windows = vec![Attribute::new("platform").with_value("windows")];
+        assert!(analyzer.platform_matches(&windows));
+    }
+
+    #[test]
+    fn parses_enhanced_link_attribute_arguments() {
+        let source = r#"
+            #[platform("linux", "unix")]
+            #[header("ffi.h")]
+            #[link(name = "curl", kind = "static", rename = "libcurl.a", version = "4.8", optional = true)]
+            extern "C" {
+                func curl_easy_init(): *void;
+            }
+        "#;
+        let mut builder = AstBuilder::new(Lexer::new(source.to_string()));
+        let program = builder.build().expect("expected AST");
+        assert!(!builder.has_error(), "{:?}", builder.get_error_message());
+        let block = program
+            .get_statements()
+            .iter()
+            .find_map(|stmt| stmt.as_any().downcast_ref::<ExternBlock>())
+            .expect("expected extern block");
+
+        let platform = block
+            .get_attributes()
+            .iter()
+            .find(|attr| attr.name == "platform")
+            .expect("expected platform attribute");
+        assert_eq!(platform.values, ["linux", "unix"]);
+
+        let link = block
+            .get_attributes()
+            .iter()
+            .find(|attr| attr.name == "link")
+            .expect("expected link attribute");
+        assert_eq!(
+            Attribute::get_attr_named(block.get_attributes(), "link", "name"),
+            Some("curl")
+        );
+        assert_eq!(
+            Attribute::get_attr_named(block.get_attributes(), "link", "kind"),
+            Some("static")
+        );
+        assert_eq!(
+            Attribute::get_attr_named(block.get_attributes(), "link", "rename"),
+            Some("libcurl.a")
+        );
+        assert_eq!(
+            Attribute::get_attr_named(block.get_attributes(), "link", "version"),
+            Some("4.8")
+        );
+        assert_eq!(
+            Attribute::get_attr_named(block.get_attributes(), "link", "optional"),
+            Some("true")
+        );
+        assert!(link.values.is_empty());
+    }
 
     // // Regression test for the macOS CI failure on `test_ffi_variadic`:
     // // declarations split across lines (`int\nprintf(...)`) must be detected

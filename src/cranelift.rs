@@ -7,8 +7,8 @@
 // (via a small runtime), string concatenation, and casts.
 use crate::environment::DataType;
 use crate::ir::*;
-use cranelift_codegen::ir::{self, types, AbiParam, BlockArg, Inst, InstBuilder};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::{self, AbiParam, BlockArg, Inst, InstBuilder, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -178,10 +178,7 @@ impl TypeResolver {
             DataType::Float => 8,
             DataType::Bool => 1,
             DataType::Byte => 1,
-            DataType::Int
-            | DataType::Str
-            | DataType::Unknown
-            | DataType::Struct(_) => 8,
+            DataType::Int | DataType::Str | DataType::Unknown | DataType::Struct(_) => 8,
             DataType::Nullable(inner) => self.type_size(inner),
             DataType::Array(_) => 8, // array pointer
             DataType::Pointer(_) => 8,
@@ -220,7 +217,10 @@ impl TypeResolver {
     /// Return (name, type) pairs for all fields of a struct, if it exists.
     pub fn struct_fields(&self, struct_name: &str) -> Option<Vec<(String, DataType)>> {
         self.structs.get(struct_name).map(|s| {
-            s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect()
+            s.fields
+                .iter()
+                .map(|f| (f.name.clone(), f.ty.clone()))
+                .collect()
         })
     }
 
@@ -331,7 +331,10 @@ impl TypeResolver {
                 if op == "+" && (self.contains_str(left) || self.contains_str(right)) {
                     return DataType::Str;
                 }
-                if matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||") {
+                if matches!(
+                    op.as_str(),
+                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+                ) {
                     return DataType::Bool;
                 }
                 let lt = self.infer_type(left);
@@ -430,7 +433,7 @@ impl VariadicStub {
             DataType::Float => "double",
             DataType::Bool => "int",
             DataType::None_ => "void",
-            DataType::Byte => "unsigned char", 
+            DataType::Byte => "unsigned char",
             DataType::Int
             | DataType::Str
             | DataType::Unknown
@@ -539,16 +542,19 @@ impl CraneliftBackend {
                     self.constructors.insert(imp.struct_name.clone(), true);
                 }
                 // Register method return types in the TypeResolver.
-                self.type_resolver.register_function(&m.name, m.return_type.clone());
+                self.type_resolver
+                    .register_function(&m.name, m.return_type.clone());
                 // Also register with struct prefix for operator desugaring
                 let prefixed = format!("{}::{}", imp.struct_name, m.name);
-                self.type_resolver.register_function(&prefixed, m.return_type.clone());
+                self.type_resolver
+                    .register_function(&prefixed, m.return_type.clone());
             }
         }
         // Register user function return types.
         for f in &ir.functions {
             if !f.is_main {
-                self.type_resolver.register_function(&f.name, f.return_type.clone());
+                self.type_resolver
+                    .register_function(&f.name, f.return_type.clone());
             }
             // Collect variadic extern "C" functions — these use per-arity stubs
             // instead of a single fixed signature.
@@ -1040,7 +1046,11 @@ impl CraneliftBackend {
         self.func_ids.insert(name.to_string(), id);
     }
 
-    fn declare_user_function(&mut self, f: &IRFunction, occurrence_idx: usize) -> Result<(), String> {
+    fn declare_user_function(
+        &mut self,
+        f: &IRFunction,
+        occurrence_idx: usize,
+    ) -> Result<(), String> {
         let is_extern = f.attributes.contains(&"extern".to_string());
         let arity = f.params.len();
         // Variadic extern "C" functions are never declared with a fixed
@@ -1048,7 +1058,8 @@ impl CraneliftBackend {
         // We still register the name in `func_symbols` so call resolution
         // can find it, mapping it to the bare name as a sentinel.
         if is_extern && f.is_variadic {
-            self.func_symbols.insert((f.name.clone(), arity), f.name.clone());
+            self.func_symbols
+                .insert((f.name.clone(), arity), f.name.clone());
             return Ok(());
         }
 
@@ -1078,17 +1089,13 @@ impl CraneliftBackend {
         let sym = if is_extern {
             match f.attributes.iter().find_map(|a| a.strip_prefix("extern:")) {
                 Some(explicit) => explicit.to_string(),
-                None => f
-                    .name
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&f.name)
-                    .to_string(),
+                None => f.name.rsplit("::").next().unwrap_or(&f.name).to_string(),
             }
         } else {
             Self::func_symbol(&f.name, arity)
         };
-        self.func_symbols.insert((f.name.clone(), arity), sym.clone());
+        self.func_symbols
+            .insert((f.name.clone(), arity), sym.clone());
 
         // Extern functions may already be declared as runtime imports
         // (e.g., gobol_print is both in declare_runtime_functions and in
@@ -1110,7 +1117,8 @@ impl CraneliftBackend {
                 if !self.func_ids.contains_key(&candidate) {
                     // Point (name, arity) at the most recently declared
                     // overload so call resolution still finds a symbol.
-                    self.func_symbols.insert((f.name.clone(), arity), candidate.clone());
+                    self.func_symbols
+                        .insert((f.name.clone(), arity), candidate.clone());
                     break candidate;
                 }
                 idx += 1;
@@ -1123,21 +1131,25 @@ impl CraneliftBackend {
         // triple, so the compile pass can compile this function's body under
         // the exact same linker symbol.
         if !is_extern {
-            self.func_overload_symbols.insert(
-                (f.name.clone(), arity, occurrence_idx),
-                sym.clone(),
-            );
+            self.func_overload_symbols
+                .insert((f.name.clone(), arity, occurrence_idx), sym.clone());
         }
 
         let mut sig = self.module.make_signature();
         for p in &f.params {
-            sig.params.push(AbiParam::new(self.data_type_to_clif(&p.ty)?));
+            sig.params
+                .push(AbiParam::new(self.data_type_to_clif(&p.ty)?));
         }
         // void functions have no return slot
         if !matches!(f.return_type, DataType::None_) {
-            sig.returns.push(AbiParam::new(self.data_type_to_clif(&f.return_type)?));
+            sig.returns
+                .push(AbiParam::new(self.data_type_to_clif(&f.return_type)?));
         }
-        let linkage = if is_extern { Linkage::Import } else { Linkage::Export };
+        let linkage = if is_extern {
+            Linkage::Import
+        } else {
+            Linkage::Export
+        };
         let id = self
             .module
             .declare_function(&sym, linkage, &sig)
@@ -1166,7 +1178,11 @@ impl CraneliftBackend {
 
     // ==================== function compilation ====================
 
-    fn compile_function(&mut self, ir_func: &IRFunction, occurrence_idx: usize) -> Result<(), String> {
+    fn compile_function(
+        &mut self,
+        ir_func: &IRFunction,
+        occurrence_idx: usize,
+    ) -> Result<(), String> {
         // Intrinsic functions (bodyless declarations backed by the C runtime)
         // are dispatched directly at call sites — never compile a body for them.
         if ir_func.attributes.iter().any(|a| a == "intrinsic") {
@@ -1189,15 +1205,24 @@ impl CraneliftBackend {
             .get(&(ir_func.name.clone(), arity, occurrence_idx))
             .cloned()
             .unwrap_or_else(|| Self::func_symbol(&ir_func.name, arity));
-        let func_id = *self.func_ids.get(&sym).ok_or_else(|| format!("missing func {}", sym))?;
+        let func_id = *self
+            .func_ids
+            .get(&sym)
+            .ok_or_else(|| format!("missing func {}", sym))?;
 
         let mut ctx = self.module.make_context();
         // rebuild signature (matches declare_user_function)
         for p in &ir_func.params {
-            ctx.func.signature.params.push(AbiParam::new(self.data_type_to_clif(&p.ty)?));
+            ctx.func
+                .signature
+                .params
+                .push(AbiParam::new(self.data_type_to_clif(&p.ty)?));
         }
         if !matches!(ir_func.return_type, DataType::None_) {
-            ctx.func.signature.returns.push(AbiParam::new(self.data_type_to_clif(&ir_func.return_type)?));
+            ctx.func
+                .signature
+                .returns
+                .push(AbiParam::new(self.data_type_to_clif(&ir_func.return_type)?));
         }
 
         {
@@ -1227,16 +1252,16 @@ impl CraneliftBackend {
                 // and interrupt handlers that must not get a synthesized
                 // return).
                 let current_block = bcx.current_block();
-                let last_inst = current_block
-                    .and_then(|block| bcx.func.layout.last_inst(block))
-                    ;
-                let current_terminated = last_inst
-                    .map_or(false, |inst| {
-                        let opcode = bcx.func.dfg.insts[inst].opcode();
-                        opcode.is_terminator() || format!("{:?}", opcode).contains("return")
-                    });
-                if !self.diverged && !current_terminated
-                    && !bcx.is_unreachable() && !self.current_func_has_attr("naked") {
+                let last_inst = current_block.and_then(|block| bcx.func.layout.last_inst(block));
+                let current_terminated = last_inst.map_or(false, |inst| {
+                    let opcode = bcx.func.dfg.insts[inst].opcode();
+                    opcode.is_terminator() || format!("{:?}", opcode).contains("return")
+                });
+                if !self.diverged
+                    && !current_terminated
+                    && !bcx.is_unreachable()
+                    && !self.current_func_has_attr("naked")
+                {
                     self.emit_default_return(&mut bcx);
                 }
                 bcx.seal_all_blocks();
@@ -1264,7 +1289,8 @@ impl CraneliftBackend {
         self.set_current_func_attributes(&ir_func.attributes);
         // main has no parameters in IR; give it a C-friendly i64 return.
         let sym = "gbl_main".to_string();
-        self.func_symbols.insert(("main".to_string(), 0), sym.clone());
+        self.func_symbols
+            .insert(("main".to_string(), 0), sym.clone());
         let mut sig = self.module.make_signature();
         sig.returns.push(AbiParam::new(types::I64));
         let func_id = self
@@ -1298,7 +1324,9 @@ impl CraneliftBackend {
                 let current_block = bcx.current_block();
                 let current_terminated = current_block
                     .and_then(|block| bcx.func.layout.last_inst(block))
-                    .map_or(false, |inst| bcx.func.dfg.insts[inst].opcode().is_terminator());
+                    .map_or(false, |inst| {
+                        bcx.func.dfg.insts[inst].opcode().is_terminator()
+                    });
                 if current_block.is_some() && !current_terminated {
                     let zero = bcx.ins().iconst(types::I64, 0);
                     bcx.ins().return_(&[zero]);
@@ -1377,7 +1405,9 @@ impl CraneliftBackend {
             let current_terminated = bcx
                 .current_block()
                 .and_then(|block| bcx.func.layout.last_inst(block))
-                .map_or(false, |inst| bcx.func.dfg.insts[inst].opcode().is_terminator());
+                .map_or(false, |inst| {
+                    bcx.func.dfg.insts[inst].opcode().is_terminator()
+                });
             if current_terminated {
                 break;
             }
@@ -1390,7 +1420,8 @@ impl CraneliftBackend {
         match stmt {
             IRStmt::Declaration { name, ty, init } => {
                 let resolved = if *ty == DataType::None_ || *ty == DataType::Unknown {
-                    let inferred = init.as_ref()
+                    let inferred = init
+                        .as_ref()
                         .map(|e| self.type_resolver.infer_type(e))
                         .unwrap_or(DataType::Int);
                     // Avoid types::INVALID from DataType::None_
@@ -1422,19 +1453,30 @@ impl CraneliftBackend {
             }
             IRStmt::Return(Some(e)) => {
                 let v = self.translate_expr(bcx, e)?;
-                let v = self.coerce(bcx, v, &self.type_resolver.infer_type(e), &self.return_type)?;
-                let ret_ty = self.data_type_to_clif(&self.return_type).unwrap_or(types::I64);
+                let v =
+                    self.coerce(bcx, v, &self.type_resolver.infer_type(e), &self.return_type)?;
+                let ret_ty = self
+                    .data_type_to_clif(&self.return_type)
+                    .unwrap_or(types::I64);
                 let v = self.bitcast_to(bcx, v, ret_ty);
                 bcx.ins().return_(&[v]);
                 self.diverged = true;
             }
-            IRStmt::If { cond, then_block, else_block } => {
+            IRStmt::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
                 self.translate_if(bcx, cond, then_block, else_block.as_ref())?;
             }
             IRStmt::While { cond, body } => {
                 self.translate_while(bcx, cond, body)?;
             }
-            IRStmt::For { vars, iterable, body } => {
+            IRStmt::For {
+                vars,
+                iterable,
+                body,
+            } => {
                 self.translate_for(bcx, vars, iterable, body)?;
             }
             IRStmt::Break => {
@@ -1461,7 +1503,12 @@ impl CraneliftBackend {
             IRStmt::Call { func, args, .. } => {
                 self.translate_call(bcx, func, args)?;
             }
-            IRStmt::MethodCall { object, method, args, .. } => {
+            IRStmt::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 self.translate_method_call(bcx, object, method, args)?;
             }
         }
@@ -1610,7 +1657,11 @@ impl CraneliftBackend {
         };
 
         let loop_var_name = if vars.len() >= 2 { &vars[1] } else { &vars[0] };
-        let idx_var_name = if vars.len() >= 2 { Some(vars[0].as_str()) } else { None };
+        let idx_var_name = if vars.len() >= 2 {
+            Some(vars[0].as_str())
+        } else {
+            None
+        };
 
         let iv = self.declare_variable(bcx, loop_var_name, types::I64, &DataType::Int);
         let idx_var = match idx_var_name {
@@ -1675,10 +1726,19 @@ impl CraneliftBackend {
     ) -> Result<(), String> {
         let arr_ptr = self.translate_expr(bcx, iterable)?;
         let val_name = if vars.len() >= 2 { &vars[1] } else { &vars[0] };
-        let idx_name = if vars.len() >= 2 { Some(vars[0].as_str()) } else { None };
+        let idx_name = if vars.len() >= 2 {
+            Some(vars[0].as_str())
+        } else {
+            None
+        };
 
         let val_var = self.declare_variable(bcx, val_name, types::I64, &DataType::Int);
-        let idx_var = self.declare_variable(bcx, &format!("__idx_{}", val_name), types::I64, &DataType::Int);
+        let idx_var = self.declare_variable(
+            bcx,
+            &format!("__idx_{}", val_name),
+            types::I64,
+            &DataType::Int,
+        );
         let user_idx_var = match idx_name {
             Some(n) => Some(self.declare_variable(bcx, n, types::I64, &DataType::Int)),
             None => None,
@@ -1751,7 +1811,12 @@ impl CraneliftBackend {
         let str_ptr = self.intern_string(bcx, s);
         let ch_name = &vars[0];
         let ch_var = self.declare_variable(bcx, ch_name, types::I64, &DataType::Str);
-        let idx_var = self.declare_variable(bcx, &format!("__idx_{}", ch_name), types::I64, &DataType::Int);
+        let idx_var = self.declare_variable(
+            bcx,
+            &format!("__idx_{}", ch_name),
+            types::I64,
+            &DataType::Int,
+        );
         let zero = bcx.ins().iconst(types::I64, 0);
         let empty_str = self.intern_string(bcx, "");
         bcx.def_var(ch_var, empty_str);
@@ -1829,7 +1894,11 @@ impl CraneliftBackend {
             let arr_ty = self.type_resolver.infer_type(array);
 
             // Check if this is a nested array assignment (e.g., arr[2][2] = value)
-            if let IRExpr::ArrayIndex { array: inner_array, index: inner_idx } = array.as_ref() {
+            if let IRExpr::ArrayIndex {
+                array: inner_array,
+                index: inner_idx,
+            } = array.as_ref()
+            {
                 // 2D array assignment: get inner array, then store element
                 let base = self.translate_expr(bcx, inner_array)?;
                 let i1 = self.translate_expr(bcx, inner_idx)?;
@@ -1926,20 +1995,25 @@ impl CraneliftBackend {
                     }
                 }
             }
-            IRExpr::Binary { op, left, right } => {
-                self.translate_binary(bcx, op, left, right)
-            }
+            IRExpr::Binary { op, left, right } => self.translate_binary(bcx, op, left, right),
             IRExpr::Unary { op, operand } => self.translate_unary(bcx, op, operand),
             IRExpr::Call { func, args, .. } => self.translate_call(bcx, func, args),
-            IRExpr::MethodCall { object, method, args, .. } => {
-                self.translate_method_call(bcx, object, method, args)
-            }
+            IRExpr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => self.translate_method_call(bcx, object, method, args),
             IRExpr::MemberAccess { object, member } => {
                 self.translate_member_access(bcx, object, member)
             }
             IRExpr::ArrayIndex { array, index } => {
                 // Check if this is a nested array access (e.g., arr[2][2])
-                if let IRExpr::ArrayIndex { array: inner_array, index: inner_idx } = array.as_ref() {
+                if let IRExpr::ArrayIndex {
+                    array: inner_array,
+                    index: inner_idx,
+                } = array.as_ref()
+                {
                     // 2D array access: first get the inner array, then get the element
                     let base = self.translate_expr(bcx, inner_array)?;
                     let i1 = self.translate_expr(bcx, inner_idx)?;
@@ -2085,7 +2159,8 @@ impl CraneliftBackend {
         // Right-hand side: evaluate and jump to the merge block with its result.
         bcx.switch_to_block(rhs_b);
         let r_val = self.translate_expr(bcx, right)?;
-        let r_arg = BlockArg::Value(self.to_bool(bcx, r_val, &self.type_resolver.infer_type(right)));
+        let r_arg =
+            BlockArg::Value(self.to_bool(bcx, r_val, &self.type_resolver.infer_type(right)));
         bcx.ins().jump(end_b, &[r_arg]);
 
         bcx.seal_block(end_b);
@@ -2227,7 +2302,10 @@ impl CraneliftBackend {
                 }
             }
         }
-        Err(format!("cannot take address of unknown function '{}'", name))
+        Err(format!(
+            "cannot take address of unknown function '{}'",
+            name
+        ))
     }
 
     /// Translate an indirect call through a function pointer value.
@@ -2318,7 +2396,10 @@ impl CraneliftBackend {
         };
 
         let arity = arg_vals.len();
-        let param_types: Vec<DataType> = args.iter().map(|a| self.type_resolver.infer_type(a)).collect();
+        let param_types: Vec<DataType> = args
+            .iter()
+            .map(|a| self.type_resolver.infer_type(a))
+            .collect();
         let return_type = self.type_resolver.func_return_type(&canon_name);
 
         // Deduplicate: reuse an existing stub for the same (name, arity).
@@ -2329,9 +2410,10 @@ impl CraneliftBackend {
             return_type: return_type.clone(),
         };
         let stub_sym = stub.symbol_name();
-        let already = self.variadic_stubs.iter().any(|s| {
-            s.func_name == stub.func_name && s.arity == stub.arity
-        });
+        let already = self
+            .variadic_stubs
+            .iter()
+            .any(|s| s.func_name == stub.func_name && s.arity == stub.arity);
         if !already {
             self.variadic_stubs.push(stub);
         }
@@ -2342,7 +2424,8 @@ impl CraneliftBackend {
             sig.params.push(AbiParam::new(self.data_type_to_clif(dt)?));
         }
         if !matches!(return_type, DataType::None_) {
-            sig.returns.push(AbiParam::new(self.data_type_to_clif(&return_type)?));
+            sig.returns
+                .push(AbiParam::new(self.data_type_to_clif(&return_type)?));
         }
         self.declare_import(&stub_sym, sig);
 
@@ -2617,10 +2700,18 @@ impl CraneliftBackend {
             if let Some(rt) = self.struct_intrinsic_runtime(sname, method) {
                 let obj_val = self.translate_expr(bcx, object)?;
                 let arg_vals = self.translate_args(bcx, args)?;
-                let ret_ty = self.type_resolver.func_return_type(&format!("{}::{}", sname, method));
+                let ret_ty = self
+                    .type_resolver
+                    .func_return_type(&format!("{}::{}", sname, method));
                 if sname == "TcpStream" || sname == "TcpListener" {
                     if let Some(kind) = self.net_intrinsic_kind(method, &ret_ty) {
-                        return self.translate_net_intrinsic(bcx, rt, kind, Some(obj_val), &arg_vals);
+                        return self.translate_net_intrinsic(
+                            bcx,
+                            rt,
+                            kind,
+                            Some(obj_val),
+                            &arg_vals,
+                        );
                     }
                 }
                 let mut vals = vec![obj_val];
@@ -2644,7 +2735,11 @@ impl CraneliftBackend {
                 if let Some(fid) = self.func_ids.get(sym) {
                     let fref = self.module.declare_func_in_func(*fid, &mut bcx.func);
                     let call = bcx.ins().call(fref, &vals);
-                    return Ok(self.call_result(bcx, call, self.type_resolver.func_return_type(&full)));
+                    return Ok(self.call_result(
+                        bcx,
+                        call,
+                        self.type_resolver.func_return_type(&full),
+                    ));
                 }
             }
         }
@@ -2964,7 +3059,10 @@ impl CraneliftBackend {
             for (field_name, _field_ty) in &off {
                 if let Some((_, e)) = fields.iter().find(|(n, _)| n == field_name) {
                     let v = self.translate_expr(bcx, e)?;
-                    let offset = self.type_resolver.field_offset(name, field_name).unwrap_or(0);
+                    let offset = self
+                        .type_resolver
+                        .field_offset(name, field_name)
+                        .unwrap_or(0);
                     let addr = self.field_addr(bcx, ptr, offset);
                     self.call_runtime(bcx, "gobol_mem_store", &[addr, v]);
                 }
@@ -2994,15 +3092,9 @@ impl CraneliftBackend {
         Ok(match (&src, target) {
             (DataType::Int, DataType::Float) => bcx.ins().fcvt_from_sint(types::F64, v),
             (DataType::Float, DataType::Int) => bcx.ins().fcvt_to_sint(types::I64, v),
-            (DataType::Int, DataType::Str) => {
-                self.call_runtime(bcx, "gobol_str_int", &[v])
-            }
-            (DataType::Float, DataType::Str) => {
-                self.call_runtime(bcx, "gobol_str_float", &[v])
-            }
-            (DataType::Bool, DataType::Str) => {
-                self.call_runtime(bcx, "gobol_str_bool", &[v])
-            }
+            (DataType::Int, DataType::Str) => self.call_runtime(bcx, "gobol_str_int", &[v]),
+            (DataType::Float, DataType::Str) => self.call_runtime(bcx, "gobol_str_float", &[v]),
+            (DataType::Bool, DataType::Str) => self.call_runtime(bcx, "gobol_str_bool", &[v]),
             (DataType::Str, DataType::Int) => {
                 // parse via runtime not available; return 0
                 let _ = v;
@@ -3037,7 +3129,9 @@ impl CraneliftBackend {
         match rt {
             "gobol_print" | "gobol_println" => {
                 if let Some(arg) = args.first() {
-                    let s = self.to_string_value(bcx, arg).unwrap_or_else(|_| bcx.ins().iconst(types::I64, 0));
+                    let s = self
+                        .to_string_value(bcx, arg)
+                        .unwrap_or_else(|_| bcx.ins().iconst(types::I64, 0));
                     self.call_runtime(bcx, rt, &[s]);
                 }
                 bcx.ins().iconst(types::I64, 0)
@@ -3084,12 +3178,18 @@ impl CraneliftBackend {
 
     #[allow(dead_code)]
     fn func_returns_void(&self, name: &str) -> bool {
-        matches!(name,
-            "gobol_print" | "gobol_println" | "gobol_eprint" | "gobol_eprintln"
-            | "gobol_array_add" | "gobol_array_set"
-            | "gobol_mem_store"
-            | "gobol_fs_close" | "gobol_tcp_close"
-            | "gobol_chan_destroy"
+        matches!(
+            name,
+            "gobol_print"
+                | "gobol_println"
+                | "gobol_eprint"
+                | "gobol_eprintln"
+                | "gobol_array_add"
+                | "gobol_array_set"
+                | "gobol_mem_store"
+                | "gobol_fs_close"
+                | "gobol_tcp_close"
+                | "gobol_chan_destroy"
         )
     }
 
@@ -3149,7 +3249,10 @@ impl CraneliftBackend {
             // writable=true so the slot lands in the writable `.data` segment —
             // globals are mutated at runtime (unlike string literals, which are
             // stored in read-only data and never written).
-            let data_id = match self.module.declare_data(&data_name, Linkage::Local, true, false) {
+            let data_id = match self
+                .module
+                .declare_data(&data_name, Linkage::Local, true, false)
+            {
                 Ok(id) => id,
                 Err(e) => {
                     eprintln!("declare global data failed: {}", e);
@@ -3163,7 +3266,8 @@ impl CraneliftBackend {
                 eprintln!("define global data failed: {}", e);
                 continue;
             }
-            self.global_vars.insert(name.clone(), (data_id, ty.clone(), init.clone()));
+            self.global_vars
+                .insert(name.clone(), (data_id, ty.clone(), init.clone()));
         }
     }
 
@@ -3172,7 +3276,9 @@ impl CraneliftBackend {
         let data_id = self.global_vars.get(name).map(|g| g.0).unwrap_or_else(|| {
             // Shouldn't happen: force a dummy slot so compilation continues.
             eprintln!("internal: missing global slot for {}", name);
-            let dummy = self.module.declare_data("gbl_missing", Linkage::Local, false, false)
+            let dummy = self
+                .module
+                .declare_data("gbl_missing", Linkage::Local, false, false)
                 .map_err(|e| eprintln!("{}", e))
                 .unwrap();
             dummy
@@ -3182,7 +3288,10 @@ impl CraneliftBackend {
     }
 
     fn global_type(&self, name: &str) -> DataType {
-        self.global_vars.get(name).map(|g| g.1.clone()).unwrap_or(DataType::Int)
+        self.global_vars
+            .get(name)
+            .map(|g| g.1.clone())
+            .unwrap_or(DataType::Int)
     }
 
     /// Read a global variable, producing a value of its declared type.
@@ -3248,12 +3357,7 @@ impl CraneliftBackend {
         })
     }
 
-    fn to_bool(
-        &self,
-        bcx: &mut FunctionBuilder,
-        v: ir::Value,
-        ty: &DataType,
-    ) -> ir::Value {
+    fn to_bool(&self, bcx: &mut FunctionBuilder, v: ir::Value, ty: &DataType) -> ir::Value {
         if matches!(ty, DataType::Bool) {
             return v;
         }
@@ -3304,7 +3408,7 @@ impl CraneliftBackend {
         match ty {
             DataType::Float => bcx.ins().f64const(0.0),
             DataType::Bool => bcx.ins().iconst(types::I8, 0),
-            DataType::Byte => bcx.ins().iconst(types::I8, 0),  
+            DataType::Byte => bcx.ins().iconst(types::I8, 0),
             DataType::Unknown => {
                 // array: allocate an empty one
                 let fid = self.func_ids["gobol_array_new"];
@@ -3348,12 +3452,7 @@ impl CraneliftBackend {
 
     // ==================== struct helpers ====================
 
-    fn field_addr(
-        &self,
-        bcx: &mut FunctionBuilder,
-        base: ir::Value,
-        offset: i64,
-    ) -> ir::Value {
+    fn field_addr(&self, bcx: &mut FunctionBuilder, base: ir::Value, offset: i64) -> ir::Value {
         if offset == 0 {
             return base;
         }
@@ -3371,7 +3470,7 @@ impl CraneliftBackend {
             DataType::Str => types::I64,
             DataType::Byte => types::I8,
             DataType::None_ => types::INVALID,
-            DataType::Unknown => types::I64, // array pointer
+            DataType::Unknown => types::I64,   // array pointer
             DataType::Struct(_) => types::I64, // struct pointer
             DataType::Nullable(inner) => self.data_type_to_clif(inner)?,
             DataType::Array(_) => types::I64, // array pointer
@@ -3487,7 +3586,11 @@ impl CraneliftBackend {
             .map_err(|e| format!("Object emit failed: {}", e))?;
 
         // Object file extension differs per platform (MSVC uses .obj).
-        let obj_ext = if target_is_msvc(&opts.target) { "obj" } else { "o" };
+        let obj_ext = if target_is_msvc(&opts.target) {
+            "obj"
+        } else {
+            "o"
+        };
         let obj_path = format!("{}.{}", output_path, obj_ext);
         std::fs::write(&obj_path, &obj_bytes)
             .map_err(|e| format!("Failed to write object file: {}", e))?;
@@ -3533,9 +3636,7 @@ impl CraneliftBackend {
                 has_stubs,
                 &stubs_src_path,
             ),
-            LinkerKind::BareLd => {
-                Self::link_bare_metal(&linker, &obj_path, &opts, &final_output)
-            }
+            LinkerKind::BareLd => Self::link_bare_metal(&linker, &obj_path, &opts, &final_output),
         };
 
         // The object file (and the C stubs source) are deliberately KEPT:
@@ -3567,6 +3668,19 @@ impl CraneliftBackend {
             cmd.arg(stubs_src_path);
         }
         cmd.args(["-o", final_output]);
+        for spec in &opts.link_specs {
+            if spec.optional && !optional_link_available(spec, &opts.target) {
+                continue;
+            }
+            for arg in link_spec_args(spec, &opts.target, false) {
+                cmd.arg(arg);
+            }
+        }
+        for spec in &opts.link_specs {
+            for arg in link_spec_args(spec, &opts.target, true) {
+                cmd.arg(arg);
+            }
+        }
         for lib in &opts.link_libs {
             cmd.arg(format!("-l{}", lib));
         }
@@ -3579,8 +3693,12 @@ impl CraneliftBackend {
         // MinGW: the C runtime's `net` module reference Winsock transitively.
         // Link `ws2_32` whenever the C runtime is present (dedup with any
         // `--link-arg ws2_32` already injected by `grape`).
-        if opts.runtime_c_path.is_some() && target_is_windows(&opts.target)
-            && !opts.link_libs.iter().any(|l| l.eq_ignore_ascii_case("ws2_32"))
+        if opts.runtime_c_path.is_some()
+            && target_is_windows(&opts.target)
+            && !opts
+                .link_libs
+                .iter()
+                .any(|l| l.eq_ignore_ascii_case("ws2_32"))
         {
             cmd.arg("-lws2_32");
         }
@@ -3594,7 +3712,9 @@ impl CraneliftBackend {
             let stdout = String::from_utf8_lossy(&out.stdout);
             return Err(format!(
                 "Linking failed with exit code {:?}\n--- linker stdout ---\n{}\n--- linker stderr ---\n{}",
-                out.status.code(), stdout, stderr
+                out.status.code(),
+                stdout,
+                stderr
             ));
         }
         Ok(())
@@ -3630,9 +3750,7 @@ impl CraneliftBackend {
         // The cc-discovered MSVC C compiler (cl.exe). We deliberately do NOT
         // reach for clang-cl: a plain MSVC Developer Prompt / VS install may
         // not ship it. clang-cl is optional and unreliable to assume.
-        let c_compiler_candidates: Vec<std::path::PathBuf> = {
-            vec![tool.compiler.clone()]
-        };
+        let c_compiler_candidates: Vec<std::path::PathBuf> = { vec![tool.compiler.clone()] };
 
         // Pre-link check: verify the Cranelift-produced object exists.
         if !std::path::Path::new(obj_path).exists() {
@@ -3694,12 +3812,15 @@ impl CraneliftBackend {
             .map_err(|e| format!("Failed to get current dir: {}", e))?
             .join("target")
             .join("gobol_build");
-        std::fs::create_dir_all(&build_dir)
-            .map_err(|e| format!("Failed to create build dir '{}': {}", build_dir.display(), e))?;
+        std::fs::create_dir_all(&build_dir).map_err(|e| {
+            format!(
+                "Failed to create build dir '{}': {}",
+                build_dir.display(),
+                e
+            )
+        })?;
         let pid = std::process::id();
-        let rt_name = |suffix: &str| {
-            build_dir.join(format!("runtime_{}_{}.obj", pid, suffix))
-        };
+        let rt_name = |suffix: &str| build_dir.join(format!("runtime_{}_{}.obj", pid, suffix));
         let stub_name = || build_dir.join(format!("stubs_{}.obj", pid));
 
         // Compile a C source to an .obj in `build_dir` and force/remap it to
@@ -3837,6 +3958,17 @@ impl CraneliftBackend {
                 cmd.arg("/SUBSYSTEM:CONSOLE");
             }
         }
+        for spec in &opts.link_specs {
+            if spec.optional && !optional_link_available(spec, &opts.target) {
+                continue;
+            }
+            if spec.optional && !optional_link_available(spec, &opts.target) {
+                continue;
+            }
+            for arg in link_spec_args(spec, &opts.target, false) {
+                cmd.arg(arg);
+            }
+        }
         for lib in &opts.link_libs {
             cmd.arg(format!("{}.lib", lib));
         }
@@ -3847,8 +3979,12 @@ impl CraneliftBackend {
         // etc. (≈12 symbols). Link it whenever the C runtime is present,
         // dedup with any `--link-arg ws2_32` already injected by grape —
         // same guard as the MinGW path in `link_cc_driver`.
-        if opts.runtime_c_path.is_some() && target_is_windows(&opts.target)
-            && !opts.link_libs.iter().any(|l| l.eq_ignore_ascii_case("ws2_32"))
+        if opts.runtime_c_path.is_some()
+            && target_is_windows(&opts.target)
+            && !opts
+                .link_libs
+                .iter()
+                .any(|l| l.eq_ignore_ascii_case("ws2_32"))
         {
             cmd.arg("ws2_32.lib");
         }
@@ -3858,7 +3994,11 @@ impl CraneliftBackend {
             if libroot.exists() {
                 cmd.arg(format!("/LIBPATH:{}", libroot.display()));
             }
-            let rustlib = sysroot.join("lib").join("rustlib").join(&opts.target).join("lib");
+            let rustlib = sysroot
+                .join("lib")
+                .join("rustlib")
+                .join(&opts.target)
+                .join("lib");
             if rustlib.exists() {
                 cmd.arg(format!("/LIBPATH:{}", rustlib.display()));
             }
@@ -3901,7 +4041,9 @@ impl CraneliftBackend {
             let stdout = String::from_utf8_lossy(&out.stdout);
             return Err(format!(
                 "Linking failed with exit code {:?}\n--- link.exe stdout ---\n{}\n--- link.exe stderr ---\n{}",
-                out.status.code(), stdout, stderr
+                out.status.code(),
+                stdout,
+                stderr
             ));
         }
         Ok(())
@@ -3965,6 +4107,8 @@ pub struct LinkOptions {
     pub runtime_c_path: Option<String>,
     /// Extra libraries to link (from `extern "C"` blocks).
     pub link_libs: Vec<String>,
+    /// Structured libraries declared with `#[link(...)]`.
+    pub link_specs: Vec<LinkSpec>,
     /// Custom linker script (`-T`/`/LIBPATH`-less bare-metal path). Used with
     /// `grape.toml`'s `build.link_script`.
     pub link_script: Option<String>,
@@ -3974,6 +4118,15 @@ pub struct LinkOptions {
     pub entry_point: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkSpec {
+    pub name: String,
+    pub kind: String,
+    pub rename: Option<String>,
+    pub version: Option<String>,
+    pub optional: bool,
+}
+
 impl LinkOptions {
     /// Defaults for a hosted build on the current host platform.
     pub fn host(runtime_c_path: impl Into<String>, link_libs: Vec<String>) -> Self {
@@ -3981,10 +4134,66 @@ impl LinkOptions {
             target: host_target_string(),
             runtime_c_path: Some(runtime_c_path.into()),
             link_libs,
+            link_specs: Vec::new(),
             link_script: None,
             entry_point: None,
         }
     }
+}
+
+fn link_spec_args(spec: &LinkSpec, target: &str, msvc: bool) -> Vec<String> {
+    let name = spec.rename.as_deref().unwrap_or(&spec.name);
+    if msvc {
+        return vec![if name.to_ascii_lowercase().ends_with(".lib") {
+            name.to_string()
+        } else {
+            format!("{}.lib", name)
+        }];
+    }
+    if spec.kind == "framework" {
+        return vec!["-framework".to_string(), spec.name.clone()];
+    }
+    let mut library = name.to_string();
+    if target.contains("darwin") && library.starts_with("lib") {
+        library = library[3..].to_string();
+    }
+    if spec.rename.is_none() {
+        if let Some(version) = &spec.version {
+            if target.contains("darwin") {
+                library.push('.');
+                library.push_str(version.split('.').next().unwrap_or(version));
+            } else if !target.contains("windows") {
+                library.push('.');
+                library.push_str(version);
+            }
+        }
+    }
+    if spec.kind == "static" && library.ends_with(".a") {
+        return vec![format!("-l:{}", library)];
+    }
+    vec![format!("-l{}", library)]
+}
+
+fn optional_link_available(spec: &LinkSpec, target: &str) -> bool {
+    let requested = spec.rename.as_deref().unwrap_or(&spec.name);
+    let mut candidates = Vec::new();
+    if std::path::Path::new(requested).is_absolute() {
+        candidates.push(std::path::PathBuf::from(requested));
+    }
+    for variable in ["LIBRARY_PATH", "LIB", "LD_LIBRARY_PATH"] {
+        if let Ok(paths) = std::env::var(variable) {
+            candidates.extend(std::env::split_paths(&paths).map(|path| path.join(requested)));
+        }
+    }
+    if target.contains("windows") {
+        candidates.push(std::path::PathBuf::from(format!("{}.lib", requested)));
+    } else {
+        candidates.push(std::path::PathBuf::from(format!("lib{}.so", requested)));
+        candidates.push(std::path::PathBuf::from(format!("lib{}.dylib", requested)));
+        candidates.push(std::path::PathBuf::from(format!("lib{}.a", requested)));
+        candidates.push(std::path::PathBuf::from(requested));
+    }
+    candidates.iter().any(|path| path.is_file())
 }
 
 /// The host target triple as a string (e.g. `x86_64-unknown-linux-gnu`).
@@ -4005,6 +4214,56 @@ pub fn target_is_msvc(target: &str) -> bool {
 /// True for `no_std` / bare-metal targets (triple ends in `none`).
 pub fn target_is_bare_metal(target: &str) -> bool {
     target.ends_with("-none") || target.contains("unknown-none")
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn renders_link_kinds_per_target() {
+        let static_lib = LinkSpec {
+            name: "curl".to_string(),
+            kind: "static".to_string(),
+            rename: Some("libcurl.a".to_string()),
+            version: Some("4.8".to_string()),
+            optional: false,
+        };
+        assert_eq!(
+            link_spec_args(&static_lib, "x86_64-unknown-linux-gnu", false),
+            vec!["-l:libcurl.a"]
+        );
+
+        let framework = LinkSpec {
+            name: "CoreGraphics".to_string(),
+            kind: "framework".to_string(),
+            rename: None,
+            version: None,
+            optional: false,
+        };
+        assert_eq!(
+            link_spec_args(&framework, "aarch64-apple-darwin", false),
+            vec!["-framework", "CoreGraphics"]
+        );
+
+        let windows = LinkSpec {
+            name: "curl".to_string(),
+            kind: "static".to_string(),
+            rename: Some("curl_static.lib".to_string()),
+            version: Some("4.8".to_string()),
+            optional: false,
+        };
+        assert_eq!(
+            link_spec_args(&windows, "x86_64-pc-windows-msvc", true),
+            vec!["curl_static.lib"]
+        );
+    }
+
+    #[test]
+    fn link_options_keep_structured_specs() {
+        let options = LinkOptions::host("runtime.c", vec![]);
+        assert!(options.link_specs.is_empty());
+    }
 }
 
 /// Append `.exe` to `name` for Windows targets when it isn't already present.
@@ -4056,7 +4315,8 @@ pub fn rust_not_installed_error() -> String {
      For MSVC toolchain:\n  \
      rustup default stable-msvc\n\n\
      For GNU toolchain (MinGW):\n  \
-     rustup default stable-gnu".to_string()
+     rustup default stable-gnu"
+        .to_string()
 }
 
 fn msvc_toolchain_missing_error() -> String {

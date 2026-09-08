@@ -151,13 +151,10 @@ impl BuildConfig {
         let no_gc = cli_no_gc || self.no_gc.unwrap_or(false);
 
         // entry_point != "main" => implicit no_main.
-        let no_main = entry_point
-            .as_deref()
-            .map(|e| e != "main")
-            .unwrap_or(false);
+        let no_main = entry_point.as_deref().map(|e| e != "main").unwrap_or(false);
 
-        let release = cli_release
-            || matches!(self.opt_level.as_deref(), Some("release") | Some("size"));
+        let release =
+            cli_release || matches!(self.opt_level.as_deref(), Some("release") | Some("size"));
 
         // Effective opt level: CLI -O wins, then the [optimize] section for
         // the active profile, then the per-profile default (release = 2,
@@ -201,16 +198,7 @@ mod tests {
         cli_opt: Option<usize>,
         opt: Option<OptimizeConfig>,
     ) -> ResolvedBuild {
-        BuildConfig::default().resolve(
-            None,
-            None,
-            None,
-            cli_release,
-            false,
-            false,
-            cli_opt,
-            &opt,
-        )
+        BuildConfig::default().resolve(None, None, None, cli_release, false, false, cli_opt, &opt)
     }
 
     #[test]
@@ -254,8 +242,29 @@ mod tests {
 
     #[test]
     fn validate_rejects_levels_above_two() {
-        assert!(OptimizeConfig { debug: Some(4), release: None }.validate().is_err());
-        assert!(OptimizeConfig { debug: None, release: Some(3) }.validate().is_err());
-        assert!(OptimizeConfig { debug: Some(0), release: Some(2) }.validate().is_ok());
+        assert!(
+            OptimizeConfig {
+                debug: Some(4),
+                release: None
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            OptimizeConfig {
+                debug: None,
+                release: Some(3)
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            OptimizeConfig {
+                debug: Some(0),
+                release: Some(2)
+            }
+            .validate()
+            .is_ok()
+        );
     }
 }

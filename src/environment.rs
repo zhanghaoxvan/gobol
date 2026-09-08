@@ -164,7 +164,10 @@ impl Symbol {
         sizes: &[i32],
         is_mut: bool,
     ) -> Self {
-        let dimensions: Vec<ArrayDimension> = sizes.iter().map(|&s| ArrayDimension::new_constant(s)).collect();
+        let dimensions: Vec<ArrayDimension> = sizes
+            .iter()
+            .map(|&s| ArrayDimension::new_constant(s))
+            .collect();
         Symbol {
             name: name.to_string(),
             symbol_type: SymbolType::Variable,
@@ -184,7 +187,10 @@ impl Symbol {
         size_exprs: Vec<Box<dyn Expression>>,
         is_mut: bool,
     ) -> Self {
-        let dimensions: Vec<ArrayDimension> = size_exprs.into_iter().map(ArrayDimension::new_expr).collect();
+        let dimensions: Vec<ArrayDimension> = size_exprs
+            .into_iter()
+            .map(ArrayDimension::new_expr)
+            .collect();
         Symbol {
             name: name.to_string(),
             symbol_type: SymbolType::Variable,
@@ -206,18 +212,17 @@ impl Symbol {
             return 0;
         }
         let d = &self.dimensions[dim as usize];
-        if d.is_constant {
-            d.constant_size
-        } else {
-            0
-        }
+        if d.is_constant { d.constant_size } else { 0 }
     }
 
     pub fn get_size_expr(&self, dim: i32) -> Option<&dyn Expression> {
         if dim < 0 || dim as usize >= self.dimensions.len() {
             return None;
         }
-        self.dimensions[dim as usize].size_expr.as_deref().map(|e| e.as_expression())
+        self.dimensions[dim as usize]
+            .size_expr
+            .as_deref()
+            .map(|e| e.as_expression())
     }
 
     pub fn is_dimension_constant(&self, dim: i32) -> bool {
@@ -278,7 +283,12 @@ impl Environment {
         true
     }
 
-    pub fn declare_function(&mut self, name: &str, return_type: &DataType, module_name: &str) -> bool {
+    pub fn declare_function(
+        &mut self,
+        name: &str,
+        return_type: &DataType,
+        module_name: &str,
+    ) -> bool {
         if self.scopes.is_empty() {
             self.scopes.push(HashMap::new());
         }
@@ -287,7 +297,10 @@ impl Environment {
         let global_scope = &mut self.scopes[0];
 
         // Allow duplicate declarations (e.g., from load_module + direct analysis)
-        global_scope.insert(full_name, Symbol::new_function(name, module_name, return_type, 0));
+        global_scope.insert(
+            full_name,
+            Symbol::new_function(name, module_name, return_type, 0),
+        );
         true
     }
 
@@ -388,7 +401,9 @@ impl Environment {
     }
 
     pub fn get_symbol_type(&self, name: &str) -> DataType {
-        self.lookup_symbol(name).map(|s| s.data_type.clone()).unwrap_or(DataType::Unknown)
+        self.lookup_symbol(name)
+            .map(|s| s.data_type.clone())
+            .unwrap_or(DataType::Unknown)
     }
 
     pub fn is_type_compatible(target: &DataType, source: &DataType) -> bool {
@@ -406,11 +421,17 @@ impl Environment {
             return true;
         }
 
-        if matches!((target, source), (DataType::Int, DataType::Byte) | (DataType::Byte, DataType::Int)) {
+        if matches!(
+            (target, source),
+            (DataType::Int, DataType::Byte) | (DataType::Byte, DataType::Int)
+        ) {
             return true;
         }
         // Byte 和 Bool 兼容（都是 I8）
-        if matches!((target, source), (DataType::Bool, DataType::Byte) | (DataType::Byte, DataType::Bool)) {
+        if matches!(
+            (target, source),
+            (DataType::Bool, DataType::Byte) | (DataType::Byte, DataType::Bool)
+        ) {
             return true;
         }
 

@@ -332,13 +332,17 @@ impl AstVisitor for AstPrinter {
                 node.get_module()
             );
         } else {
-            let members_str: Vec<String> = node.get_members().iter().map(|(name, alias)| {
-                if let Some(alias_name) = alias {
-                    format!("{} as {}", name, alias_name)
-                } else {
-                    name.clone()
-                }
-            }).collect();
+            let members_str: Vec<String> = node
+                .get_members()
+                .iter()
+                .map(|(name, alias)| {
+                    if let Some(alias_name) = alias {
+                        format!("{} as {}", name, alias_name)
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
             print!(
                 "FromImport(module = {}, members = {})",
                 node.get_module(),
@@ -347,7 +351,6 @@ impl AstVisitor for AstPrinter {
         }
         println!();
     }
-
 
     fn visit_export_statement(&mut self, node: &ExportStatement) {
         self.print_indent();
@@ -778,15 +781,18 @@ impl AstVisitor for AstPrinter {
             self.print_indent();
             print!("arm: ");
             match &arm.pattern {
-                MatchPattern::Literal(val) => {
-                    match val {
-                        RtValueSimple::Int(v) => print!("literal({})", v),
-                        RtValueSimple::FloatStr(v) => print!("literal({}f)", v),
-                        RtValueSimple::Str(v) => print!("literal(\"{}\")", v),
-                        RtValueSimple::Bool(v) => print!("literal({})", v),
-                    }
-                }
-                MatchPattern::EnumVariant { enum_name, variant_name, variant_index: _, payload } => {
+                MatchPattern::Literal(val) => match val {
+                    RtValueSimple::Int(v) => print!("literal({})", v),
+                    RtValueSimple::FloatStr(v) => print!("literal({}f)", v),
+                    RtValueSimple::Str(v) => print!("literal(\"{}\")", v),
+                    RtValueSimple::Bool(v) => print!("literal({})", v),
+                },
+                MatchPattern::EnumVariant {
+                    enum_name,
+                    variant_name,
+                    variant_index: _,
+                    payload,
+                } => {
                     // 打印枚举变体模式
                     if !enum_name.is_empty() {
                         print!("{}::", enum_name);
@@ -795,17 +801,20 @@ impl AstVisitor for AstPrinter {
                     if let Some(p) = payload {
                         print!("(");
                         match p.as_ref() {
-                            MatchPattern::Literal(val) => {
-                                match val {
-                                    RtValueSimple::Int(v) => print!("{}", v),
-                                    RtValueSimple::FloatStr(v) => print!("{}", v),
-                                    RtValueSimple::Str(v) => print!("\"{}\"", v),
-                                    RtValueSimple::Bool(v) => print!("{}", v),
-                                }
-                            }
+                            MatchPattern::Literal(val) => match val {
+                                RtValueSimple::Int(v) => print!("{}", v),
+                                RtValueSimple::FloatStr(v) => print!("{}", v),
+                                RtValueSimple::Str(v) => print!("\"{}\"", v),
+                                RtValueSimple::Bool(v) => print!("{}", v),
+                            },
                             MatchPattern::Wildcard => print!("_"),
                             MatchPattern::Variable(name) => print!("{}", name),
-                            MatchPattern::EnumVariant { enum_name: nested_enum, variant_name: nested_variant, variant_index: _, payload: nested_payload } => {
+                            MatchPattern::EnumVariant {
+                                enum_name: nested_enum,
+                                variant_name: nested_variant,
+                                variant_index: _,
+                                payload: nested_payload,
+                            } => {
                                 // 嵌套枚举：Some(Ok(x))
                                 if !nested_enum.is_empty() {
                                     print!("{}::", nested_enum);

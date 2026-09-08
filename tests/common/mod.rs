@@ -1,6 +1,6 @@
-use std::process::Command;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once};
 
@@ -38,11 +38,7 @@ pub struct TestResult {
 
 impl TestResult {
     pub fn assert_success(&self) {
-        assert!(
-            self.success,
-            "测试执行失败 | stderr:\n{}",
-            self.stderr
-        );
+        assert!(self.success, "测试执行失败 | stderr:\n{}", self.stderr);
     }
 
     #[allow(dead_code)]
@@ -64,7 +60,8 @@ impl TestResult {
         assert!(
             self.stdout.contains(expected),
             "输出未包含「{}」\n实际输出：{}",
-            expected, self.stdout
+            expected,
+            self.stdout
         );
     }
 }
@@ -99,9 +96,7 @@ pub fn run_gobol(file_path: &str, _verbose: bool) -> TestResult {
     // contends on the target dir lock when tests run in parallel).
     let _guard = BUILD_LOCK.lock().unwrap();
     let build_output = Command::new(gobol_binary())
-        .args([
-            "build", file_path, "-o", temp_bin.to_str().unwrap(),
-        ])
+        .args(["build", file_path, "-o", temp_bin.to_str().unwrap()])
         .output()
         .expect("failed to run gobol build");
     drop(_guard);
@@ -126,7 +121,10 @@ pub fn run_gobol(file_path: &str, _verbose: bool) -> TestResult {
 
     let run_stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
     let run_stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
-    let run_exit_code = run_output.status.code().unwrap_or(ExitCode::RuntimePanic as i32);
+    let run_exit_code = run_output
+        .status
+        .code()
+        .unwrap_or(ExitCode::RuntimePanic as i32);
 
     let _ = fs::remove_file(&temp_bin);
 

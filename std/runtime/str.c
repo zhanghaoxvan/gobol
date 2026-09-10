@@ -92,7 +92,13 @@ char *gobol_str_replace(const char *s, const char *from, const char *to) {
     const char *p = s;
     while ((p = strstr(p, from)) != NULL) { count++; p += from_len; }
     size_t s_len = strlen(s);
-    size_t result_len = s_len + count * (to_len - from_len) + 1;
+    size_t result_len = s_len;
+    if (to_len >= from_len) {
+        result_len += count * (to_len - from_len);
+    } else {
+        result_len -= count * (from_len - to_len);
+    }
+    result_len += 1;
     char *r = (char *)malloc(result_len);
     if (!r) return NULL;
     char *out = r;
@@ -109,4 +115,61 @@ char *gobol_str_replace(const char *s, const char *from, const char *to) {
     }
     strcpy(out, prev);
     return r;
+}
+
+long long gobol_str_starts_with(const char *s, const char *prefix) {
+    if (!s) s = "";
+    if (!prefix) prefix = "";
+    size_t n = strlen(prefix);
+    return strncmp(s, prefix, n) == 0 ? 1 : 0;
+}
+
+long long gobol_str_ends_with(const char *s, const char *suffix) {
+    if (!s) s = "";
+    if (!suffix) suffix = "";
+    size_t n = strlen(s);
+    size_t m = strlen(suffix);
+    return m <= n && memcmp(s + n - m, suffix, m) == 0 ? 1 : 0;
+}
+
+long long gobol_str_index_of(const char *s, const char *sub) {
+    if (!s) s = "";
+    if (!sub) sub = "";
+    const char *found = strstr(s, sub);
+    return found ? (long long)(found - s) : -1;
+}
+
+long long gobol_str_count(const char *s, const char *sub) {
+    if (!s) s = "";
+    if (!sub || !*sub) return 0;
+    size_t count = 0;
+    size_t width = strlen(sub);
+    const char *p = s;
+    while ((p = strstr(p, sub)) != NULL) {
+        count++;
+        p += width;
+    }
+    return (long long)count;
+}
+
+static char *gobol_str_case_map(const char *s, int upper) {
+    if (!s) s = "";
+    size_t n = strlen(s);
+    char *result = (char *)malloc(n + 1);
+    if (!result) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        result[i] = (char)(upper ? (c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c)
+                                 : (c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c));
+    }
+    result[n] = '\0';
+    return result;
+}
+
+char *gobol_str_to_upper(const char *s) {
+    return gobol_str_case_map(s, 1);
+}
+
+char *gobol_str_to_lower(const char *s) {
+    return gobol_str_case_map(s, 0);
 }

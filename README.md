@@ -60,6 +60,18 @@ Or enter a custom path when prompted during installation.
 |---|---|
 | `GOBOL_INSTALL_DIR` env / 环境变量 | Installation directory / 安装目录 |
 | `--no-build` | Skip building (use existing binaries) / 跳过编译（使用现有二进制文件）|
+| `install` | Build and install without opening the menu / 直接编译安装，不打开菜单 |
+| `uninstall --yes` | Remove the installation without prompting / 无提示卸载 |
+| `extensions` | Print editor extension installation instructions / 输出编辑器扩展安装说明 |
+| `--install-dir PATH` | Override the installation directory / 覆盖安装目录 |
+| `--ci` or `--non-interactive` | Run the default install action without prompts / CI 无交互安装 |
+
+For CI, use an explicit command and directory:
+
+```bash
+python3 install.py install --ci --install-dir "$HOME/.gobol" --no-build
+python3 install.py uninstall --ci --yes --install-dir "$HOME/.gobol"
+```
 
 #### Verify Installation / 验证安装
 
@@ -158,13 +170,23 @@ gobol example.gbl --compile -o myapp
 
 ## 📄 Example / 示例
 
-Create a file `main.gbl`:
+Create a new project:
 
-创建文件 `main.gbl`：
+创建新项目：
+
+```bash
+grape init
+```
+
+This will generate a `grape.toml` and a `main.gbl` entry file.
+
+这会生成 `grape.toml` 和一个 `main.gbl` 入口文件。
+
+Edit `main.gbl`:
+
+编辑 `main.gbl`：
 
 ```gobol
-// import std::io; // we don't need to write it, because it has already preluded in compile-time.
-
 func main() {
     io::println("Hello, Gobol!");
 }
@@ -176,8 +198,6 @@ Then run:
 
 ```bash
 grape run
-# or / 或
-gobol main.gbl
 ```
 
 ---

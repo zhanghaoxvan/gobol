@@ -599,28 +599,11 @@ func to_str(self): str {
 ## 10. Operator Overloading / 运算符重载
 
 ```gobol
-// Unary / 一元
-operator - (self: Point): Point {
-    Point::new(-self.x, -self.y)
-}
-
-// Binary / 二元
-operator + (left: Point, right: Point): Point {
-    Point::new(left.x + right.x, left.y + right.y)
-}
-
-// Index / 索引
-operator [] (self: Vec<T>, index: int): T {
-    self.get(index)
-}
-
-operator []= (self: Vec<T>, index: int, value: T) {
-    self.set(index, value)
-}
-
-// Comparison / 比较
-operator == (left: Point, right: Point): bool {
-    left.x == right.x && left.y == right.y
+// Operators are provided by traits rather than operator declarations.
+impl std::ops::Add for Point {
+    func add(self, other: Point): Point {
+        Point::new(self.x + other.x, self.y + other.y)
+    }
 }
 ```
 

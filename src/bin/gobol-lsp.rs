@@ -297,13 +297,87 @@ impl DocState {
             return false;
         }
 
-        // Scope nesting: a local is visible if its brace depth is <= the
-        // cursor's brace depth (outer scope or same scope).  A deeper nested
-        // local (declared in an inner block that the cursor isn't inside yet)
-        // is not visible.
-        let sym_depth = self.brace_depth_at(sym_line, sym_col);
-        let cursor_depth = self.brace_depth_at(target_line, target_col);
-        sym_depth <= cursor_depth
+        let symbol_scope = self.scope_path_for_symbol(sym);
+        let cursor_scope = self.scope_path_at(target_line, target_col);
+        symbol_scope.len() <= cursor_scope.len()
+            && symbol_scope
+                .iter()
+                .zip(cursor_scope.iter())
+                .all(|(symbol, cursor)| symbol == cursor)
+    }
+
+    /// Return the opening-brace token indices containing a position. Comparing
+    /// paths, rather than only brace depth, prevents locals from sibling
+    /// blocks/functions leaking into one another.
+    fn scope_path_at(&self, line: i32, col: i32) -> Vec<usize> {
+        let mut path = Vec::new();
+        for (index, token) in self.tokens.iter().enumerate() {
+            let before = token.line < line || (token.line == line && token.col <= col);
+            if !before {
+                break;
+            }
+            if token.value == "{" {
+                path.push(index);
+            } else if token.value == "}" {
+                path.pop();
+            }
+        }
+        path
+    }
+
+    fn scope_path_for_symbol(&self, sym: &SymbolEntry) -> Vec<usize> {
+        let direct = self.scope_path_at(sym.line, sym.col);
+        if sym.kind != SymKind::Parameter {
+            return direct;
+        }
+
+        // Parameters are declared before the function body opening brace.
+        // Associate them with the body they belong to.
+        let mut best: Option<(i32, Vec<usize>)> = None;
+        for (index, token) in self.tokens.iter().enumerate() {
+            if token.value != "{" {
+                continue;
+            }
+            let mut depth = 1i32;
+            let mut end = index + 1;
+            while end < self.tokens.len() && depth > 0 {
+                match self.tokens[end].value.as_str() {
+                    "{" => depth += 1,
+                    "}" => depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            if end == 0 || end > self.tokens.len() {
+                continue;
+            }
+            let close = self.tokens.get(end.saturating_sub(1));
+            let Some(close) = close else { continue };
+            let inside_header = token.line >= sym.line
+                && (token.line > sym.line || token.col > sym.col)
+                && (close.line > sym.line
+                    || (close.line == sym.line && close.col >= sym.col));
+            if inside_header {
+                let path = self.scope_path_at(token.line, token.col + 1);
+                let distance = token.line - sym.line;
+                if best.as_ref().map(|(d, _)| distance < *d).unwrap_or(true) {
+                    best = Some((distance, path));
+                }
+            }
+        }
+        best.map(|(_, path)| path).unwrap_or(direct)
+    }
+
+    fn find_definition_at(
+        &self,
+        name: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<&SymbolEntry> {
+        self.symbols.iter().filter(|s| s.name == name).find(|s| {
+            !matches!(s.kind, SymKind::Variable | SymKind::Parameter)
+                || self.local_visible_at(s, line, character)
+        })
     }
 
     /// Find the brace depth where the cursor currently sits, and the local
@@ -2148,7 +2222,7 @@ fn is_declaration_call_paren(tokens: &[Token], ident_idx: usize) -> bool {
         ident_idx >= 2 && tokens.get(ident_idx - 2).map(|x| x.value.as_str()) == Some("func");
     matches!(
         prev1,
-        Some("func") | Some("static") | Some("constructor") | Some("operator")
+        Some("func") | Some("static") | Some("operator")
     ) || prev2
 }
 
@@ -2544,6 +2618,7 @@ fn analyze_document(uri: &str, source: &str, workspace_roots: &[PathBuf]) -> Doc
         let lib_paths = build_lib_paths(&file_path, workspace_roots);
         let mut sem = SemanticAnalyzer::new();
         sem.set_main_file(&file_path);
+        sem.set_source(source);
         sem.set_lib_paths(lib_paths);
         sem.set_error_formatter(error_fmt);
         sem.analyze(prog.as_ref());
@@ -2741,12 +2816,6 @@ fn keyword_snippets() -> Vec<CompletionItem> {
             "extern \"C\" {\n    $0\n}",
             CompletionItemKind::SNIPPET,
         ),
-        mk(
-            "constructor",
-            "constructor (snippet)",
-            "constructor ${1:TypeName}(${2:params}) {\n    $0\n}",
-            CompletionItemKind::SNIPPET,
-        ),
     ]
 }
 
@@ -2908,16 +2977,19 @@ impl LanguageServer for GobolLsp {
 
         let mut hover_text = String::new();
         let mut sym_not_found = true;
-        for sym in &state.symbols {
-            if sym.name == token.value {
-                sym_not_found = false;
-                let kind_label = sym.kind.label();
-                let type_str = sym.type_info.clone().unwrap_or_else(|| "-".to_string());
-                let parent_str = sym
-                    .parent
-                    .as_ref()
-                    .map(|p| format!(" (on `{}`)", p))
-                    .unwrap_or_default();
+        if let Some(sym) = state.find_definition_at(
+            &token.value,
+            pos.position.line,
+            pos.position.character,
+        ) {
+            sym_not_found = false;
+            let kind_label = sym.kind.label();
+            let type_str = sym.type_info.clone().unwrap_or_else(|| "-".to_string());
+            let parent_str = sym
+                .parent
+                .as_ref()
+                .map(|p| format!(" (on `{}`)", p))
+                .unwrap_or_default();
 
                 let signature = match sym.kind {
                     SymKind::Function
@@ -2986,8 +3058,6 @@ impl LanguageServer for GobolLsp {
                     hover_text.push_str(&format!("\n\n---\n\n{}", doc));
                 }
 
-                break;
-            }
         }
 
         if hover_text.is_empty() {
@@ -3100,7 +3170,11 @@ impl LanguageServer for GobolLsp {
         }
 
         // 1. Definition in this document.
-        if let Some(sym) = state.find_definition(&token.value) {
+        if let Some(sym) = state.find_definition_at(
+            &token.value,
+            pos.position.line,
+            pos.position.character,
+        ) {
             // If the local symbol is a `from lib import greet` re-export (its
             // parent names an imported module), prefer the definition in that
             // module's source file so Ctrl+Click lands on the real code.
@@ -3447,7 +3521,6 @@ impl LanguageServer for GobolLsp {
             "match",
             "convert",
             "operator",
-            "constructor",
             "new",
             "static",
             "type",
@@ -3996,7 +4069,11 @@ impl GobolLsp {
                 continue;
             }
             let name = t.value.clone();
-            if state.find_definition(&name).is_some() || state.module_imported(&name).is_some() {
+            if state
+                .find_definition_at(&name, t.line.saturating_sub(1) as u32, t.col as u32)
+                .is_some()
+                || state.module_imported(&name).is_some()
+            {
                 continue;
             }
             // Is it exported by some importable module?
@@ -5157,6 +5234,25 @@ mod unit_new {
             "`b` should not be visible after inner block: {:?}",
             names2
         );
+    }
+
+    #[test]
+    fn locals_do_not_cross_function_scopes() {
+        let src = "func first() {\n    var value = 1;\n}\nfunc second() {\n    value;\n}\n";
+        let toks = lex(src);
+        let syms = build_symbol_index(&toks, src);
+        let state = DocState {
+            source: src.into(),
+            tokens: toks,
+            symbols: syms,
+            errors: vec![],
+            signatures: Default::default(),
+            func_types: Default::default(),
+        };
+
+        assert!(state.find_definition_at("value", 1, 10).is_some());
+        assert!(state.find_definition_at("value", 4, 4).is_none());
+        assert!(state.visible_locals(4, 4).iter().all(|s| s.name != "value"));
     }
 
     #[test]

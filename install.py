@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""
-Gobol Installer TUI — Terminal User Interface for the Gobol toolchain.
-Version management disabled, single global install only.
-"""
+"""Gobol toolchain installer with an interactive GRUB-like menu and CLI mode."""
 
+import argparse
 import os
 import sys
 import time
@@ -29,19 +27,73 @@ class Colors:
 def clear_screen():
     subprocess.run('cls' if os.name == 'nt' else 'clear', shell=True)
 
-def print_menu(title, options, footer=""):
+def print_menu(title, options, selected=0, footer=""):
     clear_screen()
     print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.OKCYAN}{Colors.BOLD}{title:^60}{Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print()
     for i, option in enumerate(options, 1):
-        print(f"{Colors.OKBLUE}{i:>2}{Colors.ENDC}. {option}")
+        prefix = ">" if i - 1 == selected else " "
+        color = Colors.OKGREEN if i - 1 == selected else Colors.OKBLUE
+        print(f"{color}{prefix} {i:>2}. {option}{Colors.ENDC}")
     print()
     if footer:
         print(f"{Colors.GREY}{footer}{Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
-    print(f"{Colors.GREY}Select a number, or press 'q' to quit{Colors.ENDC}")
+    print(f"{Colors.GREY}Use ↑/↓, Enter to select, or press 'q' to quit{Colors.ENDC}")
+
+
+def choose_menu(title, options, footer=""):
+    """Return a menu index using arrow keys, with a line-input fallback."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return int(input("Select an option: ").strip()) - 1
+
+    selected = 0
+    if is_windows():
+        import msvcrt
+        while True:
+            print_menu(title, options, selected, footer)
+            key = msvcrt.getwch()
+            if key in ("\r", "\n"):
+                return selected
+            if key.lower() == "q":
+                return -1
+            if key in ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"):
+                choice = int(key) - 1
+                if 0 <= choice < len(options):
+                    return choice
+            if key == "\x00" or key == "\xe0":
+                key = msvcrt.getwch()
+                if key == "H":
+                    selected = (selected - 1) % len(options)
+                elif key == "P":
+                    selected = (selected + 1) % len(options)
+    else:
+        import termios
+        import tty
+        old_settings = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            while True:
+                print_menu(title, options, selected, footer)
+                key = sys.stdin.read(1)
+                if key in ("\r", "\n"):
+                    return selected
+                if key.lower() == "q":
+                    return -1
+                if key.isdigit():
+                    choice = int(key) - 1
+                    if 0 <= choice < len(options):
+                        return choice
+                if key == "\x1b":
+                    sequence = sys.stdin.read(2)
+                    if sequence == "[A":
+                        selected = (selected - 1) % len(options)
+                    elif sequence == "[B":
+                        selected = (selected + 1) % len(options)
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
 def print_status(message, status_type="info"):
     if status_type == "info":
@@ -79,9 +131,10 @@ def gobol_home():
 
 # ==================== TUI Task Functions ====================
 
-def task_build_and_install(no_build=False):
+def task_build_and_install(no_build=False, install_dir=None, pause=True):
     """Build and install the Gobol toolchain with user-defined installation directory."""
-    clear_screen()
+    if pause:
+        clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.OKCYAN}{Colors.BOLD}   Build & Install Gobol Toolchain   {Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
@@ -95,13 +148,12 @@ def task_build_and_install(no_build=False):
     if current_env:
         default_install_dir = Path(current_env)
     
-    print(f"\n{Colors.OKCYAN}Current installation directory: {Colors.ENDC}{default_install_dir}")
-    user_input = input(f"{Colors.OKCYAN}Enter new installation directory (or press Enter to keep current): {Colors.ENDC}").strip()
-    
-    if user_input:
-        install_dir = Path(user_input).expanduser().resolve()
+    if install_dir is None:
+        print(f"\n{Colors.OKCYAN}Current installation directory: {Colors.ENDC}{default_install_dir}")
+        user_input = input(f"{Colors.OKCYAN}Enter new installation directory (or press Enter to keep current): {Colors.ENDC}").strip()
+        install_dir = Path(user_input).expanduser().resolve() if user_input else default_install_dir
     else:
-        install_dir = default_install_dir
+        install_dir = Path(install_dir).expanduser().resolve()
     
     print_status(f"Installation directory set to: {install_dir}", "ok")
     
@@ -109,12 +161,13 @@ def task_build_and_install(no_build=False):
     if not no_build:
         print_status("Building (cargo build --release)...", "info")
         cmd = ["cargo", "build", "--release", "--bins"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path(__file__).resolve().parent)
         if result.returncode != 0:
             print_status("Build failed!", "fail")
             print(result.stderr)
-            input("Press Enter to return to main menu...")
-            return
+            if pause:
+                input("Press Enter to return to main menu...")
+            return False
         print_status("Build successful!", "ok")
     else:
         print_status("Skipping build (--no-build)", "warn")
@@ -127,7 +180,7 @@ def task_build_and_install(no_build=False):
     suffix = ".exe" if is_windows() else ""
     binaries = [f"gobol{suffix}", f"grape{suffix}", f"gobol-lsp{suffix}"]
     for name in binaries:
-        src = Path("target/release") / name
+        src = Path(__file__).resolve().parent / "target/release" / name
         if not src.exists():
             print_status(f"{name} not found, skipping", "warn")
             continue
@@ -141,7 +194,7 @@ def task_build_and_install(no_build=False):
         print_status(f"{name} -> {dst}", "ok")
     
     print_status("Installing standard library...", "info")
-    src_std = Path("std")
+    src_std = Path(__file__).resolve().parent / "std"
     dst_std = install_dir / "lib" / "std"
     if src_std.exists():
         if dst_std.exists():
@@ -198,20 +251,24 @@ def task_build_and_install(no_build=False):
         print_status("Environment variables set. Please restart your terminal.", "info")
     
     print_status("Installation complete! Gobol is installed globally.", "ok")
-    input("Press Enter to return to main menu...")
+    if pause:
+        input("Press Enter to return to main menu...")
+    return True
 
-def task_uninstall():
-    clear_screen()
+def task_uninstall(install_dir=None, assume_yes=False, pause=True):
+    if pause:
+        clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.FAIL}{Colors.BOLD}   Uninstall Gobol   {Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print("\nWarning: This will permanently delete the Gobol installation directory.")
-    install_dir = gobol_home()
+    install_dir = Path(install_dir).expanduser().resolve() if install_dir else gobol_home()
     print(f"Installation directory: {install_dir}")
-    confirm = input(f"{Colors.FAIL}Confirm uninstall? (type 'yes' to confirm): {Colors.ENDC}")
+    confirm = "yes" if assume_yes else input(f"{Colors.FAIL}Confirm uninstall? (type 'yes' to confirm): {Colors.ENDC}")
     if confirm.lower() != "yes":
         print_status("Uninstall cancelled.", "info")
-        input("Press Enter to return to main menu...")
+        if pause:
+            input("Press Enter to return to main menu...")
         return
     
     if install_dir.exists():
@@ -220,11 +277,13 @@ def task_uninstall():
         print_status("Please manually clean up your shell PATH in .bashrc/.zshrc", "warn")
     else:
         print_status("No installation found.", "warn")
-    input("Press Enter to return to main menu...")
+    if pause:
+        input("Press Enter to return to main menu...")
 
-def task_extension_guide():
+def task_extension_guide(pause=True):
     """显示 VS Code 和 Neovim 扩展安装指南（跨平台命令）"""
-    clear_screen()
+    if pause:
+        clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.OKCYAN}{Colors.BOLD}   VS Code & Neovim Extension Guide   {Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
@@ -287,11 +346,80 @@ def task_extension_guide():
     print(f"{Colors.OKBLUE}│    Ensure Gobol LSP is in PATH: ~/.gobol/bin{Colors.ENDC}")
     print(f"{Colors.OKBLUE}└─{Colors.ENDC}")
 
-    input(f"{Colors.GREY}Press Enter to return to main menu...{Colors.ENDC}")
+    if pause:
+        input(f"{Colors.GREY}Press Enter to return to main menu...{Colors.ENDC}")
 
-# ==================== Main TUI Loop ====================
+# ==================== CLI and Main TUI Loop ====================
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build and install the Gobol toolchain."
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("install", "uninstall", "extensions"),
+        help="run a task without opening the interactive menu",
+    )
+    parser.add_argument(
+        "--install-dir",
+        metavar="PATH",
+        help="installation directory (also honored by GOBOL_INSTALL_DIR)",
+    )
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        help="install existing release binaries without running Cargo",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm destructive actions without prompting",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        "--ci",
+        dest="non_interactive",
+        action="store_true",
+        help="never open the TUI or prompt; defaults to install",
+    )
+    return parser.parse_args()
+
+
+def run_cli(args):
+    command = args.command or "install"
+    if command == "install":
+        ok = task_build_and_install(
+            no_build=args.no_build,
+            install_dir=args.install_dir,
+            pause=False,
+        )
+        return 0 if ok else 1
+    if command == "uninstall":
+        if not args.yes:
+            print_status("uninstall requires --yes in non-interactive mode.", "fail")
+            return 2
+        task_uninstall(
+            install_dir=args.install_dir,
+            assume_yes=True,
+            pause=False,
+        )
+        return 0
+    task_extension_guide(pause=False)
+    return 0
+
 
 def main():
+    args = parse_args()
+    if (
+        args.command
+        or args.non_interactive
+        or args.install_dir
+        or args.no_build
+        or args.yes
+    ):
+        return run_cli(args)
+
     while True:
         options = [
             "Build & Install Gobol",
@@ -299,22 +427,21 @@ def main():
             "Uninstall Gobol",
             "Exit"
         ]
-        print_menu(
+        choice = choose_menu(
             "Gobol Installer",
             options,
             footer=f"GOBOL_INSTALL_DIR: {gobol_home()}"
         )
-        choice = input(f"{Colors.OKCYAN}❯ {Colors.ENDC}").strip().lower()
 
-        if choice == "q":
+        if choice == -1:
             break
-        elif choice == "1":
+        elif choice == 0:
             task_build_and_install()
-        elif choice == "2":
+        elif choice == 1:
             task_extension_guide()
-        elif choice == "3":
+        elif choice == 2:
             task_uninstall()
-        elif choice == "4" or choice == "q":
+        elif choice == 3:
             print(f"{Colors.OKCYAN}Goodbye!{Colors.ENDC}")
             break
         else:
@@ -322,4 +449,4 @@ def main():
             time.sleep(1)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

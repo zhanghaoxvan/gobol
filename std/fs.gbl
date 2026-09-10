@@ -20,7 +20,46 @@ impl File {
 
     #[intrinsic("fs_close")]
     func close(self);
+
+    func is_valid(self): bool {
+        builtins::gobol_fs_valid(self._handle)
+    }
+
+    func try_read_all(self): Result<str, str> {
+        if !self.is_valid() {
+            Result::Err("file is not open")
+        } else {
+            var content = self.read_all();
+            if builtins::gobol_fs_last_error() != 0 {
+                Result::Err("failed to read file")
+            } else {
+                Result::Ok(content)
+            }
+        }
+    }
+
+    func try_write(self, data: str): Result<int, str> {
+        if !self.is_valid() {
+            Result::Err("file is not open")
+        } else {
+            var written = self.write(data);
+            if builtins::gobol_fs_last_error() != 0 {
+                Result::Err("failed to write file")
+            } else {
+                Result::Ok(written)
+            }
+        }
+    }
 };
+
+func try_open(path: str, mode: str): Result<File, str> {
+    var file = File::open(path, mode);
+    if file.is_valid() {
+        Result::Ok(file)
+    } else {
+        Result::Err("failed to open file")
+    }
+}
 
 // Convenience: read an entire file into a string.
 func read_to_string(path: str): str {
@@ -40,3 +79,27 @@ func write_file(path: str, content: str) {
 // Check if a path exists on the filesystem.
 #[intrinsic("fs_exists")]
 func exists(path: str): bool;
+
+func try_read_to_string(path: str): Result<str, str> {
+    var opened = try_open(path, "r");
+    if opened.is_err() {
+        Result::Err(opened.take())
+    } else {
+        var file = opened.take();
+        var result = file.try_read_all();
+        file.close();
+        result
+    }
+}
+
+func try_write_file(path: str, content: str): Result<int, str> {
+    var opened = try_open(path, "w");
+    if opened.is_err() {
+        Result::Err(opened.take())
+    } else {
+        var file = opened.take();
+        var result = file.try_write(content);
+        file.close();
+        result
+    }
+}

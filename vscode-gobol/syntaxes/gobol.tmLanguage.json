@@ -149,7 +149,7 @@
         },
         {
           "name": "keyword.declaration.gobol",
-          "match": "\\b(func|var|val|struct|enum|impl|trait|extern|import|from|export|as|convert|operator|constructor|static|type|where)\\b"
+          "match": "\\b(func|var|val|struct|enum|impl|trait|extern|import|from|export|as|convert|static|type|where)\\b"
         },
         {
           "comment": "`new` is only a keyword in allocation context (new T[..] / new Type(..)). When used as a function/method name (func new(), Vec::new()), it must NOT be highlighted as a keyword — the function-name pattern in #identifiers will catch it instead.",

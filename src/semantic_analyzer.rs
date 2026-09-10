@@ -5,6 +5,7 @@ use crate::ast_builder::AstBuilder;
 use crate::environment::*;
 use crate::error::ErrorFormatter;
 use crate::lexer::Lexer;
+use crate::token::{Token, TokenType};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -77,6 +78,7 @@ pub struct SemanticAnalyzer {
     pending_trait_impls: Vec<(String, String, Vec<String>)>,
     /// Structured errors for LSP: (line, col, message)
     pub structured_errors: Vec<(i32, i32, String)>,
+    diagnostic_tokens: Vec<Token>,
     /// External libraries to link (e.g. "C", "m") from extern "C" blocks.
     pub extern_libs: Vec<String>,
     pub extern_links: Vec<ExternLink>,
@@ -148,6 +150,7 @@ impl SemanticAnalyzer {
             trait_defs: HashMap::new(),
             pending_trait_impls: Vec::new(),
             structured_errors: Vec::new(),
+            diagnostic_tokens: Vec::new(),
             extern_libs: Vec::new(),
             extern_links: Vec::new(),
             target: String::new(),
@@ -160,6 +163,20 @@ impl SemanticAnalyzer {
 
     pub fn set_error_formatter(&mut self, f: ErrorFormatter) {
         self.error_formatter = Some(f);
+    }
+
+    /// Provide source tokens so semantic diagnostics can point at the
+    /// offending identifier instead of falling back to line 1, column 1.
+    pub fn set_source(&mut self, source: &str) {
+        let mut lexer = Lexer::new(source);
+        self.diagnostic_tokens.clear();
+        loop {
+            let token = lexer.get_next_token();
+            if token.r#type == TokenType::EndOfFile {
+                break;
+            }
+            self.diagnostic_tokens.push(token);
+        }
     }
 
     pub fn set_lib_paths(&mut self, paths: Vec<String>) {
@@ -637,13 +654,32 @@ impl SemanticAnalyzer {
             "[SEM ERROR] {} | current_module={} current_impl={:?}",
             msg, self.current_module, self.current_impl_struct
         );
-        self.structured_errors.push((0, 0, msg.to_string()));
+        let (line, col) = self.error_position(msg);
+        self.structured_errors.push((line, col, msg.to_string()));
         if let Some(ref f) = self.error_formatter {
-            let formatted = f.format_error(0, 0, 0, "error", msg, true);
+            let formatted = f.format_error(line, col, 1, "error", msg, true);
             self.errors.push(formatted);
         } else {
             self.errors.push(format!("Error: {}", msg));
         }
+
+    }
+
+    fn error_position(&self, msg: &str) -> (i32, i32) {
+        let needle = msg
+            .split(['\'', '"'])
+            .nth(1)
+            .filter(|value| !value.is_empty());
+        if let Some(needle) = needle {
+            if let Some(token) = self
+                .diagnostic_tokens
+                .iter()
+                .find(|token| token.value == needle)
+            {
+                return (token.line, token.col);
+            }
+        }
+        (1, 0)
     }
 
     /// Report a semantic error at a specific source position (for LSP).
@@ -3284,14 +3320,19 @@ impl AstVisitor for SemanticAnalyzer {
                         return;
                     }
                 }
-                // String methods: s.len() -> Int, s.contains(sub) -> Bool,
-                // s.trim() -> Str, s.replace(from, to) -> Str
+                // String methods: primitive operations are lowered directly
+                // by Cranelift and therefore do not require a user symbol.
                 if matches!(var_sym.data_type, DataType::Str) {
                     let ret = match func_name.as_str() {
                         "len" => Some(DataType::Int),
                         "contains" => Some(DataType::Bool),
                         "trim" => Some(DataType::Str),
                         "replace" => Some(DataType::Str),
+                        "starts_with" => Some(DataType::Bool),
+                        "ends_with" => Some(DataType::Bool),
+                        "index_of" => Some(DataType::Int),
+                        "count" => Some(DataType::Int),
+                        "to_upper" | "to_lower" => Some(DataType::Str),
                         _ => None,
                     };
                     if let Some(rt) = ret {

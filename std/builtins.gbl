@@ -33,6 +33,12 @@ extern "C" {
     func gobol_str_contains(s: str, sub: str): bool;
     func gobol_str_trim(s: str): str;
     func gobol_str_replace(s: str, from_old: str, to_new: str): str;
+    func gobol_str_starts_with(s: str, prefix: str): bool;
+    func gobol_str_ends_with(s: str, suffix: str): bool;
+    func gobol_str_index_of(s: str, sub: str): int;
+    func gobol_str_count(s: str, sub: str): int;
+    func gobol_str_to_upper(s: str): str;
+    func gobol_str_to_lower(s: str): str;
 
     // ---- Memory & raw pointer access (std/runtime/mem.h) ----
     func gobol_alloc(size: int): int;
@@ -62,6 +68,8 @@ extern "C" {
     func gobol_fs_write(handle: int, data: str): int;
     func gobol_fs_close(handle: int);
     func gobol_fs_exists(path: str): bool;
+    func gobol_fs_valid(handle: int): bool;
+    func gobol_fs_last_error(): int;
 
     // ---- Networking (std/runtime/net.h) ----
     func gobol_tcp_connect(addr: str, port: int): int;

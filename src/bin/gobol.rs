@@ -349,7 +349,7 @@ fn main() {
     }
     let error_fmt = ErrorFormatter::new(filename.clone(), source_for_errors);
 
-    let mut lexer = Lexer::new(source);
+    let mut lexer = Lexer::new(&source);
     if is_verbose {
         let mut tk = lexer.get_next_token();
         println!("===== Step 1: Tokenize =====");
@@ -478,6 +478,7 @@ fn main() {
 
     let mut semantic_analyzer = SemanticAnalyzer::new();
     semantic_analyzer.set_main_file(&filename);
+    semantic_analyzer.set_source(&source);
     semantic_analyzer.set_lib_paths(lib_paths.clone());
     semantic_analyzer.set_error_formatter(error_fmt.clone());
     semantic_analyzer.set_build_mode(build_mode);

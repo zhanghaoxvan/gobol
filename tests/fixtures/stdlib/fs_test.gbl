@@ -18,4 +18,9 @@ func main() {
     var data = f.read_all();
     io::println(@"file_data: {data}");
     f.close();
+
+    var missing = std::fs::try_read_to_string("/tmp/gobol_missing_file.txt");
+    if missing.is_err() {
+        io::println("missing: handled");
+    }
 }

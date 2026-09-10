@@ -205,15 +205,6 @@
     ],
     "description": "Extern C FFI block"
   },
-  "Constructor": {
-    "prefix": "constructor",
-    "body": [
-      "constructor ${1:TypeName}(${2:params}) {",
-      "    $0",
-      "}"
-    ],
-    "description": "Constructor for a struct"
-  },
   "Include C header": {
     "prefix": "include",
     "body": "#include \"$0\"",

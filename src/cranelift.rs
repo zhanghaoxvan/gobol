@@ -2687,6 +2687,36 @@ impl CraneliftBackend {
                     all.append(&mut vals);
                     return Ok(self.call_runtime(bcx, "gobol_str_replace", &all));
                 }
+                "starts_with" => {
+                    let mut vals = self.translate_args(bcx, args)?;
+                    let mut all = vec![s];
+                    all.append(&mut vals);
+                    return Ok(self.call_runtime(bcx, "gobol_str_starts_with", &all));
+                }
+                "ends_with" => {
+                    let mut vals = self.translate_args(bcx, args)?;
+                    let mut all = vec![s];
+                    all.append(&mut vals);
+                    return Ok(self.call_runtime(bcx, "gobol_str_ends_with", &all));
+                }
+                "index_of" => {
+                    let mut vals = self.translate_args(bcx, args)?;
+                    let mut all = vec![s];
+                    all.append(&mut vals);
+                    return Ok(self.call_runtime(bcx, "gobol_str_index_of", &all));
+                }
+                "count" => {
+                    let mut vals = self.translate_args(bcx, args)?;
+                    let mut all = vec![s];
+                    all.append(&mut vals);
+                    return Ok(self.call_runtime(bcx, "gobol_str_count", &all));
+                }
+                "to_upper" => {
+                    return Ok(self.call_runtime(bcx, "gobol_str_to_upper", &[s]));
+                }
+                "to_lower" => {
+                    return Ok(self.call_runtime(bcx, "gobol_str_to_lower", &[s]));
+                }
                 _ => {}
             }
         }

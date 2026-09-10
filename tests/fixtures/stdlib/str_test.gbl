@@ -13,4 +13,18 @@ func main() {
 
     var replaced = s.replace("Gobol", "World");
     io::println(@"replaced: '{replaced}'");
+
+    var prefix = "  Hello";
+    var suffix = "!  ";
+    var word = "Gobol";
+    var banana = "banana";
+    var upper_word = "Gobol";
+    var lower_word = "GOBOL";
+    var needle = "an";
+    io::println(@"starts: {s.starts_with(prefix)}");
+    io::println(@"ends: {s.ends_with(suffix)}");
+    io::println(@"index: {s.index_of(word)}");
+    io::println(@"count: {banana.count(needle)}");
+    io::println(@"upper: {upper_word.to_upper()}");
+    io::println(@"lower: {lower_word.to_lower()}");
 }

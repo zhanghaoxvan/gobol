@@ -15,5 +15,11 @@ char *gobol_str_char(long long code);
 long long gobol_str_contains(const char *s, const char *sub);
 char *gobol_str_trim(const char *s);
 char *gobol_str_replace(const char *s, const char *from, const char *to);
+long long gobol_str_starts_with(const char *s, const char *prefix);
+long long gobol_str_ends_with(const char *s, const char *suffix);
+long long gobol_str_index_of(const char *s, const char *sub);
+long long gobol_str_count(const char *s, const char *sub);
+char *gobol_str_to_upper(const char *s);
+char *gobol_str_to_lower(const char *s);
 
 #endif /* GOBOL_RT_STR_H */

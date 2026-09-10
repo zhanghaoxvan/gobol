@@ -17,4 +17,22 @@ impl str {
 
     #[intrinsic("str_replace")]
     func replace(self, old: str, to: str): str;
+
+    #[intrinsic("str_starts_with")]
+    func starts_with(self, prefix: str): bool;
+
+    #[intrinsic("str_ends_with")]
+    func ends_with(self, suffix: str): bool;
+
+    #[intrinsic("str_index_of")]
+    func index_of(self, substr: str): int;
+
+    #[intrinsic("str_count")]
+    func count(self, substr: str): int;
+
+    #[intrinsic("str_to_upper")]
+    func to_upper(self): str;
+
+    #[intrinsic("str_to_lower")]
+    func to_lower(self): str;
 };

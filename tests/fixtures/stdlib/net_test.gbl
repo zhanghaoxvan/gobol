@@ -1,4 +1,6 @@
 // net_test.gbl — Network tests
+import std::net;
+import std::result;
 
 func test_connect_timeout(): bool {
     var result = TcpStream::connect("127.0.0.1", 99999, 1000);

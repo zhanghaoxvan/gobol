@@ -246,19 +246,20 @@ func main() {
     result.assert_stdout_contains("i=7 f=2.5");
 }
 
-/// When one call site cannot be inferred (a `null` argument yields no useful
-/// type), the template must be kept as a fallback so that call site still
-/// links — while the inferable call site is still specialized. Regresses the
+/// When one call site uses an explicitly typed `Option::None`, the template
+/// must be kept as a fallback so that call site still links — while the
+/// inferable call site is still specialized. Regresses the
 /// "successful instance + uninferred call site" dangling-symbol bug.
 #[test]
 fn test_generic_uninferred_call_keeps_template() {
     let src = r#"import std;
+import std::option;
 
 func identity<T>(x: T): T { return x }
 
 func main() {
     var i = identity(5)
-    var n = identity(null)
+    var n = identity(Option<int>::None)
     std::io::println(@"i={i}")
 }
 "#;

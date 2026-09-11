@@ -18,34 +18,48 @@ fn resolve_module_file(
     lib_paths: &[String],
     main_file: &str,
 ) -> Option<String> {
-    let relative = format!("{}.gbl", path_parts.join("/"));
-    let mod_relative = format!("{}/mod.gbl", path_parts.join("/"));
+    let mut module_paths = vec![path_parts.to_vec()];
+    if path_parts.first().map(String::as_str) == Some("basic") {
+        module_paths.push(path_parts[1..].to_vec());
+    }
 
     if let Some(parent) = Path::new(main_file).parent() {
-        let p = parent.join(&relative);
-        if p.exists() {
-            return p.to_str().map(|s| s.to_string());
-        }
-        let p = parent.join(&mod_relative);
-        if p.exists() {
-            return p.to_str().map(|s| s.to_string());
+        for module_path in &module_paths {
+            let relative = format!("{}.gbl", module_path.join("/"));
+            let p = parent.join(&relative);
+            if p.exists() {
+                return p.to_str().map(|s| s.to_string());
+            }
+            let mod_relative = format!("{}/mod.gbl", module_path.join("/"));
+            let p = parent.join(&mod_relative);
+            if p.exists() {
+                return p.to_str().map(|s| s.to_string());
+            }
         }
     }
     for lp in lib_paths {
-        let p = Path::new(lp).join(&relative);
-        if p.exists() {
-            return p.to_str().map(|s| s.to_string());
-        }
-        let p = Path::new(lp).join(&mod_relative);
-        if p.exists() {
-            return p.to_str().map(|s| s.to_string());
+        for module_path in &module_paths {
+            let relative = format!("{}.gbl", module_path.join("/"));
+            let p = Path::new(lp).join(&relative);
+            if p.exists() {
+                return p.to_str().map(|s| s.to_string());
+            }
+            let mod_relative = format!("{}/mod.gbl", module_path.join("/"));
+            let p = Path::new(lp).join(&mod_relative);
+            if p.exists() {
+                return p.to_str().map(|s| s.to_string());
+            }
         }
     }
-    if Path::new(&relative).exists() {
-        return Some(relative);
-    }
-    if Path::new(&mod_relative).exists() {
-        return Some(mod_relative);
+    for module_path in &module_paths {
+        let relative = format!("{}.gbl", module_path.join("/"));
+        if Path::new(&relative).exists() {
+            return Some(relative);
+        }
+        let mod_relative = format!("{}/mod.gbl", module_path.join("/"));
+        if Path::new(&mod_relative).exists() {
+            return Some(mod_relative);
+        }
     }
     None
 }

@@ -1,3 +1,6 @@
+import std::fs;
+import std::result;
+
 func main() {
     // Write a file
     std::fs::write_file("/tmp/gobol_test.txt", "Hello from Gobol FS!");

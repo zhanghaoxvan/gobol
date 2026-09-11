@@ -32,9 +32,9 @@ import math as m             // Import with alias / 带别名导入
 
 ### 2.3 Prelude / 预置导入
 
-The compiler automatically injects `import std::xxx`; for all standard library modules in the entry program. This means you can use `io::println`, `math::sqrt`, `Vec`, and other std modules without explicit imports.
+The compiler automatically injects `import basic::xxx` for the language-fundamental standard-library modules in the entry program. The `basic` namespace maps to a bundled `basic/` tree when present and falls back to the corresponding `std/` module in the default distribution. The implicit modules include `assert`, `io`, the primitive type implementations, and their operator/comparison traits. Optional facilities such as `math`, `fs`, `net`, `option`, `range`, and `vec` must be imported explicitly.
 
-编译器会在入口程序中自动注入所有标准库模块的 `import std::xxx;`。这意味着你可以直接使用 `io::println`、`math::sqrt`、`Vec` 等标准库模块，无需显式导入。
+编译器会在入口程序中自动注入语言基础标准库模块的 `import basic::xxx;`。如果存在独立的 `basic/` 目录则优先使用它；默认发行版会回退到对应的 `std/` 模块。隐式导入包括 `assert`、`io`、基本类型实现及其运算/比较 trait；`math`、`fs`、`net`、`option`、`range`、`vec` 等可选功能必须显式导入。
 
 Note: This injection only applies to the main program file. Standard library modules and dependencies must declare their own imports explicitly.
 
@@ -332,7 +332,7 @@ enum Option<T> {
 }
 
 var opt = Option::Some(42);
-var none = Option::None();
+var none = Option::None;
 
 // Enum with multiple generic params / 多泛型参数的枚举
 enum Result<T, E> {
@@ -370,11 +370,11 @@ The `Result<T, E>` type (`std/result.gbl`) provides error handling via a tagged 
 | `is_err(self)` | `→ bool` | True if Err / 若为 Err 返回 true |
 | `map<U>(self, f)` | `(func(T): U) → Result<U, E>` | Transform Ok value / 转换 Ok 值 |
 
-### 7.3 The `?` Operator / `?` 运算符
+### 7.3 Result propagation / Result 传播
 
-The postfix `?` operator provides early-return-on-error for `Result` values. If the operand is `Err`, the enclosing function returns immediately with that error. Otherwise, the expression evaluates to the unwrapped `Ok` value.
+The postfix `?` operator is only the `Result` propagation operator. Nullable types (`T?`) and the `null` literal are not part of Gobol; use `Option<T>` with `Some(value)` and `Option::None` instead.
 
-后缀 `?` 运算符为 `Result` 值提供"出错即返回"功能。如果操作数是 `Err`，当前函数立即返回该错误。否则表达式求值为解包后的 `Ok` 值。
+后缀 `?` 运算符仅用于 `Result` 传播。Gobol 不支持可空类型（`T?`）和 `null` 字面量；请使用 `Option<T>`、`Some(value)` 和 `Option::None`。
 
 ```gobol
 import result;
@@ -561,7 +561,7 @@ impl MyCollection {
 impl MyIterator {
     func next(self): (T, bool) {
         if _index >= _len {
-            return (null, false);
+            return Option::None;
         }
         var value = _data[_index];
         _index += 1;
@@ -694,6 +694,12 @@ ch.drop();
 
 ### 11.7 Range Type / Range 类型
 
+`Range` is a half-open integer range: the start is included and the end is
+excluded. Positive and negative steps are supported; an empty or zero-step
+range has length zero.
+
+`Range` 是左闭右开的整数范围：包含起点，不包含终点。支持正负步长；空范围和零步长范围的长度为零。
+
 ```gobol
 var r1 = new Range(0, 10);      // 0..9, step 1
 var r2 = new Range(0, 10, 2);   // 0,2,4,6,8
@@ -705,6 +711,7 @@ r1.start();                     // 0
 r1.end();                       // 10
 r1.len();                       // 10
 r1.contains(5);                 // true
+var descending = new Range(5, 0, -2); // 5,3,1
 
 // Convert to array / 转换为数组
 var arr: int[] = r1;
@@ -723,6 +730,12 @@ val s = math::sin(1.0);
 
 ### 11.9 Vec<T> Type / Vec<T> 类型
 
+`Vec<T>` is a growable, owned vector backed by a contiguous `T[]`. It starts
+empty, doubles capacity when full, and uses `Option<T>` for iterator results;
+there is no nullable backing array and no `null` sentinel.
+
+`Vec<T>` 是由连续 `T[]` 支持的可增长拥有型向量。初始为空，满时容量翻倍；迭代器结果使用 `Option<T>`，不再使用可空数组或 `null` 哨兵。
+
 ```gobol
 var v = Vec<int>::new();
 v.push(10);
@@ -735,6 +748,11 @@ var v2 = Vec<int>.from_array([1, 2, 3]);
 // Iteration / 迭代
 for i, v in my_vec {
     io::print("{i}: {v}");
+}
+
+var next: Option<int> = v.iter().next();
+if next.is_some() {
+    io::print(next.take());
 }
 ```
 

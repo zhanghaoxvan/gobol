@@ -467,8 +467,8 @@ impl SemanticAnalyzer {
 
         // Auto-load trait definitions (std::ops::Add, std::cmp::Eq, etc.)
         // so that `impl Trait for Type` validation works even without
-        // explicit `import std;`.  This is a compiler-internal fallback;
-        // user code still needs `import std;` for io/range/etc.
+        // explicit imports. Optional standard-library modules are loaded by
+        // the injected basic prelude or by an explicit import in user code.
         self.load_module("trait");
 
         // Register standard traits (hardcoded fallback in case trait.gbl doesn't load)
@@ -662,7 +662,6 @@ impl SemanticAnalyzer {
         } else {
             self.errors.push(format!("Error: {}", msg));
         }
-
     }
 
     fn error_position(&self, msg: &str) -> (i32, i32) {
@@ -1154,58 +1153,78 @@ impl SemanticAnalyzer {
     }
 
     fn resolve_module_path(&self, path_parts: &[String], base_dir: Option<&str>) -> Option<String> {
-        let relative = path_parts.join("/") + ".gbl";
+        let mut module_paths = vec![path_parts.to_vec()];
+        // The basic prelude is a lightweight namespace over the existing
+        // standard-library module files. Prefer a real `basic/` tree when
+        // present, then fall back to `std/` for the bundled layout.
+        if path_parts.first().map(String::as_str) == Some("basic") {
+            module_paths.push(path_parts[1..].to_vec());
+        }
 
         // First: check relative to the importing module's directory
         if let Some(dir) = base_dir {
-            let rel_full = format!("{}/{}", dir, relative);
-            if Path::new(&rel_full).exists() {
-                return Some(rel_full);
-            }
-            let rel_mod = format!("{}/{}/mod.gbl", dir, path_parts.join("/"));
-            if Path::new(&rel_mod).exists() {
-                return Some(rel_mod);
+            for module_path in &module_paths {
+                let relative = module_path.join("/") + ".gbl";
+                let rel_full = format!("{}/{}", dir, relative);
+                if Path::new(&rel_full).exists() {
+                    return Some(rel_full);
+                }
+                let rel_mod = format!("{}/{}/mod.gbl", dir, module_path.join("/"));
+                if Path::new(&rel_mod).exists() {
+                    return Some(rel_mod);
+                }
             }
 
             // Also check in base_dir/lib/ (local lib directory)
-            let rel_lib = format!("{}/lib/{}", dir, relative);
-            if Path::new(&rel_lib).exists() {
-                return Some(rel_lib);
+            for module_path in &module_paths {
+                let relative = module_path.join("/") + ".gbl";
+                let rel_lib = format!("{}/lib/{}", dir, relative);
+                if Path::new(&rel_lib).exists() {
+                    return Some(rel_lib);
+                }
             }
         }
 
         // Second: check each lib path
         for lib_path in &self.lib_paths {
-            // <lib_path>/<module>.gbl
-            let full = format!("{}/{}", lib_path, relative);
-            if Path::new(&full).exists() {
-                return Some(full);
+            for module_path in &module_paths {
+                let relative = module_path.join("/") + ".gbl";
+                // <lib_path>/<module>.gbl
+                let full = format!("{}/{}", lib_path, relative);
+                if Path::new(&full).exists() {
+                    return Some(full);
+                }
+                // <lib_path>/<module>/mod.gbl  (modern module entry point)
+                let mod_relative = format!("{}/mod.gbl", module_path.join("/"));
+                let mod_full = format!("{}/{}", lib_path, mod_relative);
+                if Path::new(&mod_full).exists() {
+                    return Some(mod_full);
+                }
             }
-            // <lib_path>/<module>/mod.gbl  (modern module entry point)
-            let mod_relative = format!("{}/mod.gbl", path_parts.join("/"));
-            let mod_full = format!("{}/{}", lib_path, mod_relative);
-            if Path::new(&mod_full).exists() {
-                return Some(mod_full);
-            }
-            // <lib_path>/src/<module>.gbl (for grape packages)
-            let src_full = format!("{}/src/{}", lib_path, relative);
-            if Path::new(&src_full).exists() {
-                return Some(src_full);
-            }
-            // <lib_path>/lib/<module>.gbl
-            let lib_full = format!("{}/lib/{}", lib_path, relative);
-            if Path::new(&lib_full).exists() {
-                return Some(lib_full);
+            for module_path in &module_paths {
+                let relative = module_path.join("/") + ".gbl";
+                // <lib_path>/src/<module>.gbl (for grape packages)
+                let src_full = format!("{}/src/{}", lib_path, relative);
+                if Path::new(&src_full).exists() {
+                    return Some(src_full);
+                }
+                // <lib_path>/lib/<module>.gbl
+                let lib_full = format!("{}/lib/{}", lib_path, relative);
+                if Path::new(&lib_full).exists() {
+                    return Some(lib_full);
+                }
             }
         }
         // Third: try without lib prefix
-        let direct = format!("{}.gbl", path_parts.join("/"));
-        if Path::new(&direct).exists() {
-            return Some(direct);
-        }
-        let mod_direct = format!("{}/mod.gbl", path_parts.join("/"));
-        if Path::new(&mod_direct).exists() {
-            return Some(mod_direct);
+        for module_path in &module_paths {
+            let direct = format!("{}.gbl", module_path.join("/"));
+            if Path::new(&direct).exists() {
+                return Some(direct);
+            }
+            let mod_direct = format!("{}/mod.gbl", module_path.join("/"));
+            if Path::new(&mod_direct).exists() {
+                return Some(mod_direct);
+            }
         }
         None
     }
@@ -2552,6 +2571,75 @@ impl AstVisitor for SemanticAnalyzer {
                 self.type_stack.push(DataType::Unknown);
             }
         }
+    }
+
+    fn visit_path_access(&mut self, node: &PathAccess) {
+        let full_name = node.get_full_name();
+        let member = node.get_member().to_string();
+        let path_prefix = node.get_path().join("::");
+        let mut candidates = vec![full_name.clone()];
+
+        if !path_prefix.is_empty() {
+            let stripped_prefix = path_prefix
+                .split("::")
+                .map(|part| part.split('<').next().unwrap_or(part))
+                .collect::<Vec<_>>()
+                .join("::");
+            candidates.push(format!("{}::{}", stripped_prefix, member));
+        }
+
+        if !node.get_path().is_empty() {
+            let enum_name = node
+                .get_path()
+                .last()
+                .map(|s| s.split('<').next().unwrap_or(s).to_string())
+                .unwrap_or_default();
+            if !enum_name.is_empty() {
+                candidates.push(format!("{}::{}", enum_name, member));
+            }
+        }
+
+        for candidate in candidates {
+            if let Some(symbol) = self.env.lookup_symbol(&candidate) {
+                self.type_stack.push(symbol.data_type.clone());
+                return;
+            }
+            if let Some((variant_names, _)) = self.enum_info.get(&candidate) {
+                if variant_names.iter().any(|name| name == &member) {
+                    self.type_stack.push(DataType::Struct(candidate.clone()));
+                    return;
+                }
+            }
+        }
+
+        // A bare enum variant like `Option::None` or `Color::Red` is a value,
+        // not a function call, so resolve it via the enum metadata even when
+        // the zero-arg form is written without parentheses.
+        if let Some((variant_names, _)) = node
+            .get_path()
+            .last()
+            .and_then(|path| self.enum_info.get(path.split('<').next().unwrap_or(path)))
+        {
+            if variant_names.iter().any(|name| name == &member) {
+                let enum_name = node
+                    .get_path()
+                    .last()
+                    .map(|s| s.split('<').next().unwrap_or(s).to_string())
+                    .unwrap_or_default();
+                if !enum_name.is_empty() {
+                    self.type_stack.push(DataType::Struct(enum_name));
+                    return;
+                }
+            }
+        }
+
+        if let Some(sym) = self.env.lookup_symbol(&member) {
+            self.type_stack.push(sym.data_type.clone());
+            return;
+        }
+
+        self.error(&format!("Undeclared path: '{}'", full_name));
+        self.type_stack.push(DataType::Unknown);
     }
 
     fn visit_number_literal(&mut self, node: &NumberLiteral) {

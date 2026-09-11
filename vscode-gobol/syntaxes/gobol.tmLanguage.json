@@ -165,7 +165,7 @@
         },
         {
           "name": "constant.language.gobol",
-          "match": "\\b(true|false|null|none|nil|self|Self)\\b"
+          "match": "\\b(true|false|none|nil|self|Self)\\b"
         }
       ]
     },

@@ -10,14 +10,14 @@ import ref;
 import iterator;
 
 struct Vec<T> {
-    _data: T[]?,
+    _data: T[],
     _len: int,
     _cap: int
 };
 
 impl<T> New<T> for Vec<T> {
     func new(): Vec<T> {
-        _data = null;
+        _data = new T[0];
         _len = 0;
         _cap = 0;
         self
@@ -32,7 +32,7 @@ impl<T> New<T> for Vec<T> {
     }
     
     func new(capacity: int): Vec<T> {
-        _data = new T[capacity]?;
+        _data = new T[capacity];
         _len = 0;
         _cap = capacity;
         self
@@ -70,8 +70,8 @@ impl<T> Vec<T> {
         if _len >= _cap {
             self._grow();
         }
-        if _data == null {
-            _data = new T[4]?;
+        if _cap == 0 {
+            _data = new T[4];
             _cap = 4;
         }
         _data[_len] = value;
@@ -84,7 +84,6 @@ impl<T> Vec<T> {
         }
         _len -= 1;
         var value: T = _data[_len];
-        _data[_len] = null;
         value
     }
     
@@ -119,7 +118,7 @@ impl<T> Vec<T> {
         } else {
             new_cap = _cap * 2;
         }
-        var new_data: T[] = new T[new_cap]?;
+        var new_data: T[] = new T[new_cap];
         for i in 0.._len {
             new_data[i] = _data[i];
         }
@@ -129,13 +128,13 @@ impl<T> Vec<T> {
 };
 
 struct VecIterator<T> {
-    _data: T[]?,
+    _data: T[],
     _len: int,
     _index: int
 };
 
 impl<T> New<T> for VecIterator<T> {
-    func new(data: T[]?, len: int): VecIterator<T> {
+    func new(data: T[], len: int): VecIterator<T> {
         VecIterator { _data: data, _len: len, _index: 0 }
     }
 }
@@ -144,7 +143,7 @@ impl<T> Iterator<T> for VecIterator<T> {
     type Value = T;
     func next(self): Option<T> {
         if _index >= _len {
-            return Option::None();
+            return Option::None;
         }
         var value: T = _data[_index];
         _index += 1;

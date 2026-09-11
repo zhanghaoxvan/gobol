@@ -2176,6 +2176,31 @@ impl AstVisitor for IRBuilder {
         self.push_expr(IRExpr::Variable(name));
     }
 
+    fn visit_path_access(&mut self, node: &PathAccess) {
+        let full_name = node.get_full_name();
+        let member = node.get_member().to_string();
+        let enum_name = node
+            .get_path()
+            .last()
+            .map(|p| p.split('<').next().unwrap_or(p).to_string())
+            .unwrap_or_default();
+
+        if !enum_name.is_empty()
+            && self
+                .variant_indices
+                .contains_key(&(enum_name.clone(), member.clone()))
+        {
+            self.push_expr(IRExpr::Call {
+                func: format!("{}::{}", enum_name, member),
+                args: Vec::new(),
+                generic_args: Vec::new(),
+            });
+            return;
+        }
+
+        self.push_expr(IRExpr::Variable(full_name));
+    }
+
     fn visit_number_literal(&mut self, node: &NumberLiteral) {
         let v = node.get_value();
         // Use the source-level form to decide int vs float: a literal like

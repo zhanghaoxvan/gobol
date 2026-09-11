@@ -9,7 +9,7 @@ endif
 syntax keyword gobolKeyword if else for while return break continue
 syntax keyword gobolKeyword func var val import from as export extern
 syntax keyword gobolKeyword struct impl trait enum new
-syntax keyword gobolKeyword match convert self true false null
+syntax keyword gobolKeyword match convert self true false
 syntax keyword gobolKeyword int float str bool
 
 " Types / builtins (highlighted as Type)

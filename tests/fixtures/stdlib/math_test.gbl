@@ -1,3 +1,5 @@
+import std::math;
+
 func main() {
     var x = 3.0;
     var y = 4.0;

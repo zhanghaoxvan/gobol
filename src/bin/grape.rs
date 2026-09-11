@@ -30,23 +30,20 @@ pub enum GrapeError {
 }
 
 fn collect_dependency_manifests(config: &GrapeToml) -> Result<GrapeToml> {
-    fn collect(
-        config: &GrapeToml,
-        visited: &mut HashSet<PathBuf>,
-    ) -> Result<GrapeToml> {
-    let mut effective = config.clone();
-    for spec in config.dependencies.values() {
-        let manifest = spec.local_path().join(GRAPE_TOML);
-        if !manifest.exists() {
-            continue;
+    fn collect(config: &GrapeToml, visited: &mut HashSet<PathBuf>) -> Result<GrapeToml> {
+        let mut effective = config.clone();
+        for spec in config.dependencies.values() {
+            let manifest = spec.local_path().join(GRAPE_TOML);
+            if !manifest.exists() {
+                continue;
+            }
+            if !visited.insert(manifest.clone()) {
+                continue;
+            }
+            let nested = collect(&read_grape_toml_at(&manifest)?, visited)?;
+            effective = merge_grape_toml(&effective, &nested);
         }
-        if !visited.insert(manifest.clone()) {
-            continue;
-        }
-        let nested = collect(&read_grape_toml_at(&manifest)?, visited)?;
-        effective = merge_grape_toml(&effective, &nested);
-    }
-    Ok(effective)
+        Ok(effective)
     }
 
     collect(config, &mut HashSet::new())
@@ -734,8 +731,7 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
 
     let entry_file = config.project.entry.as_deref().ok_or_else(|| {
         GrapeError::BadConfig(
-            "root project must define [project].entry; dependency projects may omit it"
-                .to_string(),
+            "root project must define [project].entry; dependency projects may omit it".to_string(),
         )
     })?;
     if !Path::new(entry_file).exists() {
@@ -988,8 +984,7 @@ fn read_grape_toml() -> Result<GrapeToml> {
 
 fn read_grape_toml_at(path: &Path) -> Result<GrapeToml> {
     let contents = fs::read_to_string(path).map_err(GrapeError::Io)?;
-    toml::from_str(&contents)
-        .map_err(|e| GrapeError::Toml(format!("{}: {}", path.display(), e)))
+    toml::from_str(&contents).map_err(|e| GrapeError::Toml(format!("{}: {}", path.display(), e)))
 }
 
 /// Merge a package manifest with a nested manifest. Values from `lower`
@@ -1008,10 +1003,26 @@ fn merge_grape_toml(upper: &GrapeToml, lower: &GrapeToml) -> GrapeToml {
         } else {
             lower.project.version.clone()
         },
-        entry: lower.project.entry.clone().or_else(|| upper.project.entry.clone()),
-        authors: lower.project.authors.clone().or_else(|| upper.project.authors.clone()),
-        description: lower.project.description.clone().or_else(|| upper.project.description.clone()),
-        license: lower.project.license.clone().or_else(|| upper.project.license.clone()),
+        entry: lower
+            .project
+            .entry
+            .clone()
+            .or_else(|| upper.project.entry.clone()),
+        authors: lower
+            .project
+            .authors
+            .clone()
+            .or_else(|| upper.project.authors.clone()),
+        description: lower
+            .project
+            .description
+            .clone()
+            .or_else(|| upper.project.description.clone()),
+        license: lower
+            .project
+            .license
+            .clone()
+            .or_else(|| upper.project.license.clone()),
     };
     GrapeToml {
         project,
@@ -1482,21 +1493,21 @@ mod tests {
 
     #[test]
     fn dependency_manifest_entry_is_optional() {
-            let config: GrapeToml = toml::from_str(
-                r#"
+        let config: GrapeToml = toml::from_str(
+            r#"
                     [project]
                     name = "library"
                     version = "1.0.0"
                 "#,
-            )
-            .expect("dependency manifest without entry should parse");
-            assert_eq!(config.project.entry, None);
+        )
+        .expect("dependency manifest without entry should parse");
+        assert_eq!(config.project.entry, None);
     }
 
     #[test]
     fn nested_manifest_values_override_parent_values() {
-            let parent: GrapeToml = toml::from_str(
-                r#"
+        let parent: GrapeToml = toml::from_str(
+            r#"
                     [project]
                     name = "parent"
                     version = "1.0.0"
@@ -1504,10 +1515,10 @@ mod tests {
                     [dependencies]
                     alpha = { repo = "user/alpha", tag = "1.0.0" }
                 "#,
-            )
-            .unwrap();
-            let child: GrapeToml = toml::from_str(
-                r#"
+        )
+        .unwrap();
+        let child: GrapeToml = toml::from_str(
+            r#"
                     [project]
                     name = "child"
                     version = "2.0.0"
@@ -1515,14 +1526,14 @@ mod tests {
                     alpha = { repo = "user/alpha", tag = "2.0.0" }
                     beta = { repo = "user/beta", tag = "1.0.0" }
                 "#,
-            )
-            .unwrap();
+        )
+        .unwrap();
 
-            let merged = merge_grape_toml(&parent, &child);
-            assert_eq!(merged.project.name, "child");
-            assert_eq!(merged.project.entry.as_deref(), Some("main.gbl"));
-            assert_eq!(merged.dependencies["alpha"].tag, "2.0.0");
-            assert!(merged.dependencies.contains_key("beta"));
+        let merged = merge_grape_toml(&parent, &child);
+        assert_eq!(merged.project.name, "child");
+        assert_eq!(merged.project.entry.as_deref(), Some("main.gbl"));
+        assert_eq!(merged.dependencies["alpha"].tag, "2.0.0");
+        assert!(merged.dependencies.contains_key("beta"));
     }
 
     // ---- Tag 解析测试 ----

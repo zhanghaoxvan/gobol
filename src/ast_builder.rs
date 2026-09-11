@@ -20,7 +20,7 @@ pub struct AstBuilder {
     /// a statement's local attribute with the same name overrides the
     /// file-level one).
     file_attributes: Vec<Attribute>,
-    /// When enabled, the std prelude (`import std::xxx`) is auto-injected at
+    /// When enabled, the basic prelude (`import basic::xxx`) is auto-injected at
     /// the top of the built program. This is intended for the *entry* program
     /// only — standard-library modules (and any module loaded by the semantic
     /// analyser) declare their own imports explicitly, so they must not have
@@ -55,7 +55,7 @@ impl AstBuilder {
         self.error_formatter = Some(f);
     }
 
-    /// Enable/disable injection of the std prelude for this build.
+    /// Enable/disable injection of the basic prelude for this build.
     /// The entry program should opt in; std-library / loaded modules
     /// must not (see the field docs).
     pub fn set_inject_prelude(&mut self, enabled: bool) {
@@ -66,7 +66,7 @@ impl AstBuilder {
         self.root = None;
         let mut program = self.parse_program();
         if self.inject_prelude {
-            self.inject_std_prelude(&mut program);
+            self.inject_basic_prelude(&mut program);
         }
         self.root = Some(Box::new(program));
         self.root.take()
@@ -543,7 +543,7 @@ impl AstBuilder {
         let is_expr_keyword = self.match_type(&TokenType::Keyword)
             && matches!(
                 self.current_token().value.as_str(),
-                "true" | "false" | "null" | "self" | "if" | "match" | "new"
+                "true" | "false" | "self" | "if" | "match" | "new"
             );
         let is_expr_operator = self.match_type(&TokenType::Operator)
             && matches!(
@@ -614,11 +614,13 @@ impl AstBuilder {
         Some(Box::new(ImportStatement::new(path, alias)))
     }
 
-    fn inject_std_prelude(&mut self, program: &mut Program) {
+    fn inject_basic_prelude(&mut self, program: &mut Program) {
+        // Keep the implicit prelude limited to language fundamentals. Optional
+        // standard-library facilities (math, fs, net, collections, etc.) must
+        // be imported explicitly so every program does not pull them in.
         let prelude_modules = vec![
-            "assert", "builtins", "byte", "cmp", "debug", "float", "fs", "int", "io", "iterator",
-            "math", "mem", "net", "ops", "option", "range", "ref", "result", "str", "thread",
-            "vec",
+            "assert", "builtins", "cmp", "debug", "float", "int", "io", "ops", "str", "option",
+            "result", "range", "vec",
         ];
 
         let mut imported: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -632,7 +634,7 @@ impl AstBuilder {
         for &name in prelude_modules.iter().rev() {
             if !imported.contains(name) {
                 let import_stmt =
-                    ImportStatement::new(vec!["std".to_string(), name.to_string()], None);
+                    ImportStatement::new(vec!["basic".to_string(), name.to_string()], None);
                 program.statements.insert(0, Box::new(import_stmt));
             }
         }
@@ -1650,11 +1652,6 @@ impl AstBuilder {
             }
         }
 
-        if self.match_value("?") {
-            self.advance();
-            tp = Box::new(NullableType::new(tp));
-        }
-
         Some(tp)
     }
 
@@ -2378,10 +2375,6 @@ impl AstBuilder {
                     self.advance();
                     return Some(Box::new(BooleanLiteral::new(value == "true")));
                 }
-                "null" => {
-                    self.advance();
-                    return Some(Box::new(NullLiteral::new()));
-                }
                 "self" => {
                     self.advance();
                     return Some(Box::new(Identifier::new("self")));
@@ -2800,10 +2793,6 @@ impl AstBuilder {
                 return None;
             }
             self.advance();
-            // Skip ? if present (nullable array)
-            if self.match_value("?") {
-                self.advance();
-            }
             // Array allocation marker (handled by cranelift backend)
             return Some(Box::new(Identifier::new("__new_array")));
         }

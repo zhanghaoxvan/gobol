@@ -28,15 +28,14 @@ impl Env {
         Env { _singleton_marker: 0 }
     }
 
-    /// Return the value of the environment variable `name`, or `null` if it
-    /// has not been set.
-    func get_var(self, name: str): str? {
-        getenv(name)
+    /// Return the value of the environment variable `name` as an Option.
+    func get_var(self, name: str): Option<str> {
+        Option::Some(getenv(name))
     }
 
     /// Return `true` if an environment variable named `name` exists.
     func has_var(self, name: str): bool {
-        getenv(name) != null
+        self.get_var(name).is_some()
     }
 
     // NOTE: the remaining helpers below are *stub* signatures for the OOP

@@ -355,8 +355,7 @@ impl DocState {
             let Some(close) = close else { continue };
             let inside_header = token.line >= sym.line
                 && (token.line > sym.line || token.col > sym.col)
-                && (close.line > sym.line
-                    || (close.line == sym.line && close.col >= sym.col));
+                && (close.line > sym.line || (close.line == sym.line && close.col >= sym.col));
             if inside_header {
                 let path = self.scope_path_at(token.line, token.col + 1);
                 let distance = token.line - sym.line;
@@ -368,12 +367,7 @@ impl DocState {
         best.map(|(_, path)| path).unwrap_or(direct)
     }
 
-    fn find_definition_at(
-        &self,
-        name: &str,
-        line: u32,
-        character: u32,
-    ) -> Option<&SymbolEntry> {
+    fn find_definition_at(&self, name: &str, line: u32, character: u32) -> Option<&SymbolEntry> {
         self.symbols.iter().filter(|s| s.name == name).find(|s| {
             !matches!(s.kind, SymKind::Variable | SymKind::Parameter)
                 || self.local_visible_at(s, line, character)
@@ -2124,7 +2118,7 @@ fn infer_expr_type(
     }
     match t.value.as_str() {
         "true" | "false" => return Some("bool".to_string()),
-        "null" | "none" => return Some("null".to_string()),
+        "none" => return Some("none".to_string()),
         "self" => return Some("self".to_string()),
         _ => {}
     }
@@ -2220,10 +2214,7 @@ fn is_declaration_call_paren(tokens: &[Token], ident_idx: usize) -> bool {
         .map(|x| x.value.as_str());
     let prev2 =
         ident_idx >= 2 && tokens.get(ident_idx - 2).map(|x| x.value.as_str()) == Some("func");
-    matches!(
-        prev1,
-        Some("func") | Some("static") | Some("operator")
-    ) || prev2
+    matches!(prev1, Some("func") | Some("static") | Some("operator")) || prev2
 }
 
 /// Build per-argument inlay hints ("name:") for a call at `ident_idx`.
@@ -2558,9 +2549,11 @@ fn resolve_module_file(
     module_name: &str,
     workspace_roots: &[PathBuf],
 ) -> Option<PathBuf> {
-    let module_path = module_name
-        .split("::")
-        .fold(PathBuf::new(), |path, part| path.join(part));
+    let module_parts: Vec<&str> = module_name.split("::").collect();
+    let mut module_paths = vec![module_parts.clone()];
+    if module_parts.first().copied() == Some("basic") {
+        module_paths.push(module_parts[1..].to_vec());
+    }
     let mut roots = Vec::new();
     if let Some(parent) = PathBuf::from(file_path).parent() {
         roots.push(parent.to_path_buf());
@@ -2572,12 +2565,17 @@ fn resolve_module_file(
     );
 
     for root in roots {
-        for candidate in [
-            root.join(&module_path).with_extension("gbl"),
-            root.join(&module_path).join("mod.gbl"),
-        ] {
-            if candidate.is_file() {
-                return Some(candidate);
+        for parts in &module_paths {
+            let module_path = parts
+                .iter()
+                .fold(PathBuf::new(), |path, part| path.join(part));
+            for candidate in [
+                root.join(&module_path).with_extension("gbl"),
+                root.join(&module_path).join("mod.gbl"),
+            ] {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -2977,11 +2975,9 @@ impl LanguageServer for GobolLsp {
 
         let mut hover_text = String::new();
         let mut sym_not_found = true;
-        if let Some(sym) = state.find_definition_at(
-            &token.value,
-            pos.position.line,
-            pos.position.character,
-        ) {
+        if let Some(sym) =
+            state.find_definition_at(&token.value, pos.position.line, pos.position.character)
+        {
             sym_not_found = false;
             let kind_label = sym.kind.label();
             let type_str = sym.type_info.clone().unwrap_or_else(|| "-".to_string());
@@ -2991,73 +2987,69 @@ impl LanguageServer for GobolLsp {
                 .map(|p| format!(" (on `{}`)", p))
                 .unwrap_or_default();
 
-                let signature = match sym.kind {
-                    SymKind::Function
-                    | SymKind::Method
-                    | SymKind::ExternFn
-                    | SymKind::StaticFunc => {
-                        if let Some(ty) = sym.type_info.as_ref() {
-                            format!("func {}(): {}", sym.name, ty)
-                        } else {
-                            format!("func {}()", sym.name)
-                        }
+            let signature = match sym.kind {
+                SymKind::Function | SymKind::Method | SymKind::ExternFn | SymKind::StaticFunc => {
+                    if let Some(ty) = sym.type_info.as_ref() {
+                        format!("func {}(): {}", sym.name, ty)
+                    } else {
+                        format!("func {}()", sym.name)
                     }
-                    SymKind::Struct => format!("struct {}", sym.name),
-                    SymKind::Enum => format!("enum {}", sym.name),
-                    SymKind::EnumVariant => {
-                        format!(
-                            "{}::{} (variant of {})",
-                            sym.parent.as_deref().unwrap_or("?"),
-                            sym.name,
-                            sym.parent.as_deref().unwrap_or("?")
-                        )
-                    }
-                    SymKind::Trait => format!("trait {}", sym.name),
-                    SymKind::TypeAlias => {
-                        if let Some(ty) = sym.type_info.as_ref() {
-                            format!("type {} = {}", sym.name, ty)
-                        } else {
-                            format!("type {}", sym.name)
-                        }
-                    }
-                    SymKind::Variable | SymKind::Parameter => {
-                        if let Some(ty) = sym.type_info.as_ref() {
-                            format!("{}: {}", sym.name, ty)
-                        } else {
-                            sym.name.clone()
-                        }
-                    }
-                    SymKind::Import => format!("import {}", sym.name),
-                };
-
-                hover_text = format!(
-                    "**{}** `{}`{}\n\n```gobol\n{}\n```\n\nType: `{}`",
-                    kind_label, sym.name, parent_str, signature, type_str
-                );
-
-                // A `from module import Type` entry is initially indexed as a
-                // local function-like symbol. Replace that placeholder with
-                // the real imported declaration so types get the correct
-                // hover kind, definition, and documentation.
-                if let Some(module) = sym.parent.as_ref().and_then(|p| state.module_imported(p)) {
-                    if let Some((_n, _m, imported_kind, imported_ty, _u, _l, _c, doc)) =
-                        self.resolve_imported_symbol(&uri, &token.value).await
-                    {
-                        let imported_type = imported_ty.unwrap_or_else(|| "-".to_string());
-                        hover_text = format!(
-                            "**{}** imported from `{}`\n\n```gobol\n{} {}\n```\n\nType: `{}`",
-                            imported_kind, module, imported_kind, token.value, imported_type
-                        );
-                        if let Some(doc) = doc {
-                            if !doc.trim().is_empty() {
-                                hover_text.push_str(&format!("\n\n---\n\n{}", doc));
-                            }
-                        }
-                    }
-                } else if let Some(doc) = &sym.doc_comment {
-                    hover_text.push_str(&format!("\n\n---\n\n{}", doc));
                 }
+                SymKind::Struct => format!("struct {}", sym.name),
+                SymKind::Enum => format!("enum {}", sym.name),
+                SymKind::EnumVariant => {
+                    format!(
+                        "{}::{} (variant of {})",
+                        sym.parent.as_deref().unwrap_or("?"),
+                        sym.name,
+                        sym.parent.as_deref().unwrap_or("?")
+                    )
+                }
+                SymKind::Trait => format!("trait {}", sym.name),
+                SymKind::TypeAlias => {
+                    if let Some(ty) = sym.type_info.as_ref() {
+                        format!("type {} = {}", sym.name, ty)
+                    } else {
+                        format!("type {}", sym.name)
+                    }
+                }
+                SymKind::Variable | SymKind::Parameter => {
+                    if let Some(ty) = sym.type_info.as_ref() {
+                        format!("{}: {}", sym.name, ty)
+                    } else {
+                        sym.name.clone()
+                    }
+                }
+                SymKind::Import => format!("import {}", sym.name),
+            };
 
+            hover_text = format!(
+                "**{}** `{}`{}\n\n```gobol\n{}\n```\n\nType: `{}`",
+                kind_label, sym.name, parent_str, signature, type_str
+            );
+
+            // A `from module import Type` entry is initially indexed as a
+            // local function-like symbol. Replace that placeholder with
+            // the real imported declaration so types get the correct
+            // hover kind, definition, and documentation.
+            if let Some(module) = sym.parent.as_ref().and_then(|p| state.module_imported(p)) {
+                if let Some((_n, _m, imported_kind, imported_ty, _u, _l, _c, doc)) =
+                    self.resolve_imported_symbol(&uri, &token.value).await
+                {
+                    let imported_type = imported_ty.unwrap_or_else(|| "-".to_string());
+                    hover_text = format!(
+                        "**{}** imported from `{}`\n\n```gobol\n{} {}\n```\n\nType: `{}`",
+                        imported_kind, module, imported_kind, token.value, imported_type
+                    );
+                    if let Some(doc) = doc {
+                        if !doc.trim().is_empty() {
+                            hover_text.push_str(&format!("\n\n---\n\n{}", doc));
+                        }
+                    }
+                }
+            } else if let Some(doc) = &sym.doc_comment {
+                hover_text.push_str(&format!("\n\n---\n\n{}", doc));
+            }
         }
 
         if hover_text.is_empty() {
@@ -3170,11 +3162,9 @@ impl LanguageServer for GobolLsp {
         }
 
         // 1. Definition in this document.
-        if let Some(sym) = state.find_definition_at(
-            &token.value,
-            pos.position.line,
-            pos.position.character,
-        ) {
+        if let Some(sym) =
+            state.find_definition_at(&token.value, pos.position.line, pos.position.character)
+        {
             // If the local symbol is a `from lib import greet` re-export (its
             // parent names an imported module), prefer the definition in that
             // module's source file so Ctrl+Click lands on the real code.
@@ -3500,46 +3490,10 @@ impl LanguageServer for GobolLsp {
         let import_ctx = self.is_import_context(&uri, pos).await;
 
         let keywords = &[
-            "func",
-            "var",
-            "val",
-            "struct",
-            "enum",
-            "impl",
-            "trait",
-            "if",
-            "else",
-            "for",
-            "while",
-            "return",
-            "break",
-            "continue",
-            "import",
-            "export",
-            "as",
-            "in",
-            "match",
-            "convert",
-            "operator",
-            "new",
-            "static",
-            "type",
-            "where",
-            "loop",
-            "true",
-            "false",
-            "null",
-            "none",
-            "nil",
-            "self",
-            "Self",
-            "int",
-            "float",
-            "str",
-            "bool",
-            "void",
-            "char",
-            "unit",
+            "func", "var", "val", "struct", "enum", "impl", "trait", "if", "else", "for", "while",
+            "return", "break", "continue", "import", "export", "as", "in", "match", "convert",
+            "operator", "new", "static", "type", "where", "loop", "true", "false", "null", "none",
+            "nil", "self", "Self", "int", "float", "str", "bool", "void", "char", "unit",
         ];
 
         let mut items: Vec<CompletionItem> = Vec::new();

@@ -43,7 +43,7 @@ impl<T> Option<T> {
     // 映射函数：如果为 Some，对内部值应用 f，否则返回 None
     func map<U>(self, f: func(T): U): Option<U> {
         if self.is_none() {
-            Option::None()
+            Option::None
         } else {
             Option::Some(f(_0))
         }
@@ -52,7 +52,7 @@ impl<T> Option<T> {
     // 扁平化映射：如果为 Some，返回 f(value)，否则返回 None
     func flat_map<U>(self, f: func(T): Option<U>): Option<U> {
         if self.is_none() {
-            Option::None()
+            Option::None
         } else {
             f(_0)
         }
@@ -79,7 +79,7 @@ impl<T> Option<T> {
 
 impl<T> New<T> for Option<T> {
     func new(): Option<T> {
-        Option::None()
+        Option::None
     }
 
     func new(value: T): Option<T> {

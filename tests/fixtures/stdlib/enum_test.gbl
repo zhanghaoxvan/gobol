@@ -15,10 +15,10 @@ func main(): int {
     io::println("=== Enum test ===");
 
     // Unit variants
-    var c = Color::Red();
+    var c = Color::Red;
     io::println("Color::Red created");
 
-    var g = Color::Green();
+    var g = Color::Green;
     io::println("Color::Green created");
 
     // Option::Some with value
@@ -26,7 +26,7 @@ func main(): int {
     io::println("Option::Some(42) created");
 
     // Option::None
-    var none = Option::None();
+    var none = Option::None;
     io::println("Option::None created");
 
     0

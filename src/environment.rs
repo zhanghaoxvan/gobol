@@ -171,7 +171,7 @@ impl Symbol {
         Symbol {
             name: name.to_string(),
             symbol_type: SymbolType::Variable,
-            data_type: dt.clone(),
+            data_type: DataType::Array(Box::new(dt.clone())),
             scope_level: scope,
             module_name: String::new(),
             is_mut,
@@ -194,7 +194,7 @@ impl Symbol {
         Symbol {
             name: name.to_string(),
             symbol_type: SymbolType::Variable,
-            data_type: dt.clone(),
+            data_type: DataType::Array(Box::new(dt.clone())),
             scope_level: scope,
             module_name: String::new(),
             is_mut,

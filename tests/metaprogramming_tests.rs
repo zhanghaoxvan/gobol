@@ -43,15 +43,15 @@ fn test_expand_substitutes_argument_expressions() {
     let src = r#"import std;
 
 #[expand]
-func add(a: int, b: int): int { return a + b }
+func add(a: int, b: int): int { return a + b; }
 
 func main() {
-    var x = 5
-    var y = 10
-    var z = add(x, y)
-    std::io::println(@"z = {z}")
-    var w = add(x + 1, y * 2)
-    std::io::println(@"w = {w}")
+    var x = 5;
+    var y = 10;
+    var z = add(x, y);
+    std::io::println(@"z = {z}");
+    var w = add(x + 1, y * 2);
+    std::io::println(@"w = {w}");
 }
 "#;
     let result = run_inline_test(src);
@@ -67,15 +67,15 @@ fn test_expand_recursive_macro() {
     let src = r#"import std;
 
 #[expand]
-func add(a: int, b: int): int { return a + b }
+func add(a: int, b: int): int { return a + b; }
 
 #[expand]
-func dbl(a: int): int { return add(a, a) }
+func dbl(a: int): int { return add(a, a); }
 
 func main() {
-    var x = 5
-    std::io::println(@"d = {dbl(x)}")
-    std::io::println(@"q = {dbl(x + 1)}")
+    var x = 5;
+    std::io::println(@"d = {dbl(x)}");
+    std::io::println(@"q = {dbl(x + 1)}");
 }
 "#;
     let result = run_inline_test(src);
@@ -90,11 +90,11 @@ fn test_expand_literal_args_constant_fold() {
     let src = r#"import std;
 
 #[expand]
-func square(n: int): int { return n * n }
+func square(n: int): int { return n * n; }
 
 func main() {
-    var x = square(7)
-    std::io::println(@"x = {x}")
+    var x = square(7);
+    std::io::println(@"x = {x}");
 }
 "#;
     let result = run_inline_test(src);
@@ -110,14 +110,14 @@ fn test_expand_call_inside_format_string() {
     let src = r#"import std;
 
 #[expand]
-func add(a: int, b: int): int { return a + b }
+func add(a: int, b: int): int { return a + b; }
 
 func main() {
-    var x = 5
-    var y = 10
-    std::io::println(@"z = {add(x, y)}")
-    std::io::println(@"w = {add(x + 1, y * 2)}")
-    std::io::println(@"lit = {add(3, 4)}")
+    var x = 5;
+    var y = 10;
+    std::io::println(@"z = {add(x, y)}");
+    std::io::println(@"w = {add(x + 1, y * 2)}");
+    std::io::println(@"lit = {add(3, 4)}");
 }
 "#;
     let result = run_inline_test(src);
@@ -139,9 +139,9 @@ fn test_multiple_expression_statements_without_semicolons() {
     let src = r#"import std;
 
 func main() {
-    std::io::println("first")
-    std::io::println("second")
-    std::io::println("third")
+    std::io::println("first");
+    std::io::println("second");
+    std::io::println("third");
 }
 "#;
     let result = run_inline_test(src);
@@ -158,11 +158,11 @@ fn test_arithmetic_after_expression_statement() {
     let src = r#"import std;
 
 func main() {
-    var x = 5
-    var y = 10
-    std::io::println("hello")
-    var w = (x + 1) + (y * 2)
-    std::io::println(@"w = {w}")
+    var x = 5;
+    var y = 10;
+    std::io::println("hello");
+    var w = (x + 1) + (y * 2);
+    std::io::println(@"w = {w}");
 }
 "#;
     let result = run_inline_test(src);
@@ -180,15 +180,15 @@ fn test_binary_operators_in_format_string() {
     let src = r#"import std;
 
 func main() {
-    var x = 5
-    var y = 10
-    std::io::println(@"add = {x + y}")
-    std::io::println(@"sub = {y - x}")
-    std::io::println(@"mul = {x * y}")
-    std::io::println(@"grouped = {(x + 1) + (y * 2)}")
-    std::io::println(@"precedence = {x + y * 2}")
-    std::io::println(@"cmp = {x < y}")
-    std::io::println(@"unary = {x + -y}")
+    var x = 5;
+    var y = 10;
+    std::io::println(@"add = {x + y}");
+    std::io::println(@"sub = {y - x}");
+    std::io::println(@"mul = {x * y}");
+    std::io::println(@"grouped = {(x + 1) + (y * 2)}");
+    std::io::println(@"precedence = {x + y * 2}");
+    std::io::println(@"cmp = {x < y}");
+    std::io::println(@"unary = {x + -y}");
 }
 "#;
     let result = run_inline_test(src);
@@ -212,14 +212,14 @@ func main() {
 fn test_generic_identity_multiple_concrete_types() {
     let src = r#"import std;
 
-func identity<T>(x: T): T { return x }
+func identity<T>(x: T): T { return x; }
 
 func main() {
-    var i = identity(5)
-    var f = identity(3.5)
-    var s = identity("hi")
-    var b = identity(true)
-    std::io::println(@"i={i} f={f} s={s} b={b}")
+    var i = identity(5);
+    var f = identity(3.5);
+    var s = identity("hi");
+    var b = identity(true);
+    std::io::println(@"i={i} f={f} s={s} b={b}");
 }
 "#;
     let result = run_inline_test(src);
@@ -233,12 +233,12 @@ func main() {
 fn test_generic_chained_calls() {
     let src = r#"import std;
 
-func identity<T>(x: T): T { return x }
+func identity<T>(x: T): T { return x; }
 
 func main() {
-    var i = identity(identity(7))
-    var f = identity(identity(2.5))
-    std::io::println(@"i={i} f={f}")
+    var i = identity(identity(7));
+    var f = identity(identity(2.5));
+    std::io::println(@"i={i} f={f}");
 }
 "#;
     let result = run_inline_test(src);
@@ -255,12 +255,12 @@ fn test_generic_uninferred_call_keeps_template() {
     let src = r#"import std;
 import std::option;
 
-func identity<T>(x: T): T { return x }
+func identity<T>(x: T): T { return x; }
 
 func main() {
-    var i = identity(5)
-    var n = identity(Option<int>::None)
-    std::io::println(@"i={i}")
+    var i = identity(5);
+    var n = identity(Option<int>::None);
+    std::io::println(@"i={i}");
 }
 "#;
     let result = run_inline_test(src);

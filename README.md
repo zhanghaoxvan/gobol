@@ -1,7 +1,7 @@
 # Gobol
 
 [![Rust](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-GPLv3-red.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-red.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/zhanghaoxvan/gobol)
 
 **Gobol** — A statically-typed, modular programming language with generics support.

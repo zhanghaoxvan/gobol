@@ -2241,16 +2241,10 @@ impl AstVisitor for SemanticAnalyzer {
         let is_array = node.get_type().map_or(false, |t| {
             t.as_type_any().downcast_ref::<ArrayType>().is_some()
         });
-        // For array parameters, store the element type (unwrap Array wrapper)
-        let stored_type = if is_array {
-            if let DataType::Array(elem) = &param_type {
-                (**elem).clone()
-            } else {
-                param_type.clone()
-            }
-        } else {
-            param_type.clone()
-        };
+        // Keep the complete array type in the symbol table. Indexing unwraps
+        // it at the use site; storing only the element type loses information
+        // when the array is passed into a struct field or another function.
+        let stored_type = param_type.clone();
         self.env
             .declare_variable(param_name, &stored_type, is_array);
         // Mark as array if the parameter type is an array
@@ -4049,9 +4043,15 @@ impl AstVisitor for SemanticAnalyzer {
                         .map_or(false, |f| f.contains_key(id_name))
                 });
                 if is_struct_field {
-                    // Unwrap Nullable if the struct field is a nullable array (T[]? → T)
+                    // Indexing a struct array field yields its element type,
+                    // just like indexing a local array. Keep the array
+                    // wrapper only for the field declaration itself.
                     let elem_type = match &array_type {
-                        DataType::Nullable(inner) => *inner.clone(),
+                        DataType::Array(inner) => (**inner).clone(),
+                        DataType::Nullable(inner) => match inner.as_ref() {
+                            DataType::Array(element) => (**element).clone(),
+                            _ => (**inner).clone(),
+                        },
                         _ => array_type.clone(),
                     };
                     self.type_stack.push(elem_type);
@@ -4064,7 +4064,11 @@ impl AstVisitor for SemanticAnalyzer {
                         self.type_stack.push(DataType::Unknown);
                         return;
                     }
-                    self.type_stack.push(sym.data_type.clone());
+                    let element_type = match &sym.data_type {
+                        DataType::Array(element) => (**element).clone(),
+                        other => other.clone(),
+                    };
+                    self.type_stack.push(element_type);
                     return;
                 }
                 self.error(&format!("Array variable '{}' not declared", id_name));
@@ -4073,7 +4077,15 @@ impl AstVisitor for SemanticAnalyzer {
             }
         }
 
-        self.type_stack.push(array_type);
+        let element_type = match array_type {
+            DataType::Array(element) => *element,
+            DataType::Nullable(inner) => match *inner {
+                DataType::Array(element) => *element,
+                other => other,
+            },
+            other => other,
+        };
+        self.type_stack.push(element_type);
     }
 }
 

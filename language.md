@@ -197,7 +197,47 @@ func divmod(a: int, b: int): (int, int) {
 }
 ```
 
-### 5.2 Generic Functions / 泛型函数
+### 5.2 Lambda Functions / Lambda 函数
+
+A lambda is an anonymous function written as `lambda(parameters): ReturnType { body }`. Its
+last expression is the return value, just like a named function. Lambdas can be invoked
+immediately, passed to a higher-order function, and can capture variables from the
+surrounding scope.
+
+Lambda 使用 `lambda(参数): 返回类型 { 函数体 }` 表示匿名函数。与具名函数一样，
+函数体的最后一个表达式是返回值。Lambda 可以立即调用、作为高阶函数的参数传递，
+并且可以捕获外层作用域中的变量。
+
+```gobol
+// Immediate invocation / 立即调用
+var incremented = lambda(x: int): int {
+    x + 1
+}(41);
+
+// Capture variables from the enclosing scope / 捕获外层变量
+var offset = 10;
+var result = lambda(x: int): int {
+    x + offset
+}(32);
+
+// Pass a lambda to a function parameter / 作为函数参数传递
+func apply(f: func(int): int, value: int): int {
+    f(value)
+}
+
+var doubled = apply(lambda(x: int): int { x * 2 }, 21);
+```
+
+The parameter type of a higher-order function uses the function type syntax
+`func(T1, T2): ReturnType`. A named function can be passed by reference with `&name`.
+Lambda type parameters may be written after `lambda`, for example
+`lambda<T>(value: T): T { value }`.
+
+高阶函数的参数类型使用函数类型语法 `func(T1, T2): ReturnType`。具名函数可以使用
+`&name` 取得函数引用并传递。Lambda 的泛型参数可以写在 `lambda` 后面，例如
+`lambda<T>(value: T): T { value }`。
+
+### 5.3 Generic Functions / 泛型函数
 
 ```gobol
 func identity<T>(x: T): T {

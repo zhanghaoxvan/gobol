@@ -4,7 +4,7 @@
 #include "platform.h"
 #include "thread.h"
 
-typedef long long (*_gobol_thread_fn)(void);
+typedef long long (*_gobol_thread_fn)(long long);
 
 typedef struct {
     _gobol_thread_fn fn;
@@ -13,8 +13,7 @@ typedef struct {
 
 static void *_gobol_thread_trampoline(void *p) {
     _gobol_thread_arg *ta = (_gobol_thread_arg *)p;
-    (void)ta->arg;
-    long long ret = ta->fn();
+    long long ret = ta->fn(ta->arg);
     free(ta);
     return (void *)(intptr_t)ret;
 }

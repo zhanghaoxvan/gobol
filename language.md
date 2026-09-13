@@ -704,8 +704,15 @@ func worker(): int {
     0
 }
 
-var t = Thread::spawn(worker);
+func add_one(n: int): int {
+    n + 1
+}
+
+var t = Thread::spawn(&worker);
 var ret = t.join();       // Wait for thread, get exit code / 等待线程，获取退出码
+
+var t2 = Thread::spawn(&add_one, 41);
+var ret2 = t2.join();     // 42 — spawn forwards `arg` to the worker / spawn 会把 arg 转发给工作函数
 ```
 
 **Channel / 通道:**

@@ -23,8 +23,8 @@ struct Thread {
 impl Thread {
     // Spawn a new thread running `f` with no argument.
     // f must be a zero-argument function whose address is known at link time.
-    func spawn(f: func(): int): Thread {
-        _id = builtins::gobol_thread_spawn(0, 0);
+    func spawn(f: func(int): int, arg: int): Thread {
+        _id = builtins::gobol_thread_spawn(f, arg);
         self
     }
 

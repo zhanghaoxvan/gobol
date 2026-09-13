@@ -64,5 +64,5 @@ jobs:
           cd test-project
           grape build --release
 
-      - name: Run Rust tests
-        run: cargo test --verbose
+      - name: Run Rust and local Gobol tests
+        run: cargo test --all-targets --verbose

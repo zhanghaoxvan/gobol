@@ -3729,9 +3729,11 @@ impl AstVisitor for SemanticAnalyzer {
                 }
             }
 
-            // For non-Result types, just pass through the type.
-            // This allows the ? operator to be used loosely in tests.
-            self.type_stack.push(inner_type);
+            self.error(&format!(
+                "The '?' operator requires Result<T, E>, got {}",
+                data_type_to_string(inner_type.clone())
+            ));
+            self.type_stack.push(DataType::Unknown);
         } else {
             self.type_stack.push(DataType::Unknown);
         }

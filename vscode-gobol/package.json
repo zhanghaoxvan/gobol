@@ -1,6 +1,6 @@
 {
   "name": "vscode-gobol",
-  "displayName": "Gobol Language Support",
+  "displayName": "Gobol Language Extension Pack",
   "description": "Language server, syntax highlighting, and IDE features for the Gobol programming language.",
   "version": "0.2.0",
   "publisher": "zhanghaoxvan",

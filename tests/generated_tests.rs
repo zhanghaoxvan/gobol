@@ -41,6 +41,18 @@ fn test_arrays_array_index() {
     result.assert_success();
 }
 
+#[test]
+fn test_string_index() {
+    let result = run_inline_test(
+        r#"func main() {
+    var s = "hello";
+    io::println(s[1]);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "e");
+}
+
 /// 用例：arrays/array_literal.gbl | 预期正常运行
 #[test]
 fn test_arrays_array_literal() {

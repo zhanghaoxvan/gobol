@@ -62,7 +62,7 @@
     const FUNCTION_TYPE = {
         className: "type",
         begin: /\bfunc(?=\s*(?:<[^>]+>\s*)?\()/,
-        end: /(?=[:\)])?/,
+        end: /(?=[:\)])/,
         keywords: KEYWORDS,
         contains: [PRIMITIVE_TYPE],
         relevance: 0

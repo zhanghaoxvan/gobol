@@ -3189,6 +3189,15 @@ impl Monomorphizer {
                 generic_by_name.insert(f.name.clone(), f.clone());
             }
         }
+        for imp in &ir.impls {
+            for method in &imp.methods {
+                returns_by_name.insert(method.name.clone(), method.return_type.clone());
+                let prefixed_name = format!("{}::{}", imp.struct_name, method.name);
+                returns_by_name
+                    .entry(prefixed_name)
+                    .or_insert_with(|| method.return_type.clone());
+            }
+        }
 
         // 重置单次编译的状态。
         self.instances.clear();
@@ -3250,8 +3259,13 @@ impl Monomorphizer {
                             // 泛型模板的返回类型，在调用方没有具体含义）而推断出的是
                             // 具体基础类型，则用后者替换 `ty`，避免 Cranelift
                             // “声明类型与值类型不符”的失配。
-                            if matches!(*ty, DataType::Struct(_))
-                                && !matches!(t, DataType::Struct(_) | DataType::None_)
+                            let inferred_non_numeric = matches!(
+                                t,
+                                DataType::Str | DataType::Struct(_) | DataType::Array(_)
+                            );
+                            if (matches!(*ty, DataType::Struct(_))
+                                && !matches!(t, DataType::Struct(_) | DataType::None_))
+                                || (*ty == DataType::Int && inferred_non_numeric)
                             {
                                 *ty = t;
                             }
@@ -3684,6 +3698,14 @@ impl Monomorphizer {
                 if method == "new" {
                     if let IRExpr::Variable(name) = object.as_ref() {
                         return DataType::Struct(name.clone());
+                    }
+                }
+                if let DataType::Struct(struct_name) =
+                    self.infer_concrete_type(object, returns_by_name)
+                {
+                    let full = format!("{}::{}", struct_name, method);
+                    if let Some(dt) = returns_by_name.get(&full) {
+                        return dt.clone();
                     }
                 }
                 if let IRExpr::Variable(name) = object.as_ref() {

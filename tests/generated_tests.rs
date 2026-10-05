@@ -53,6 +53,21 @@ fn test_string_index() {
     assert_eq!(result.stdout.trim(), "e");
 }
 
+#[test]
+fn test_print_file_contents_as_string() {
+    let result = run_inline_test(
+        r#"import fs;
+func main() {
+    var f = File::open("std/fs.gbl", "r");
+    var content = f.read_all();
+    io::println(content);
+    f.close();
+}"#,
+    );
+    result.assert_success();
+    result.assert_stdout_contains("// std/fs.gbl");
+}
+
 /// 用例：arrays/array_literal.gbl | 预期正常运行
 #[test]
 fn test_arrays_array_literal() {

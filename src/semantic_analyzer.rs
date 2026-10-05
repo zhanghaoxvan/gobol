@@ -4035,6 +4035,11 @@ impl AstVisitor for SemanticAnalyzer {
             return;
         }
 
+        if matches!(array_type, DataType::Str) {
+            self.type_stack.push(DataType::Str);
+            return;
+        }
+
         if let Some(arr) = node.get_array() {
             if let Some(id) = arr.as_any().downcast_ref::<Identifier>() {
                 let id_name = id.get_name();

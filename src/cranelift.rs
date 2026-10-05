@@ -357,7 +357,11 @@ impl TypeResolver {
                 }
                 DataType::Int
             }
-            IRExpr::ArrayIndex { .. } => DataType::Int,
+            IRExpr::ArrayIndex { array, .. } => match self.infer_type(array) {
+                DataType::Str => DataType::Str,
+                DataType::Array(element) => *element,
+                _ => DataType::Int,
+            },
             IRExpr::Assignment { target, .. } => self.infer_type(target),
             IRExpr::FuncRef(name) => self.func_return_type(name),
             IRExpr::IndirectCall { .. } => DataType::Int,
@@ -2008,6 +2012,13 @@ impl CraneliftBackend {
                 self.translate_member_access(bcx, object, member)
             }
             IRExpr::ArrayIndex { array, index } => {
+                if matches!(self.type_resolver.infer_type(array), DataType::Str) {
+                    let string = self.translate_expr(bcx, array)?;
+                    let index = self.translate_expr(bcx, index)?;
+                    let codepoint = self.call_runtime(bcx, "gobol_str_get", &[string, index]);
+                    return Ok(self.call_runtime(bcx, "gobol_str_char", &[codepoint]));
+                }
+
                 // Check if this is a nested array access (e.g., arr[2][2])
                 if let IRExpr::ArrayIndex {
                     array: inner_array,

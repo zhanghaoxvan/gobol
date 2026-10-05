@@ -175,7 +175,6 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
     # ----- 安装 -----
     install_dir.mkdir(parents=True, exist_ok=True)
     (install_dir / "bin").mkdir(parents=True, exist_ok=True)
-    (install_dir / "lib").mkdir(parents=True, exist_ok=True)
     
     suffix = ".exe" if is_windows() else ""
     binaries = [f"gobol{suffix}", f"grape{suffix}", f"gobol-lsp{suffix}"]
@@ -195,7 +194,7 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
     
     print_status("Installing standard library...", "info")
     src_std = Path(__file__).resolve().parent / "std"
-    dst_std = install_dir / "lib" / "std"
+    dst_std = install_dir / "std"
     if src_std.exists():
         if dst_std.exists():
             shutil.rmtree(dst_std)

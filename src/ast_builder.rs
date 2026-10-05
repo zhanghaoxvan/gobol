@@ -20,7 +20,7 @@ pub struct AstBuilder {
     /// a statement's local attribute with the same name overrides the
     /// file-level one).
     file_attributes: Vec<Attribute>,
-    /// When enabled, the basic prelude (`import basic::xxx`) is auto-injected at
+    /// When enabled, the basic prelude (`import xxx`) is auto-injected at
     /// the top of the built program. This is intended for the *entry* program
     /// only — standard-library modules (and any module loaded by the semantic
     /// analyser) declare their own imports explicitly, so they must not have
@@ -634,7 +634,7 @@ impl AstBuilder {
         for &name in prelude_modules.iter().rev() {
             if !imported.contains(name) {
                 let import_stmt =
-                    ImportStatement::new(vec!["basic".to_string(), name.to_string()], None);
+                    ImportStatement::new(vec![name.to_string()], None);
                 program.statements.insert(0, Box::new(import_stmt));
             }
         }

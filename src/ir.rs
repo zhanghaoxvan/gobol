@@ -1362,7 +1362,11 @@ impl IRBuilder {
                 self.infer_expr_type(operand)
             }
             IRExpr::Cast { target, .. } => target.clone(),
-            IRExpr::ArrayIndex { .. } => DataType::Int,
+            IRExpr::ArrayIndex { array, .. } => match self.infer_expr_type(array) {
+                DataType::Str => DataType::Str,
+                DataType::Array(element) => *element,
+                _ => DataType::Int,
+            },
             IRExpr::Assignment { target, .. } => self.infer_expr_type(target),
             IRExpr::ArrayLiteral(_) => DataType::Array(Box::new(DataType::Unknown)),
             IRExpr::MemberAccess { .. } => DataType::Int,

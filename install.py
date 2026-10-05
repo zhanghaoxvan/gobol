@@ -72,9 +72,9 @@ def choose_menu(title, options, footer=""):
     else:
         import termios
         import tty
-        old_settings = termios.tcgetattr(sys.stdin)
+        old_settings = termios.tcgetattr(sys.stdin) # type: ignore[attr-defined]
         try:
-            tty.setcbreak(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno()) # type: ignore[attr-defined]
             while True:
                 print_menu(title, options, selected, footer)
                 key = sys.stdin.read(1)
@@ -93,7 +93,7 @@ def choose_menu(title, options, footer=""):
                     elif sequence == "[B":
                         selected = (selected + 1) % len(options)
         finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings) # type: ignore[attr-defined]
 
 def print_status(message, status_type="info"):
     if status_type == "info":
@@ -245,9 +245,13 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
         print_status(f"Please run: source {rc}  OR restart your terminal", "info")
     else:
         print_status("Setting system environment variables...", "info")
-        subprocess.run(f'setx GOBOL_HOME "{install_dir}"', shell=True)
-        subprocess.run(f'setx GOBOL_INSTALL_DIR "{install_dir}"', shell=True)
-        subprocess.run(f'setx PATH "%PATH%;{install_dir}\\bin"', shell=True)
+        ps_cmd = (
+            f'[Environment]::SetEnvironmentVariable("GOBOL_HOME", "{install_dir}", "User"); '
+            f'[Environment]::SetEnvironmentVariable("GOBOL_INSTALL_DIR", "{install_dir}", "User"); '
+            f'$p = [Environment]::GetEnvironmentVariable("Path", "User"); '
+            f'[Environment]::SetEnvironmentVariable("Path", "$p;{install_dir}\\bin", "User")'
+        )
+        subprocess.run(["powershell", "-Command", ps_cmd], shell=False)
         print_status("Environment variables set. Please restart your terminal.", "info")
     
     print_status("Installation complete! Gobol is installed globally.", "ok")
@@ -281,73 +285,30 @@ def task_uninstall(install_dir=None, assume_yes=False, pause=True):
         input("Press Enter to return to main menu...")
 
 def task_extension_guide(pause=True):
-    """显示 VS Code 和 Neovim 扩展安装指南（跨平台命令）"""
+    """显示 VS Code 扩展安装指南（跨平台命令）"""
     if pause:
         clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
-    print(f"{Colors.OKCYAN}{Colors.BOLD}   VS Code & Neovim Extension Guide   {Colors.ENDC}")
+    print(f"{Colors.OKCYAN}{Colors.BOLD}   VS Code Extension Guide   {Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print()
 
     project_root = Path(__file__).resolve().parent
     vscode_ext_path = project_root / "vscode-gobol"
-    nvim_ext_path = project_root / "nvim-gobol"
-    is_windows = platform.system().lower() == "windows"
 
-    # ===== 检测当前 shell =====
-    # PowerShell 特有的环境变量
-    is_pwsh = "PSModulePath" in os.environ
-
-    # ========== VS Code ==========
     print(f"{Colors.BOLD}{Colors.OKGREEN}┌─ VS Code Extension{Colors.ENDC}")
     print(f"{Colors.OKGREEN}│  Location: {vscode_ext_path}{Colors.ENDC}")
     print(f"{Colors.OKGREEN}│{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│  {Colors.BOLD}Build:{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    cd {vscode_ext_path}{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    npm install{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    npm run build{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    npm install -g @vscode/vsce{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    vsce package{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│{Colors.ENDC}")
     print(f"{Colors.OKGREEN}│  {Colors.BOLD}Install:{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}│    code --install-extension ./vscode-gobol-*.vsix{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    Option A (Marketplace): Search \"Gobol\" in VS Code Extensions{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│    Option B (Build from source):{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│      cd {vscode_ext_path}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│      npm install{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│      npm run build{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│      npm install -g @vscode/vsce{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│      vsce package{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}│      code --install-extension ./vscode-gobol-*.vsix{Colors.ENDC}")
     print(f"{Colors.OKGREEN}└─{Colors.ENDC}")
-
-    # ========== Neovim ==========
-    print()
-    print(f"{Colors.BOLD}{Colors.OKBLUE}┌─ Neovim Extension{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│  Location: {nvim_ext_path}{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│{Colors.ENDC}")
-
-    if is_windows:
-        if is_pwsh:
-            copy_cmd = f'Copy-Item -Recurse -Force "{nvim_ext_path}" "$env:USERPROFILE\\AppData\\Local\\nvim\\pack\\plugins\\start\\gobol"'
-        else:
-            copy_cmd = f'xcopy /E /I "{nvim_ext_path}" "%USERPROFILE%\\AppData\\Local\\nvim\\pack\\plugins\\start\\gobol"'
-    else:
-        if is_pwsh:
-            copy_cmd = f'Copy-Item -Recurse -Force "{nvim_ext_path}" "$HOME/.config/nvim/pack/plugins/start/gobol"'
-        else:
-            copy_cmd = f'cp -r {nvim_ext_path} ~/.config/nvim/pack/plugins/start/gobol'
-
-    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Install (manual):{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│    {copy_cmd}{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Or with lazy.nvim:{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│    {{{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│      dir = \"~/gobol/nvim-gobol\",{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│      ft = \"gobol\",{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│      config = function(){Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│        vim.cmd(\"packadd gobol\"){Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│      end,{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│    }}{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│  {Colors.BOLD}Note:{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}│    Ensure Gobol LSP is in PATH: ~/.gobol/bin{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}└─{Colors.ENDC}")
-
-    if pause:
-        input(f"{Colors.GREY}Press Enter to return to main menu...{Colors.ENDC}")
 
 # ==================== CLI and Main TUI Loop ====================
 
@@ -423,7 +384,7 @@ def main():
     while True:
         options = [
             "Build & Install Gobol",
-            "Extension Guide (VS Code & Neovim)",
+            "Extension Guide (VS Code)",
             "Uninstall Gobol",
             "Exit"
         ]

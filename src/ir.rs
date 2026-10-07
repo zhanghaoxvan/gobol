@@ -425,14 +425,18 @@ impl IRBuilder {
 
         // 检查是否是泛型参数
         let name = ty.get_name();
-        if let Some(binding) = self.lookup_generic(name) {
-            return binding;
-        }
 
         // Pointer type
         if let Some(ptr) = ty.as_type_any().downcast_ref::<PointerType>() {
             let inner = self.ast_type_to_data_type(Some(ptr.get_pointee()));
             return DataType::Pointer(Box::new(inner));
+        }
+        if let Some(reference) = ty.as_type_any().downcast_ref::<ReferenceType>() {
+            let inner = self.ast_type_to_data_type(Some(reference.get_referent()));
+            return DataType::Reference(Box::new(inner));
+        }
+        if let Some(binding) = self.lookup_generic(name) {
+            return binding;
         }
 
         // 检查数组类型 → return Array with element type
@@ -1306,7 +1310,12 @@ impl IRBuilder {
             IRExpr::Literal(LitValue::Byte(_)) => DataType::Byte,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
-            IRExpr::Variable(name) => self.var_types.get(name).cloned().unwrap_or(DataType::Int),
+            IRExpr::Variable(name) => {
+                match self.var_types.get(name).cloned().unwrap_or(DataType::Int) {
+                    DataType::Reference(inner) => *inner,
+                    other => other,
+                }
+            }
             IRExpr::StructLiteral { name, .. } => DataType::Struct(name.clone()),
             IRExpr::Call { func, .. } => {
                 // Look up the function's return type among already-collected functions.
@@ -1355,12 +1364,15 @@ impl IRBuilder {
                 }
                 lt
             }
-            IRExpr::Unary { op, operand } => {
-                if op == "!" {
-                    return DataType::Bool;
-                }
-                self.infer_expr_type(operand)
-            }
+            IRExpr::Unary { op, operand } => match op.as_str() {
+                "!" => DataType::Bool,
+                "&" => DataType::Reference(Box::new(self.infer_expr_type(operand))),
+                "*" => match self.infer_expr_type(operand) {
+                    DataType::Pointer(inner) => *inner,
+                    _ => DataType::Unknown,
+                },
+                _ => self.infer_expr_type(operand),
+            },
             IRExpr::Cast { target, .. } => target.clone(),
             IRExpr::ArrayIndex { array, .. } => match self.infer_expr_type(array) {
                 DataType::Str => DataType::Str,
@@ -2326,11 +2338,16 @@ impl AstVisitor for IRBuilder {
         let op = node.get_operator().to_string();
         let operand = node.get_operand().unwrap();
 
-        // `&name` — address-of operator: take a function's address as a FuncRef.
+        // `&name` is a function reference unless name resolves to a variable.
         if op == "&" {
             if let Some(id) = operand.as_any().downcast_ref::<Identifier>() {
-                self.push_expr(IRExpr::FuncRef(id.get_name().to_string()));
-                return;
+                let name = id.get_name();
+                if !self.var_types.contains_key(name)
+                    && !self.globals.iter().any(|(global, _, _)| global == name)
+                {
+                    self.push_expr(IRExpr::FuncRef(name.to_string()));
+                    return;
+                }
             }
         }
 
@@ -3638,6 +3655,16 @@ impl Monomorphizer {
                     false
                 }
             }
+            DataType::Pointer(inner) => match actual {
+                DataType::Pointer(actual_inner) | DataType::Reference(actual_inner) => {
+                    self.unify_type(inner, actual_inner, type_map)
+                }
+                _ => false,
+            },
+            DataType::Reference(inner) => match actual {
+                DataType::Reference(actual_inner) => self.unify_type(inner, actual_inner, type_map),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -3654,11 +3681,15 @@ impl Monomorphizer {
             IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
-            IRExpr::Variable(name) => self
+            IRExpr::Variable(name) => match self
                 .var_types
                 .get(name)
                 .cloned()
-                .unwrap_or(DataType::Unknown),
+                .unwrap_or(DataType::Unknown)
+            {
+                DataType::Reference(inner) => *inner,
+                other => other,
+            },
             IRExpr::StructLiteral { name, .. } => DataType::Struct(name.clone()),
             IRExpr::Binary { op, left, right } => {
                 // 比较 / 逻辑运算符结果恒为 Bool。
@@ -3689,7 +3720,16 @@ impl Monomorphizer {
                 }
                 rt
             }
-            IRExpr::Unary { operand, .. } => self.infer_concrete_type(operand, returns_by_name),
+            IRExpr::Unary { op, operand } => match op.as_str() {
+                "&" => DataType::Reference(Box::new(
+                    self.infer_concrete_type(operand, returns_by_name),
+                )),
+                "*" => match self.infer_concrete_type(operand, returns_by_name) {
+                    DataType::Pointer(inner) => *inner,
+                    _ => DataType::Unknown,
+                },
+                _ => self.infer_concrete_type(operand, returns_by_name),
+            },
             IRExpr::Call { func, .. } => returns_by_name
                 .get(func)
                 .cloned()

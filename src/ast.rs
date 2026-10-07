@@ -104,6 +104,7 @@ pub trait AstVisitor {
     #[allow(dead_code)]
     fn visit_type(&mut self, _node: &dyn Type) {}
     fn visit_array_type(&mut self, _node: &ArrayType) {}
+    fn visit_reference_type(&mut self, _node: &ReferenceType) {}
     fn visit_pointer_type(&mut self, _node: &PointerType) {}
     #[allow(dead_code)]
     fn visit_function_type(&mut self, _node: &FunctionType) {}
@@ -318,6 +319,47 @@ impl Type for ArrayType {
 impl_attributable!(ArrayType);
 
 // ==================== PointerType ====================
+
+pub struct ReferenceType {
+    pub referent: Box<dyn Type>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl ReferenceType {
+    pub fn new(referent: Box<dyn Type>) -> Self {
+        ReferenceType {
+            referent,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn get_referent(&self) -> &dyn Type {
+        &*self.referent
+    }
+}
+
+impl AstNode for ReferenceType {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_reference_type(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Type for ReferenceType {
+    fn get_name(&self) -> &str {
+        self.referent.get_name()
+    }
+    fn as_type(&self) -> &dyn Type {
+        self
+    }
+    fn as_type_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl_attributable!(ReferenceType);
 
 pub struct PointerType {
     pub pointee: Box<dyn Type>,

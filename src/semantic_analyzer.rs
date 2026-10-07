@@ -727,6 +727,11 @@ impl SemanticAnalyzer {
             return DataType::Pointer(Box::new(inner));
         }
 
+        if let Some(reference) = tp.as_type_any().downcast_ref::<ReferenceType>() {
+            let inner = self.get_data_type_from_ast(Some(reference.get_referent()));
+            return DataType::Reference(Box::new(inner));
+        }
+
         // Check for FunctionType (e.g. `func(T): U` callback parameters).
         // The analyser does not track precise function signatures — collapse
         // to Unknown so call sites on the parameter resolve without error.
@@ -2241,12 +2246,13 @@ impl AstVisitor for SemanticAnalyzer {
         let is_array = node.get_type().map_or(false, |t| {
             t.as_type_any().downcast_ref::<ArrayType>().is_some()
         });
+        let is_reference = matches!(param_type, DataType::Reference(_));
         // Keep the complete array type in the symbol table. Indexing unwraps
         // it at the use site; storing only the element type loses information
         // when the array is passed into a struct field or another function.
         let stored_type = param_type.clone();
         self.env
-            .declare_variable(param_name, &stored_type, is_array);
+            .declare_variable(param_name, &stored_type, is_array || is_reference);
         // Mark as array if the parameter type is an array
         if is_array {
             if let Some(sym) = self.env.lookup_symbol_mut(param_name) {
@@ -2559,7 +2565,13 @@ impl AstVisitor for SemanticAnalyzer {
         });
 
         match sym {
-            Some(s) => self.type_stack.push(s.data_type.clone()),
+            Some(s) => {
+                let data_type = match &s.data_type {
+                    DataType::Reference(inner) => (**inner).clone(),
+                    other => other.clone(),
+                };
+                self.type_stack.push(data_type);
+            }
             None => {
                 self.error(&format!("Undeclared identifier: '{}'", name));
                 self.type_stack.push(DataType::Unknown);
@@ -2734,7 +2746,7 @@ impl AstVisitor for SemanticAnalyzer {
                     }
                     if !is_assignable {
                         if let Some(sym) = self.env.lookup_symbol(name) {
-                            if sym.is_mut {
+                            if sym.is_mut || matches!(sym.data_type, DataType::Reference(_)) {
                                 is_assignable = true;
                             } else {
                                 self.error(&format!(
@@ -2742,6 +2754,17 @@ impl AstVisitor for SemanticAnalyzer {
                                     name
                                 ));
                             }
+                        }
+                    }
+                } else if let Some(unary) = left.as_any().downcast_ref::<UnaryExpression>() {
+                    if unary.get_operator() == "*" {
+                        is_assignable = matches!(left_type, DataType::Unknown)
+                            || unary.get_operand().map_or(false, |operand| {
+                                operand.accept(self);
+                                matches!(self.type_stack.pop(), Some(DataType::Pointer(_)))
+                            });
+                        if !is_assignable {
+                            self.error("Cannot assign through a non-pointer value");
                         }
                     }
                 } else if let Some(member) = left.as_any().downcast_ref::<MemberAccess>() {
@@ -3061,15 +3084,25 @@ impl AstVisitor for SemanticAnalyzer {
     fn visit_unary_expression(&mut self, node: &UnaryExpression) {
         let op = node.get_operator();
 
-        // `&name` — address-of operator for function references.
-        // The operand is a function name; yield a function-pointer type.
+        // Preserve address-of function references; variable address-taking is
+        // represented as a typed reference.
         if op == "&" {
             if let Some(operand) = node.get_operand() {
+                if let Some(id) = operand.as_any().downcast_ref::<Identifier>() {
+                    if self
+                        .env
+                        .lookup_symbol(id.get_name())
+                        .map_or(false, |s| s.symbol_type != SymbolType::Variable)
+                    {
+                        self.type_stack.push(DataType::Unknown);
+                        return;
+                    }
+                }
                 operand.accept(self);
             }
-            // Consume the operand type and push Unknown (function pointer).
-            let _ = self.get_current_type();
-            self.type_stack.push(DataType::Unknown);
+            let operand_type = self.type_stack.pop().unwrap_or(DataType::Unknown);
+            self.type_stack
+                .push(DataType::Reference(Box::new(operand_type)));
             return;
         }
 
@@ -3088,6 +3121,14 @@ impl AstVisitor for SemanticAnalyzer {
                 self.error("Logical not '!' requires boolean operand");
             }
             self.type_stack.push(DataType::Bool);
+        } else if op == "*" {
+            match operand_type {
+                DataType::Pointer(inner) => self.type_stack.push(*inner),
+                other => {
+                    self.error(&format!("Cannot dereference non-pointer type '{}'", other));
+                    self.type_stack.push(DataType::Unknown);
+                }
+            }
         } else {
             self.error(&format!("Unknown unary operator: {}", op));
             self.type_stack.push(DataType::Unknown);
@@ -4002,6 +4043,13 @@ impl AstVisitor for SemanticAnalyzer {
 
         self.type_stack
             .push(DataType::Pointer(Box::new(inner_type)));
+    }
+
+    fn visit_reference_type(&mut self, node: &ReferenceType) {
+        node.get_referent().accept(self);
+        let inner_type = self.type_stack.pop().unwrap_or(DataType::Unknown);
+        self.type_stack
+            .push(DataType::Reference(Box::new(inner_type)));
     }
 
     fn visit_array_type(&mut self, node: &ArrayType) {

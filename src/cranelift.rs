@@ -8,7 +8,10 @@
 use crate::environment::DataType;
 use crate::ir::*;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{self, AbiParam, BlockArg, Inst, InstBuilder, types};
+use cranelift_codegen::ir::{
+    self, AbiParam, BlockArg, Inst, InstBuilder, MemFlagsData, StackSlot, StackSlotData,
+    StackSlotKind, types,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -181,6 +184,7 @@ impl TypeResolver {
             DataType::Int | DataType::Str | DataType::Unknown | DataType::Struct(_) => 8,
             DataType::Nullable(inner) => self.type_size(inner),
             DataType::Array(_) => 8, // array pointer
+            DataType::Reference(_) => 8,
             DataType::Pointer(_) => 8,
         }
     }
@@ -245,13 +249,17 @@ impl TypeResolver {
     /// These methods (add, sub, mul, div, rem, eq, ne, lt, gt, le, ge) are the
     /// trait-based operator implementations for built-in numeric types.
     fn intrinsic_method_return_type(&self, method: &str, obj_ty: &DataType) -> Option<DataType> {
-        let is_int = matches!(obj_ty, DataType::Int | DataType::Byte);
-        let is_float = matches!(obj_ty, DataType::Float);
+        let value_ty = match obj_ty {
+            DataType::Reference(inner) => inner.as_ref(),
+            _ => obj_ty,
+        };
+        let is_int = matches!(value_ty, DataType::Int | DataType::Byte);
+        let is_float = matches!(value_ty, DataType::Float);
         if !is_int && !is_float {
             return None;
         }
         match method {
-            "add" | "sub" | "mul" | "div" | "rem" => Some(obj_ty.clone()),
+            "add" | "sub" | "mul" | "div" | "rem" => Some(value_ty.clone()),
             "eq" | "ne" | "lt" | "gt" | "le" | "ge" => Some(DataType::Bool),
             _ => None,
         }
@@ -348,7 +356,15 @@ impl TypeResolver {
                 if op == "!" {
                     return DataType::Bool;
                 }
-                self.infer_type(operand)
+                let operand_type = self.infer_type(operand);
+                match op.as_str() {
+                    "&" => DataType::Reference(Box::new(operand_type)),
+                    "*" => match operand_type {
+                        DataType::Pointer(inner) | DataType::Reference(inner) => *inner,
+                        _ => DataType::Unknown,
+                    },
+                    _ => operand_type,
+                }
             }
             IRExpr::Cast { target, .. } => target.clone(),
             IRExpr::MemberAccess { object, member } => {
@@ -372,7 +388,11 @@ impl TypeResolver {
     pub fn contains_str(&self, e: &IRExpr) -> bool {
         match e {
             IRExpr::Literal(LitValue::Str(_)) => true,
-            IRExpr::Variable(name) => matches!(self.var_types.get(name), Some(DataType::Str)),
+            IRExpr::Variable(name) => match self.var_types.get(name) {
+                Some(DataType::Str) => true,
+                Some(DataType::Reference(inner)) => matches!(inner.as_ref(), DataType::Str),
+                _ => false,
+            },
             IRExpr::Cast { target, .. } => matches!(target, DataType::Str),
             IRExpr::MethodCall { method, .. } => method.contains("str"),
             IRExpr::Call { func, .. } => {
@@ -444,6 +464,7 @@ impl VariadicStub {
             | DataType::Struct(_)
             | DataType::Nullable(_)
             | DataType::Pointer(_)
+            | DataType::Reference(_)
             | DataType::Array(_) => "long",
         }
     }
@@ -521,6 +542,7 @@ pub struct CraneliftBackend {
 
     // --- per-function translation state (reset each function) ---
     variables: HashMap<String, Variable>,
+    addressable_slots: HashMap<String, StackSlot>,
     var_counter: u32,
     /// loop break/continue block targets (innermost last)
     loop_stack: Vec<(ir::Block, ir::Block)>,
@@ -1352,6 +1374,7 @@ impl CraneliftBackend {
 
     fn reset_function_state(&mut self, return_type: DataType) {
         self.variables.clear();
+        self.addressable_slots.clear();
         self.type_resolver.reset_vars();
         self.var_counter = 0;
         self.loop_stack.clear();
@@ -1945,6 +1968,20 @@ impl CraneliftBackend {
             self.call_runtime(bcx, "gobol_mem_store", &[addr, val]);
             return Ok(());
         }
+        if let IRExpr::Unary { op, operand } = target {
+            if op == "*" {
+                let DataType::Pointer(inner) = self.type_resolver.infer_type(operand) else {
+                    return Err("cannot assign through a non-pointer value".to_string());
+                };
+                let ptr = self.translate_expr(bcx, operand)?;
+                let val = self.translate_expr(bcx, value)?;
+                let from = self.type_resolver.infer_type(value);
+                let val = self.coerce(bcx, val, &from, &inner)?;
+                let val = self.bitcast_to(bcx, val, self.data_type_to_clif(&inner)?);
+                bcx.ins().store(MemFlagsData::new(), val, ptr, 0);
+                return Ok(());
+            }
+        }
         // Simple variable assignment
         if let IRExpr::Variable(name) = target {
             // Module-level mutable `var` global: store into shared slot.
@@ -1957,10 +1994,21 @@ impl CraneliftBackend {
             let val = self.translate_expr(bcx, value)?;
             if let Some(var) = self.variables.get(name) {
                 let var_ty = self.type_resolver.var_type(name);
+                if let DataType::Reference(inner) = &var_ty {
+                    let ptr = bcx.use_var(*var);
+                    let from = self.type_resolver.infer_type(value);
+                    let val = self.coerce(bcx, val, &from, inner)?;
+                    let val = self.bitcast_to(bcx, val, self.data_type_to_clif(inner)?);
+                    bcx.ins().store(MemFlagsData::new(), val, ptr, 0);
+                    return Ok(());
+                }
                 let v = self.coerce(bcx, val, &self.type_resolver.infer_type(value), &var_ty)?;
                 let target_ty = self.data_type_to_clif(&var_ty).unwrap_or(types::I64);
                 let v = self.bitcast_to(bcx, v, target_ty);
                 bcx.def_var(*var, v);
+                if let Some(slot) = self.addressable_slots.get(name).copied() {
+                    bcx.ins().stack_store(types::I64, v, slot, 0);
+                }
                 return Ok(());
             }
             // Undeclared: declare implicitly
@@ -1990,8 +2038,18 @@ impl CraneliftBackend {
                     return Ok(self.translate_global_read(bcx, name));
                 }
                 if let Some(var) = self.variables.get(name) {
+                    if let Some(slot) = self.addressable_slots.get(name).copied() {
+                        let ty = self.data_type_to_clif(&self.type_resolver.var_type(name))?;
+                        return Ok(bcx.ins().stack_load(types::I64, ty, slot, 0));
+                    }
                     let v = bcx.use_var(*var);
-                    Ok(v)
+                    match self.type_resolver.var_type(name) {
+                        DataType::Reference(inner) => {
+                            let ty = self.data_type_to_clif(&inner)?;
+                            Ok(bcx.ins().load(ty, MemFlagsData::new(), v, 0))
+                        }
+                        _ => Ok(v),
+                    }
                 } else {
                     match self.translate_func_ref(bcx, name) {
                         Ok(v) => Ok(v),
@@ -2207,6 +2265,33 @@ impl CraneliftBackend {
         op: &str,
         operand: &IRExpr,
     ) -> Result<ir::Value, String> {
+        if op == "&" {
+            if let IRExpr::Variable(name) = operand {
+                let var =
+                    self.variables.get(name).copied().ok_or_else(|| {
+                        format!("cannot take address of unknown variable '{}'", name)
+                    })?;
+                if matches!(self.type_resolver.var_type(name), DataType::Reference(_)) {
+                    return Ok(bcx.use_var(var));
+                }
+                let slot = if let Some(slot) = self.addressable_slots.get(name).copied() {
+                    slot
+                } else {
+                    let slot = bcx.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        8,
+                        3,
+                    ));
+                    let initial = bcx.use_var(var);
+                    bcx.ins().stack_store(types::I64, initial, slot, 0);
+                    self.addressable_slots.insert(name.clone(), slot);
+                    slot
+                };
+                return Ok(bcx.ins().stack_addr(types::I64, slot, 0));
+            }
+            return Err("address-of currently requires a local variable".to_string());
+        }
+
         let v = self.translate_expr(bcx, operand)?;
         let ty = self.type_resolver.infer_type(operand);
         Ok(match op {
@@ -2223,6 +2308,13 @@ impl CraneliftBackend {
                 let one = bcx.ins().iconst(types::I8, 1);
                 bcx.ins().bxor(b, one)
             }
+            "*" => {
+                let DataType::Pointer(inner) = ty else {
+                    return Err(format!("cannot dereference non-pointer type '{}'", ty));
+                };
+                let load_ty = self.data_type_to_clif(&inner)?;
+                return Ok(bcx.ins().load(load_ty, MemFlagsData::new(), v, 0));
+            }
             _ => v,
         })
     }
@@ -2233,7 +2325,6 @@ impl CraneliftBackend {
         func: &str,
         args: &[IRExpr],
     ) -> Result<ir::Value, String> {
-        // Built-in IO functions — need IRExpr args for to_string_value conversion.
         if let Some(rt) = builtin_runtime(func) {
             return Ok(self.translate_runtime_call(bcx, rt, args, func));
         }
@@ -2976,8 +3067,12 @@ impl CraneliftBackend {
         args: &[IRExpr],
         obj_ty: &DataType,
     ) -> Result<Option<ir::Value>, String> {
-        let is_int = matches!(obj_ty, DataType::Int | DataType::Byte);
-        let is_float = matches!(obj_ty, DataType::Float);
+        let value_ty = match obj_ty {
+            DataType::Reference(inner) => inner.as_ref(),
+            _ => obj_ty,
+        };
+        let is_int = matches!(value_ty, DataType::Int | DataType::Byte);
+        let is_float = matches!(value_ty, DataType::Float);
         if !is_int && !is_float {
             return Ok(None);
         }
@@ -3019,7 +3114,7 @@ impl CraneliftBackend {
                 "ge" => bcx.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r),
                 _ => return Ok(None),
             };
-            if matches!(obj_ty, DataType::Byte) {
+            if matches!(value_ty, DataType::Byte) {
                 if matches!(method, "eq" | "ne" | "lt" | "gt" | "le" | "ge") {
                     Ok(Some(result))
                 } else {
@@ -3516,6 +3611,7 @@ impl CraneliftBackend {
             DataType::Nullable(inner) => self.data_type_to_clif(inner)?,
             DataType::Array(_) => types::I64, // array pointer
             DataType::Pointer(_) => types::I64,
+            DataType::Reference(_) => types::I64,
         })
     }
 
@@ -3596,6 +3692,7 @@ impl CraneliftBackend {
             variadic_funcs: std::collections::HashSet::new(),
             variadic_stubs: Vec::new(),
             variables: HashMap::new(),
+            addressable_slots: HashMap::new(),
             var_counter: 0,
             loop_stack: Vec::new(),
             return_type: DataType::None_,
@@ -4492,11 +4589,12 @@ fn detect_linker(target: &str) -> Result<(std::path::PathBuf, LinkerKind), Strin
 
 /// Map a Gobol builtin call name to its runtime function.
 fn builtin_runtime(name: &str) -> Option<&'static str> {
-    // Strip any :: namespace prefix and match on the function name.
-    // Call sites sometimes use bare names (`print`) or sometimes the
-    // module-qualified C name (`builtins::gobol_print`).
+    // Specializations from generic monomorphization look like
+    // `debug::println__str` / `io::println__int`. Strip the module prefix and
+    // any generated type suffix (`__str`, `__int`, ...) before matching.
     let short = name.rsplit("::").next().unwrap_or(name);
-    match short {
+    let base = short.split("__").next().unwrap_or(short);
+    match base {
         "print" | "_print" | "gobol_print" => Some("gobol_print"),
         "println" | "_println" | "gobol_println" => Some("gobol_println"),
         "eprint" | "_eprint" | "gobol_eprint" => Some("gobol_eprint"),

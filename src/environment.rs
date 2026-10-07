@@ -16,6 +16,7 @@ pub enum DataType {
     Struct(String),
     Nullable(Box<DataType>),
     Array(Box<DataType>),
+    Reference(Box<DataType>),
     Pointer(Box<DataType>),
 }
 
@@ -32,6 +33,7 @@ impl fmt::Display for DataType {
             DataType::Struct(name) => return write!(f, "{}", name),
             DataType::Nullable(inner) => return write!(f, "{}?", inner),
             DataType::Array(elem) => return write!(f, "{}[]", elem),
+            DataType::Reference(inner) => return write!(f, "&{}", inner),
             DataType::Pointer(inner) => return write!(f, "*{}", inner),
         };
         write!(f, "{}", s)
@@ -441,11 +443,24 @@ impl Environment {
             if let DataType::Array(arr_inner) = source {
                 return Self::is_type_compatible(inner, arr_inner);
             }
+            if let DataType::Reference(ref_inner) = source {
+                return Self::is_type_compatible(inner, ref_inner);
+            }
             return Self::is_type_compatible(inner, source);
         }
         // []T 可以接收 *T (指针解引用为数组)
         if let DataType::Array(inner) = target {
             if let DataType::Pointer(ptr_inner) = source {
+                return Self::is_type_compatible(inner, ptr_inner);
+            }
+        }
+        if let DataType::Reference(inner) = target {
+            if let DataType::Reference(ref_inner) = source {
+                return Self::is_type_compatible(inner, ref_inner);
+            }
+        }
+        if let DataType::Reference(inner) = source {
+            if let DataType::Pointer(ptr_inner) = target {
                 return Self::is_type_compatible(inner, ptr_inner);
             }
         }

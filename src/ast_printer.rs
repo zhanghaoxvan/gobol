@@ -166,6 +166,11 @@ impl AstVisitor for AstPrinter {
         _node.get_pointee().accept(self);
     }
 
+    fn visit_reference_type(&mut self, node: &ReferenceType) {
+        print!("&");
+        node.get_referent().accept(self);
+    }
+
     fn visit_array_type(&mut self, node: &ArrayType) {
         if node.is_multi_dimensional() {
             let element = node.get_element_type();

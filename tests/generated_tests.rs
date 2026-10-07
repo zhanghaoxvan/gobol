@@ -68,6 +68,86 @@ func main() {
     result.assert_stdout_contains("// std/fs.gbl");
 }
 
+#[test]
+fn test_pointer_dereference() {
+    let result = run_inline_test(
+        r#"func main() {
+    var x = 5;
+    var p: *int = &x;
+    io::println(*p);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "5");
+}
+
+#[test]
+fn test_pointer_parameter_mutates_argument() {
+    let result = run_inline_test(
+        r#"func increment(p: *int) {
+    *p = *p + 1;
+}
+func main() {
+    var x = 5;
+    increment(&x);
+    io::println(x);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "6");
+}
+
+#[test]
+fn test_swap_through_pointer_parameters() {
+    let result = run_inline_test(
+        r#"func swap(a: *int, b: *int) {
+    var tmp = *a;
+    *a = *b;
+    *b = tmp;
+}
+func main() {
+    var x = 1;
+    var y = 2;
+    swap(&x, &y);
+    io::println(x);
+    io::println(y);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.lines().collect::<Vec<_>>(), ["2", "1"]);
+}
+
+#[test]
+fn test_reference_parameter_mutates_argument() {
+    let result = run_inline_test(
+        r#"func fun(x: &int) {
+    x = 1;
+}
+func main() {
+    var y = 5;
+    fun(&y);
+    io::println(y);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "1");
+}
+
+#[test]
+fn test_reference_parameter_auto_dereferences() {
+    let result = run_inline_test(
+        r#"func read_value(x: &int): int {
+    x + 1
+}
+func main() {
+    var y = 5;
+    io::println(read_value(&y));
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "6");
+}
+
 /// 用例：arrays/array_literal.gbl | 预期正常运行
 #[test]
 fn test_arrays_array_literal() {

@@ -20,7 +20,7 @@ pub struct AstBuilder {
     /// a statement's local attribute with the same name overrides the
     /// file-level one).
     file_attributes: Vec<Attribute>,
-    /// When enabled, the basic prelude (`import xxx`) is auto-injected at
+    /// When enabled, the basic prelude (`import basic::xxx`) is auto-injected at
     /// the top of the built program. This is intended for the *entry* program
     /// only — standard-library modules (and any module loaded by the semantic
     /// analyser) declare their own imports explicitly, so they must not have
@@ -539,7 +539,7 @@ impl AstBuilder {
 
         // Expression statements can start with: identifier, number, string, format string,
         // certain keywords (true, false, null, self, if, match, new),
-        // and certain operators: (, !, -, +, [, {
+        // and certain operators: (, !, -, +, &, *, [, {
         let is_expr_keyword = self.match_type(&TokenType::Keyword)
             && matches!(
                 self.current_token().value.as_str(),
@@ -548,7 +548,7 @@ impl AstBuilder {
         let is_expr_operator = self.match_type(&TokenType::Operator)
             && matches!(
                 self.current_token().value.as_str(),
-                "(" | "!" | "-" | "+" | "[" | "{"
+                "(" | "!" | "-" | "+" | "&" | "*" | "[" | "{"
             );
         if self.match_type(&TokenType::Identifier)
             || self.match_type(&TokenType::Number)
@@ -634,7 +634,7 @@ impl AstBuilder {
         for &name in prelude_modules.iter().rev() {
             if !imported.contains(name) {
                 let import_stmt =
-                    ImportStatement::new(vec![name.to_string()], None);
+                    ImportStatement::new(vec!["basic".to_string(), name.to_string()], None);
                 program.statements.insert(0, Box::new(import_stmt));
             }
         }
@@ -1543,6 +1543,12 @@ impl AstBuilder {
             return self.parse_function_type();
         }
 
+        if self.match_value("&") {
+            self.advance();
+            let referent = self.parse_type()?;
+            return Some(Box::new(ReferenceType::new(referent)));
+        }
+
         // Byte pointer type: `*byte` (a pointer into a byte buffer). Lowered to
         // the same representation as `str` (a GC'd byte buffer) by the IR.
         if self.match_value("*") {
@@ -2222,6 +2228,7 @@ impl AstBuilder {
             || self.match_value("-")
             || self.match_value("+")
             || self.match_value("&")
+            || self.match_value("*")
         {
             let op = self.current_token().value.clone();
             self.advance();

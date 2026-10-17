@@ -243,16 +243,32 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
         
         print_status(f"Environment variables added to {rc}", "ok")
         print_status(f"Please run: source {rc}  OR restart your terminal", "info")
-    else:
+        else:
         print_status("Setting system environment variables...", "info")
-        ps_cmd = (
-            f'[Environment]::SetEnvironmentVariable("GOBOL_HOME", "{install_dir}", "User"); '
-            f'[Environment]::SetEnvironmentVariable("GOBOL_INSTALL_DIR", "{install_dir}", "User"); '
-            f'$p = [Environment]::GetEnvironmentVariable("Path", "User"); '
-            f'[Environment]::SetEnvironmentVariable("Path", "$p;{install_dir}\\bin", "User")'
+        safe_install_dir = str(install_dir).replace("'", "''")
+        bin_path = f"{safe_install_dir}\\bin"
+        
+        ps_cmd = f'''
+$installDir = '{safe_install_dir}'
+$binDir = '{bin_path}'
+[Environment]::SetEnvironmentVariable("GOBOL_HOME", $installDir, "User")
+[Environment]::SetEnvironmentVariable("GOBOL_INSTALL_DIR", $installDir, "User")
+$p = [Environment]::GetEnvironmentVariable("Path", "User")
+$paths = $p -split ";" | Where-Object {{
+    $_.Trim() -ne '' -and $_.Trim().ToLower() -ne $binDir.ToLower()
+}}
+$paths += $binDir
+[Environment]::SetEnvironmentVariable("Path", ($paths -join ';'), "User")
+'''
+        result = subprocess.run(
+            ["powershell", "-Command", ps_cmd],
+            capture_output=True,
+            text=True
         )
-        subprocess.run(["powershell", "-Command", ps_cmd], shell=False)
-        print_status("Environment variables set. Please restart your terminal.", "info")
+        if result.returncode == 0:
+            print_status("Environment variables set. Please restart your terminal.", "info")
+        else:
+            print_status(f"Set env failed: {result.stderr}", "error")
     
     print_status("Installation complete! Gobol is installed globally.", "ok")
     if pause:

@@ -53,9 +53,31 @@ long long gobol_str_get(const char *s, long long i) {
 }
 
 char *gobol_str_char(long long code) {
-    char buf[2];
-    buf[0] = (char)(unsigned char)code;
-    buf[1] = '\0';
+    if (code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
+        code = 0xFFFD;
+
+    char buf[5];
+    size_t len;
+    if (code <= 0x7F) {
+        buf[0] = (char)code;
+        len = 1;
+    } else if (code <= 0x7FF) {
+        buf[0] = (char)(0xC0 | (code >> 6));
+        buf[1] = (char)(0x80 | (code & 0x3F));
+        len = 2;
+    } else if (code <= 0xFFFF) {
+        buf[0] = (char)(0xE0 | (code >> 12));
+        buf[1] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (code & 0x3F));
+        len = 3;
+    } else {
+        buf[0] = (char)(0xF0 | (code >> 18));
+        buf[1] = (char)(0x80 | ((code >> 12) & 0x3F));
+        buf[2] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[3] = (char)(0x80 | (code & 0x3F));
+        len = 4;
+    }
+    buf[len] = '\0';
     return gobol_strdup(buf);
 }
 

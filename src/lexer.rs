@@ -13,9 +13,10 @@ impl Lexer {
     pub fn new(source: impl Into<String>) -> Self {
         let mut keywords = HashSet::new();
         let kw = [
-            "if", "else", "for", "return", "int", "float", "str", "func", "var", "val", "import",
-            "in", "as", "true", "false", "while", "break", "continue", "from", "self", "export",
-            "struct", "impl", "new", "match", "convert", "extern", "trait", "enum", "lambda",
+            "if", "else", "for", "return", "int", "float", "str", "char", "func", "var", "val",
+            "import", "in", "as", "true", "false", "while", "break", "continue", "from", "self",
+            "export", "struct", "impl", "new", "match", "convert", "extern", "trait", "enum",
+            "lambda",
         ];
         for k in &kw {
             keywords.insert(k.to_string());
@@ -173,6 +174,67 @@ impl Lexer {
         }
     }
 
+    fn parse_character(&mut self) -> Token {
+        self.consume();
+        if self.is_source_end() || self.peek() == '\n' || self.peek() == '\'' {
+            return Token::new(TokenType::Unknown, "''");
+        }
+
+        let value = if self.peek() == '\\' {
+            self.consume();
+            match self.consume() {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '0' => '\0',
+                '\\' => '\\',
+                '\'' => '\'',
+                '"' => '"',
+                'u' if self.peek() == '{' => {
+                    self.consume();
+                    let start = self.current_position;
+                    while self.peek().is_ascii_hexdigit() {
+                        self.consume();
+                    }
+                    let digits = self.source[start..self.current_position].to_string();
+                    if digits.is_empty() || self.peek() != '}' {
+                        return Token::new(TokenType::Unknown, "invalid Unicode character escape");
+                    }
+
+                    self.consume();
+                    let Some(value) = u32::from_str_radix(&digits, 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                    else {
+                        return Token::new(TokenType::Unknown, "invalid Unicode scalar value");
+                    };
+                    value
+                }
+                _ => return Token::new(TokenType::Unknown, "invalid character escape"),
+            }
+        } else {
+            let Some(value) = self.source[self.current_position..].chars().next() else {
+                return Token::new(TokenType::Unknown, "unterminated character literal");
+            };
+            if value == '\n' || value == '\r' {
+                return Token::new(TokenType::Unknown, "newline in character literal");
+            }
+            for _ in 0..value.len_utf8() {
+                self.consume();
+            }
+            value
+        };
+
+        if self.peek() != '\'' {
+            return Token::new(
+                TokenType::Unknown,
+                "character literal must contain one scalar value",
+            );
+        }
+        self.consume();
+        Token::new(TokenType::Character, value.to_string())
+    }
+
     pub fn get_next_token(&mut self) -> Token {
         // Skip whitespace and comments
         while !self.is_source_end() {
@@ -231,6 +293,12 @@ impl Lexer {
         }
         if current_char == '"' {
             let mut tok = self.parse_string();
+            tok.line = tok_line;
+            tok.col = tok_col;
+            return tok;
+        }
+        if current_char == '\'' {
+            let mut tok = self.parse_character();
             tok.line = tok_line;
             tok.col = tok_col;
             return tok;
@@ -423,5 +491,29 @@ impl Lexer {
                 Token::with_pos(TokenType::Unknown, unknown, tok_line, tok_col)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexes_unicode_character_literals() {
+        let mut lexer = Lexer::new("'A' '世' '\\u{1F600}'");
+        let tokens = (0..3).map(|_| lexer.get_next_token()).collect::<Vec<_>>();
+
+        assert_eq!(tokens[0].r#type, TokenType::Character);
+        assert_eq!(tokens[0].value, "A");
+        assert_eq!(tokens[1].r#type, TokenType::Character);
+        assert_eq!(tokens[1].value, "世");
+        assert_eq!(tokens[2].r#type, TokenType::Character);
+        assert_eq!(tokens[2].value, "😀");
+    }
+
+    #[test]
+    fn rejects_multi_scalar_character_literals() {
+        let mut lexer = Lexer::new("'ab'");
+        assert_eq!(lexer.get_next_token().r#type, TokenType::Unknown);
     }
 }

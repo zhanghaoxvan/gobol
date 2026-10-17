@@ -135,6 +135,7 @@ pub trait AstVisitor {
     fn visit_grouped_expression(&mut self, _node: &GroupedExpression) {}
     fn visit_identifier(&mut self, _node: &Identifier) {}
     fn visit_number_literal(&mut self, _node: &NumberLiteral) {}
+    fn visit_character_literal(&mut self, _node: &CharacterLiteral) {}
     fn visit_string_literal(&mut self, _node: &StringLiteral) {}
     fn visit_boolean_literal(&mut self, _node: &BooleanLiteral) {}
     fn visit_null_literal(&mut self, _node: &NullLiteral) {}
@@ -2232,6 +2233,43 @@ impl AstNode for NumberLiteral {
 }
 
 impl Expression for NumberLiteral {
+    fn as_expression(&self) -> &dyn Expression {
+        self
+    }
+}
+
+// ==================== CharacterLiteral ====================
+
+pub struct CharacterLiteral {
+    value: char,
+    pub attributes: Vec<Attribute>,
+}
+
+impl CharacterLiteral {
+    pub fn new(value: char) -> Self {
+        Self {
+            value,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn get_value(&self) -> char {
+        self.value
+    }
+}
+
+impl_attributable!(CharacterLiteral);
+
+impl AstNode for CharacterLiteral {
+    fn accept(&self, visitor: &mut dyn AstVisitor) {
+        visitor.visit_character_literal(self);
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Expression for CharacterLiteral {
     fn as_expression(&self) -> &dyn Expression {
         self
     }

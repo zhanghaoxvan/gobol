@@ -54,6 +54,26 @@ fn test_string_index() {
 }
 
 #[test]
+fn test_unicode_character_literals_and_conversions() {
+    let result = run_inline_test(
+        r#"func main() {
+    var letter: char = 'A';
+    var converted: char = 66 as char;
+    io::println(letter as int);
+    io::println(letter);
+    io::println(converted);
+    io::println('世');
+    io::println('\u{1F600}');
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        ["65", "A", "B", "世", "😀"]
+    );
+}
+
+#[test]
 fn test_print_file_contents_as_string() {
     let result = run_inline_test(
         r#"import fs;

@@ -166,6 +166,7 @@ pub enum IRExpr {
 pub enum LitValue {
     Int(i64),
     Byte(u8),
+    Char(char),
     Float(f64),
     Bool(bool),
     Str(String),
@@ -476,6 +477,7 @@ impl IRBuilder {
             "int" => DataType::Int,
             "float" => DataType::Float,
             "bool" => DataType::Bool,
+            "char" => DataType::Char,
             "str" => DataType::Str,
             "none" => DataType::None_,
             // byte and unit aliases
@@ -1308,6 +1310,7 @@ impl IRBuilder {
             IRExpr::Literal(LitValue::Float(_)) => DataType::Float,
             IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
             IRExpr::Literal(LitValue::Byte(_)) => DataType::Byte,
+            IRExpr::Literal(LitValue::Char(_)) => DataType::Char,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
             IRExpr::Variable(name) => {
@@ -2231,6 +2234,10 @@ impl AstVisitor for IRBuilder {
 
     fn visit_string_literal(&mut self, node: &StringLiteral) {
         self.push_expr(IRExpr::Literal(LitValue::Str(node.get_value().to_string())));
+    }
+
+    fn visit_character_literal(&mut self, node: &CharacterLiteral) {
+        self.push_expr(IRExpr::Literal(LitValue::Char(node.get_value())));
     }
 
     fn visit_boolean_literal(&mut self, node: &BooleanLiteral) {
@@ -3679,6 +3686,7 @@ impl Monomorphizer {
             IRExpr::Literal(LitValue::Int(_)) => DataType::Int,
             IRExpr::Literal(LitValue::Float(_)) => DataType::Float,
             IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
+            IRExpr::Literal(LitValue::Char(_)) => DataType::Char,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
             IRExpr::Variable(name) => match self

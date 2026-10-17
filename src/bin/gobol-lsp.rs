@@ -820,6 +820,7 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 continue; // for-loop advances `i`
             }
             TokenType::Operator => (type_index(SemanticTokenType::OPERATOR), 0),
+            TokenType::Character => continue,
             TokenType::Identifier => classify_ident(tokens, i, symbols, &ns_set),
             TokenType::Unknown | TokenType::EndOfLine | TokenType::EndOfFile => continue,
         };

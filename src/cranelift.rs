@@ -181,6 +181,7 @@ impl TypeResolver {
             DataType::Float => 8,
             DataType::Bool => 1,
             DataType::Byte => 1,
+            DataType::Char => 4,
             DataType::Int | DataType::Str | DataType::Unknown | DataType::Struct(_) => 8,
             DataType::Nullable(inner) => self.type_size(inner),
             DataType::Array(_) => 8, // array pointer
@@ -294,6 +295,7 @@ impl TypeResolver {
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
             IRExpr::Literal(LitValue::Byte(_)) => DataType::Byte,
+            IRExpr::Literal(LitValue::Char(_)) => DataType::Char,
             IRExpr::Variable(name) => self.var_type(name),
             IRExpr::StructLiteral { name, .. } => DataType::Struct(name.clone()),
             IRExpr::ArrayLiteral(elems) => {
@@ -456,6 +458,7 @@ impl VariadicStub {
             DataType::Bool => "int",
             DataType::None_ => "void",
             DataType::Byte => "unsigned char",
+            DataType::Char => "unsigned int",
             DataType::Int
             | DataType::Str
             | DataType::Unknown
@@ -2127,6 +2130,7 @@ impl CraneliftBackend {
             LitValue::Float(f) => bcx.ins().f64const(*f),
             LitValue::Bool(b) => bcx.ins().iconst(types::I8, *b as i64),
             LitValue::Byte(n) => bcx.ins().iconst(types::I8, *n as i64),
+            LitValue::Char(c) => bcx.ins().iconst(types::I32, *c as u32 as i64),
             LitValue::Str(s) => self.intern_string(bcx, s),
             LitValue::None => bcx.ins().iconst(types::I64, 0),
         }
@@ -3228,11 +3232,17 @@ impl CraneliftBackend {
             }
         }
         Ok(match (&src, target) {
+            (DataType::Char, DataType::Int) => bcx.ins().uextend(types::I64, v),
+            (DataType::Int, DataType::Char) => bcx.ins().ireduce(types::I32, v),
             (DataType::Int, DataType::Float) => bcx.ins().fcvt_from_sint(types::F64, v),
             (DataType::Float, DataType::Int) => bcx.ins().fcvt_to_sint(types::I64, v),
             (DataType::Int, DataType::Str) => self.call_runtime(bcx, "gobol_str_int", &[v]),
             (DataType::Float, DataType::Str) => self.call_runtime(bcx, "gobol_str_float", &[v]),
             (DataType::Bool, DataType::Str) => self.call_runtime(bcx, "gobol_str_bool", &[v]),
+            (DataType::Char, DataType::Str) => {
+                let codepoint = bcx.ins().uextend(types::I64, v);
+                self.call_runtime(bcx, "gobol_str_char", &[codepoint])
+            }
             (DataType::Str, DataType::Int) => {
                 // parse via runtime not available; return 0
                 let _ = v;
@@ -3488,6 +3498,10 @@ impl CraneliftBackend {
             DataType::Int => self.call_runtime(bcx, "gobol_str_int", &[v]),
             DataType::Float => self.call_runtime(bcx, "gobol_str_float", &[v]),
             DataType::Bool => self.call_runtime(bcx, "gobol_str_bool", &[v]),
+            DataType::Char => {
+                let codepoint = bcx.ins().uextend(types::I64, v);
+                self.call_runtime(bcx, "gobol_str_char", &[codepoint])
+            }
             _ => {
                 // Best-effort: treat as int.
                 self.call_runtime(bcx, "gobol_str_int", &[v])
@@ -3519,6 +3533,8 @@ impl CraneliftBackend {
             (DataType::Int, DataType::Byte) => bcx.ins().ireduce(types::I8, v),
             (DataType::Byte, DataType::Bool) => v,
             (DataType::Bool, DataType::Byte) => v,
+            (DataType::Char, DataType::Int) => bcx.ins().uextend(types::I64, v),
+            (DataType::Int, DataType::Char) => bcx.ins().ireduce(types::I32, v),
             (DataType::Int, DataType::Float) => bcx.ins().fcvt_from_sint(types::F64, v),
             (DataType::Float, DataType::Int) => bcx.ins().fcvt_to_sint(types::I64, v),
             (DataType::Bool, DataType::Int) => bcx.ins().uextend(types::I64, v),
@@ -3547,6 +3563,7 @@ impl CraneliftBackend {
             DataType::Float => bcx.ins().f64const(0.0),
             DataType::Bool => bcx.ins().iconst(types::I8, 0),
             DataType::Byte => bcx.ins().iconst(types::I8, 0),
+            DataType::Char => bcx.ins().iconst(types::I32, 0),
             DataType::Unknown => {
                 // array: allocate an empty one
                 let fid = self.func_ids["gobol_array_new"];
@@ -3607,6 +3624,7 @@ impl CraneliftBackend {
             DataType::Float => types::F64,
             DataType::Str => types::I64,
             DataType::Byte => types::I8,
+            DataType::Char => types::I32,
             DataType::None_ => types::INVALID,
             DataType::Unknown => types::I64,   // array pointer
             DataType::Struct(_) => types::I64, // struct pointer

@@ -160,6 +160,7 @@ val Point { x, y } = p;
 | `float` | Floating-point / 浮点数 | `double` | `3.14`, `-0.5`, `2.0` |
 | `str` | String / 字符串 | `const char*` | `"hello"`, `"世界"` |
 | `bool` | Boolean / 布尔值 | `bool` | `true`, `false` |
+| `char` | Unicode scalar value / Unicode 标量值 | `uint32_t` | `'A'`, `'世'`, `'\u{1F600}'` |
 
 ---
 
@@ -588,6 +589,14 @@ convert TargetType(self): TargetType {
 Called when using `value as TargetType`.
 
 当使用 `value as TargetType` 时调用。
+
+Character literals have type `char`. Cast `char` to `int` to get its Unicode
+code point; casting an `int` to `char` keeps the low 32 bits, and string
+conversion replaces invalid Unicode scalar values with U+FFFD.
+
+字符字面量的类型是 `char`。将 `char` 转为 `int` 可取得 Unicode 码点；
+将 `int` 转为 `char` 会保留低 32 位，转成字符串时无效的 Unicode
+标量值会替换为 U+FFFD。
 
 ### 9.3 Iterator Protocol / 迭代器协议
 

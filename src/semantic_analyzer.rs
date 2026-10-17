@@ -33,6 +33,7 @@ fn resolve_enum_payload_type(scrutinee: &DataType, declared: &DataType) -> DataT
             "float" => DataType::Float,
             "str" => DataType::Str,
             "bool" => DataType::Bool,
+            "char" => DataType::Char,
             other => DataType::Struct(other.to_string()),
         })
         .unwrap_or_else(|| declared.clone())
@@ -751,6 +752,7 @@ impl SemanticAnalyzer {
             "float" => DataType::Float,
             "str" => DataType::Str,
             "bool" => DataType::Bool,
+            "char" => DataType::Char,
             // byte and unit aliases
             "byte" => DataType::Byte,
             "()" => DataType::None_,
@@ -2655,6 +2657,10 @@ impl AstVisitor for SemanticAnalyzer {
         } else {
             self.type_stack.push(DataType::Int);
         }
+    }
+
+    fn visit_character_literal(&mut self, _node: &CharacterLiteral) {
+        self.type_stack.push(DataType::Char);
     }
 
     fn visit_string_literal(&mut self, _node: &StringLiteral) {

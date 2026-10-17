@@ -619,8 +619,8 @@ impl AstBuilder {
         // standard-library facilities (math, fs, net, collections, etc.) must
         // be imported explicitly so every program does not pull them in.
         let prelude_modules = vec![
-            "assert", "builtins", "cmp", "debug", "float", "int", "io", "ops", "str", "option",
-            "result", "range", "vec",
+            "assert", "builtins", "char", "cmp", "debug", "float", "int", "io", "ops", "str",
+            "option", "result", "range", "vec",
         ];
 
         let mut imported: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1858,6 +1858,9 @@ impl AstBuilder {
                                 if let Some(n) = any.downcast_ref::<NumberLiteral>() {
                                     return Box::new(NumberLiteral::new(n.get_value()));
                                 }
+                                if let Some(c) = any.downcast_ref::<CharacterLiteral>() {
+                                    return Box::new(CharacterLiteral::new(c.get_value()));
+                                }
                                 if let Some(s) = any.downcast_ref::<StringLiteral>() {
                                     return Box::new(StringLiteral::new(s.get_value()));
                                 }
@@ -2299,7 +2302,7 @@ impl AstBuilder {
                         && !(parser.match_type(&TokenType::Keyword)
                             && matches!(
                                 parser.current_token().value.as_str(),
-                                "int" | "float" | "str" | "bool"
+                                "int" | "float" | "str" | "bool" | "char"
                             ))
                     {
                         return false;
@@ -2312,7 +2315,7 @@ impl AstBuilder {
                             && !(parser.match_type(&TokenType::Keyword)
                                 && matches!(
                                     parser.current_token().value.as_str(),
-                                    "int" | "float" | "str" | "bool"
+                                    "int" | "float" | "str" | "bool" | "char"
                                 ))
                         {
                             return false;
@@ -2365,6 +2368,12 @@ impl AstBuilder {
             let value = self.current_token().value.clone();
             self.advance();
             return Some(Box::new(StringLiteral::new(value)));
+        }
+
+        if self.match_type(&TokenType::Character) {
+            let value = self.current_token().value.chars().next()?;
+            self.advance();
+            return Some(Box::new(CharacterLiteral::new(value)));
         }
 
         // 格式化字符串
@@ -2917,7 +2926,7 @@ impl AstBuilder {
                 && !(self.match_type(&TokenType::Keyword)
                     && matches!(
                         self.current_token().value.as_str(),
-                        "int" | "float" | "str" | "bool"
+                        "int" | "float" | "str" | "bool" | "char"
                     ))
             {
                 self.log_error("Expected generic type argument");

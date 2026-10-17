@@ -672,6 +672,10 @@ impl AstVisitor for AstPrinter {
         }
     }
 
+    fn visit_character_literal(&mut self, node: &CharacterLiteral) {
+        print!("'{}'", node.get_value());
+    }
+
     fn visit_string_literal(&mut self, node: &StringLiteral) {
         print!("\u{22}");
         for c in node.get_value().chars() {

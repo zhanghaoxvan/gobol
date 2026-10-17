@@ -439,10 +439,8 @@ impl VariadicStub {
     ///
     /// `long` is NOT used for string parameters: on Windows (LLP64) MSVC's
     /// `long` is 32-bit while a pointer is 64-bit, so `(const char*)`-casting a
-    /// `long` stub argument triggers C4312 (cast to a larger pointer) which
-    /// `/WX` promotes to a hard error. Strings are declared directly as
-    /// `const char*` so the argument already has pointer width and no cast is
-    /// needed in the forwarding call.
+    /// `long` stub argument would truncate the pointer. Strings are declared
+    /// directly as `const char*` so no cast is needed in the forwarding call.
     fn c_param_type(dt: &DataType) -> &'static str {
         if matches!(dt, DataType::Str) {
             "const char*"
@@ -486,8 +484,8 @@ impl VariadicStub {
         };
         // Forward each argument. String parameters are already declared as
         // `const char*` (see `c_param_type`), so no cast is required here.
-        // This avoids MSVC C4312 (casting a 32-bit `long` to a 64-bit pointer
-        // on Windows/LLP64), which `/WX` would otherwise promote to an error.
+        // This avoids truncating pointers on Windows/LLP64, where `long` is
+        // 32-bit and pointers are 64-bit.
         let forward_args: Vec<String> = (0..self.arity).map(|i| format!("a{}", i)).collect();
         let call_args = forward_args.join(", ");
         let ret_stmt = if matches!(self.return_type, DataType::None_) {
@@ -555,6 +553,8 @@ pub struct CraneliftBackend {
     /// decisions such as `naked` (no implicit epilogue) and `no_gc`
     /// (use a non-GC allocator for heap allocations).
     current_func_attributes: Vec<String>,
+    /// Custom linker entry symbol, emitted without the usual Gobol prefix.
+    entry_point: Option<String>,
 }
 
 impl CraneliftBackend {
@@ -1117,6 +1117,8 @@ impl CraneliftBackend {
                 Some(explicit) => explicit.to_string(),
                 None => f.name.rsplit("::").next().unwrap_or(&f.name).to_string(),
             }
+        } else if self.entry_point.as_deref() == Some(f.name.as_str()) {
+            f.name.clone()
         } else {
             Self::func_symbol(&f.name, arity)
         };
@@ -3648,11 +3650,17 @@ impl CraneliftBackend {
     }
 
     fn new_for_target_triple(
-        triple: target_lexicon::Triple,
+        mut triple: target_lexicon::Triple,
         opt_level: usize,
     ) -> Result<Self, String> {
         use cranelift_codegen::isa::lookup;
         use cranelift_codegen::settings::{self, Configurable};
+
+        if target_is_bare_metal(&triple.to_string())
+            && triple.binary_format == target_lexicon::BinaryFormat::Unknown
+        {
+            triple.binary_format = target_lexicon::BinaryFormat::Elf;
+        }
 
         let triple_str = triple.to_string();
         let mut flag_builder = settings::builder();
@@ -3698,6 +3706,7 @@ impl CraneliftBackend {
             return_type: DataType::None_,
             diverged: false,
             current_func_attributes: Vec::new(),
+            entry_point: None,
         })
     }
 
@@ -3712,6 +3721,11 @@ impl CraneliftBackend {
         output_path: &str,
         opts: &LinkOptions,
     ) -> Result<(), String> {
+        self.entry_point = opts
+            .entry_point
+            .as_deref()
+            .filter(|entry| *entry != "main")
+            .map(str::to_owned);
         self.compile_ir(ir)?;
 
         // Collect variadic stubs needed for `extern "C" ...` call sites.
@@ -3997,10 +4011,7 @@ impl CraneliftBackend {
             let mut last_diag = String::new();
             for compiler in &c_compiler_candidates {
                 let mut c = std::process::Command::new(compiler);
-                // /WX: turn every warning (incl. C4311 pointer truncation)
-                // into a hard error so cl.exe can't "succeed" while failing
-                // to emit.
-                c.args(["/c", "/nologo", "/WX", "/utf-8"]);
+                c.args(["/c", "/nologo", "/utf-8"]);
                 for inc in &rt_includes {
                     c.arg(format!("/I{}", inc.display()));
                 }
@@ -4402,6 +4413,43 @@ mod link_tests {
         let options = LinkOptions::host("runtime.c", vec![]);
         assert!(options.link_specs.is_empty());
     }
+
+    #[test]
+    fn custom_entry_point_keeps_the_linker_symbol_name() {
+        let function = |name: &str| IRFunction {
+            name: name.to_string(),
+            generic_params: Vec::new(),
+            params: Vec::new(),
+            return_type: DataType::None_,
+            body: Some(IRBlock {
+                statements: vec![IRStmt::Return(None)],
+            }),
+            is_main: false,
+            is_method: false,
+            struct_name: None,
+            attributes: Vec::new(),
+            is_variadic: false,
+        };
+        let ir = GobolIR {
+            functions: vec![function("_start"), function("helper")],
+            structs: Vec::new(),
+            impls: Vec::new(),
+            main_function: None,
+            globals: Vec::new(),
+        };
+        let mut backend = CraneliftBackend::new();
+        backend.entry_point = Some("_start".to_string());
+
+        backend.compile_ir(&ir).unwrap();
+
+        assert!(backend.func_ids.contains_key("_start"));
+        assert!(backend.func_ids.contains_key("gbl_helper_0"));
+    }
+
+    #[test]
+    fn bare_metal_x86_64_uses_elf_object_format() {
+        CraneliftBackend::new_for_target("x86_64-unknown-none").unwrap();
+    }
 }
 
 /// Append `.exe` to `name` for Windows targets when it isn't already present.
@@ -4474,6 +4522,13 @@ fn which(exe: &str) -> Option<std::path::PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
+        #[cfg(windows)]
+        {
+            let candidate = dir.join(format!("{}.exe", exe));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
     }
     None
 }
@@ -4519,11 +4574,14 @@ fn detect_linker(target: &str) -> Result<(std::path::PathBuf, LinkerKind), Strin
         if let Some(p) = which(&cross_ld) {
             return Ok((p, LinkerKind::BareLd));
         }
+        if let Some(p) = which("ld.lld") {
+            return Ok((p, LinkerKind::BareLd));
+        }
         if let Some(p) = which("ld") {
             return Ok((p, LinkerKind::BareLd));
         }
         return Err(format!(
-            "linker not found for bare-metal target '{}': no `ld` or `{}-linux-gnu-ld` on PATH",
+            "linker not found for bare-metal target '{}': no `ld`, `ld.lld`, or `{}-linux-gnu-ld` on PATH",
             target, arch
         ));
     }

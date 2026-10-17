@@ -2642,14 +2642,20 @@ fn analyze_document(uri: &str, source: &str, workspace_roots: &[PathBuf]) -> Doc
 }
 
 fn uri_to_path(uri: &str) -> String {
-    uri.strip_prefix("file://").unwrap_or(uri).to_string()
+    url::Url::parse(uri)
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| url.to_file_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| uri.strip_prefix("file://").unwrap_or(uri).to_string())
 }
 
 /// Convert a filesystem path back into a `file://` URI (the inverse of
 /// `uri_to_path`). Used to point cross-file `gotoDefinition`/hover results at
 /// an imported module's source file.
 fn path_to_uri(path: &str) -> url::Url {
-    url::Url::parse(&format!("file://{}", path))
+    url::Url::from_file_path(path)
+        .or_else(|_| url::Url::parse(&format!("file://{}", path)))
         .unwrap_or_else(|_| url::Url::parse("file:///").unwrap())
 }
 
@@ -5327,6 +5333,51 @@ mod unit_new {
 #[cfg(test)]
 mod e2e_doc {
     use super::*;
+
+    #[test]
+    fn file_uri_round_trips_paths_with_spaces() {
+        let path = std::env::temp_dir().join("gobol lsp test.gbl");
+        let uri = url::Url::from_file_path(&path).expect("convert test path to URI");
+        assert_eq!(uri_to_path(uri.as_str()), path.to_string_lossy());
+    }
+
+    #[test]
+    fn analyzes_header_relative_to_open_document() {
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("ffi");
+        let source_path = fixture_dir.join("variadic.gbl");
+        let source = std::fs::read_to_string(&source_path).expect("read variadic fixture");
+        let uri = url::Url::from_file_path(&source_path).expect("convert fixture path to URI");
+        let doc = analyze_document(uri.as_str(), &source, &[]);
+
+        assert!(
+            !doc.errors
+                .iter()
+                .any(|(_, _, message)| message.contains("Cannot read C header")),
+            "header should resolve relative to the open Gobol document: {:?}",
+            doc.errors
+        );
+    }
+
+    #[test]
+    fn char_type_is_semantically_highlighted_as_type() {
+        let source = "func f(value: char): char { value }\n";
+        let tokens = lex_source(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let semantic_tokens = build_semantic_tokens(&tokens, &symbols);
+
+        assert_eq!(
+            semantic_tokens
+                .iter()
+                .filter(|token| SEMANTIC_TYPES[token.token_type as usize].as_str() == "type")
+                .count(),
+            2,
+            "both char type references should use the semantic type token"
+        );
+    }
+
     fn lexall(s: &str) -> Vec<Token> {
         let mut l = Lexer::new(s);
         let mut v = Vec::new();

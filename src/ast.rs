@@ -2269,6 +2269,14 @@ impl StringLiteral {
                         res.push('"');
                         i += 1;
                     }
+                    'r' => {
+                        res.push('\r');
+                        i += 1;
+                    }
+                    '0' => {
+                        res.push('\0');
+                        i += 1;
+                    }
                     _ => res.push(chars[i]),
                 }
             } else {

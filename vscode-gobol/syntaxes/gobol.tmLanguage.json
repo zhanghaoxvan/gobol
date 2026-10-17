@@ -188,8 +188,11 @@
         },
         {
           "comment": "Type annotation after a single `:` (`var x: Vec<int>`, `func f(a: T): U`). The negative lookbehind `(?<!:)` prevents the colon of the `::` scope operator (e.g. `builtins::gobol_mem_load`, `Vec::new`) from being treated as an annotation, so qualified function names keep their `entity.name.function` color.",
-          "name": "entity.name.type.alias.gobol",
-          "match": "(?<!:):\\s*([a-zA-Z_][[:word:]]*(?:::[a-zA-Z_][[:word:]]*)*)"
+          "match": "(?<!:)(:)\\s*([a-zA-Z_][[:word:]]*(?:::[a-zA-Z_][[:word:]]*)*)",
+          "captures": {
+            "1": { "name": "punctuation.separator.colon.gobol" },
+            "2": { "name": "entity.name.type.alias.gobol" }
+          }
         }
       ]
     },

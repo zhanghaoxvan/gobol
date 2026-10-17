@@ -10,6 +10,13 @@ import platform
 import subprocess
 from pathlib import Path
 
+# Windows registry imports (only load if on Windows)
+if sys.platform == "win32":
+    import winreg
+    import ctypes
+
+MARKER = "# Added by Gobol installer"
+
 # ==================== Terminal Colors ====================
 
 class Colors:
@@ -43,9 +50,7 @@ def print_menu(title, options, selected=0, footer=""):
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.GREY}Use ↑/↓, Enter to select, or press 'q' to quit{Colors.ENDC}")
 
-
 def choose_menu(title, options, footer=""):
-    """Return a menu index using arrow keys, with a line-input fallback."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return int(input("Select an option: ").strip()) - 1
 
@@ -63,7 +68,7 @@ def choose_menu(title, options, footer=""):
                 choice = int(key) - 1
                 if 0 <= choice < len(options):
                     return choice
-            if key == "\x00" or key == "\xe0":
+            if key in ("\x00", "\xe0"):
                 key = msvcrt.getwch()
                 if key == "H":
                     selected = (selected - 1) % len(options)
@@ -72,9 +77,9 @@ def choose_menu(title, options, footer=""):
     else:
         import termios
         import tty
-        old_settings = termios.tcgetattr(sys.stdin) # type: ignore[attr-defined]
+        old_settings = termios.tcgetattr(sys.stdin)
         try:
-            tty.setcbreak(sys.stdin.fileno()) # type: ignore[attr-defined]
+            tty.setcbreak(sys.stdin.fileno())
             while True:
                 print_menu(title, options, selected, footer)
                 key = sys.stdin.read(1)
@@ -93,7 +98,7 @@ def choose_menu(title, options, footer=""):
                     elif sequence == "[B":
                         selected = (selected + 1) % len(options)
         finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings) # type: ignore[attr-defined]
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
 def print_status(message, status_type="info"):
     if status_type == "info":
@@ -104,19 +109,16 @@ def print_status(message, status_type="info"):
         print(f"{Colors.WARNING}[WARN]{Colors.ENDC} {message}")
     elif status_type == "fail":
         print(f"{Colors.FAIL}[FAIL]{Colors.ENDC} {message}")
+    elif status_type == "error":
+        print(f"{Colors.FAIL}[ERR ]{Colors.ENDC} {message}")
 
 # ==================== Core Functions ====================
 
 def detect_platform():
-    raw_os = platform.system().lower()
-    if raw_os == "linux": os_name = "linux"
-    elif raw_os == "darwin": os_name = "macos"
-    elif raw_os == "windows": os_name = "windows"
-    else: os_name = raw_os
-    raw_arch = platform.machine().lower()
-    if raw_arch in ("x86_64", "amd64"): arch = "x86_64"
-    elif raw_arch in ("aarch64", "arm64"): arch = "aarch64"
-    else: arch = raw_arch
+    os_raw = platform.system().lower()
+    arch_raw = platform.machine().lower()
+    os_name = {"windows":"windows", "linux":"linux", "darwin":"macos"}.get(os_raw, os_raw)
+    arch = {"x86_64":"x86_64", "amd64":"x86_64", "aarch64":"aarch64", "arm64":"aarch64"}.get(arch_raw, arch_raw)
     return os_name, arch
 
 def is_windows():
@@ -129,10 +131,18 @@ def gobol_home():
         return Path(override)
     return Path.home() / ".gobol"
 
+def broadcast_env_change():
+    if is_windows():
+        HWND_BROADCAST = 0xFFFF
+        WM_SETTINGCHANGE = 0x001A
+        SMTO_ABORTIFHUNG = 0x0002
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, None
+        )
+
 # ==================== TUI Task Functions ====================
 
 def task_build_and_install(no_build=False, install_dir=None, pause=True):
-    """Build and install the Gobol toolchain with user-defined installation directory."""
     if pause:
         clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
@@ -142,7 +152,6 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
     os_name, arch = detect_platform()
     print_status(f"Platform: {os_name}/{arch}", "info")
     
-    # ----- 用户选择安装目录 -----
     default_install_dir = Path.home() / ".gobol"
     current_env = os.environ.get("GOBOL_INSTALL_DIR") or os.environ.get("GOBOL_HOME")
     if current_env:
@@ -157,7 +166,6 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
     
     print_status(f"Installation directory set to: {install_dir}", "ok")
     
-    # ----- 构建 -----
     if not no_build:
         print_status("Building (cargo build --release)...", "info")
         cmd = ["cargo", "build", "--release", "--bins"]
@@ -172,7 +180,6 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
     else:
         print_status("Skipping build (--no-build)", "warn")
     
-    # ----- 安装 -----
     install_dir.mkdir(parents=True, exist_ok=True)
     (install_dir / "bin").mkdir(parents=True, exist_ok=True)
     (install_dir / "lib").mkdir(parents=True, exist_ok=True)
@@ -204,71 +211,64 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
     else:
         print_status("std/ directory not found", "warn")
     
-    # ----- 写入环境变量到shell配置文件 -----
+    # ----- 写入环境变量 -----
     if not is_windows():
         shell = os.environ.get("SHELL", "")
         rc = Path.home() / (".zshrc" if "zsh" in shell else ".bashrc")
-        marker = "# Added by Gobol installer"
         
         rc_text = rc.read_text() if rc.exists() else ""
         lines = rc_text.splitlines()
         new_lines = []
-        skip = False
-        for line in lines:
-            if line.strip() == marker:
-                skip = True
-                continue
-            if skip and line.strip().startswith("export GOBOL_HOME="):
-                continue
-            if skip and line.strip().startswith("export GOBOL_INSTALL_DIR="):
-                continue
-            if skip and line.strip().startswith("export PATH=") and "GOBOL_HOME" in line:
-                continue
-            if skip and line == "":
-                continue
-            if skip and line.strip() == "":
-                continue
-            if skip and line.strip() and not line.strip().startswith("#"):
-                skip = False
-                new_lines.append(line)
-            elif not skip:
-                new_lines.append(line)
         
+        # 精准过滤
+        for line in lines:
+            stripped = line.strip()
+            if stripped == MARKER: continue
+            if stripped.startswith("export GOBOL_HOME="): continue
+            if stripped.startswith("export GOBOL_INSTALL_DIR="): continue
+            if stripped.startswith("export PATH=") and "GOBOL_HOME" in line: continue
+            new_lines.append(line)
+        
+        # 追加新块
         with open(rc, "w") as f:
             f.write("\n".join(new_lines))
-            f.write(f"\n\n{marker}")
+            f.write(f"\n\n{MARKER}")
             f.write(f'\nexport GOBOL_HOME="{install_dir}"')
             f.write(f'\nexport GOBOL_INSTALL_DIR="{install_dir}"')
             f.write(f'\nexport PATH="$GOBOL_HOME/bin:$PATH"\n')
         
         print_status(f"Environment variables added to {rc}", "ok")
         print_status(f"Please run: source {rc}  OR restart your terminal", "info")
-        else:
-        print_status("Setting system environment variables...", "info")
-        safe_install_dir = str(install_dir).replace("'", "''")
-        bin_path = f"{safe_install_dir}\\bin"
+    else:
+        print_status("Setting system environment variables via Registry...", "info")
+        bin_path = str(install_dir / "bin")
         
-        ps_cmd = f'''
-$installDir = '{safe_install_dir}'
-$binDir = '{bin_path}'
-[Environment]::SetEnvironmentVariable("GOBOL_HOME", $installDir, "User")
-[Environment]::SetEnvironmentVariable("GOBOL_INSTALL_DIR", $installDir, "User")
-$p = [Environment]::GetEnvironmentVariable("Path", "User")
-$paths = $p -split ";" | Where-Object {{
-    $_.Trim() -ne '' -and $_.Trim().ToLower() -ne $binDir.ToLower()
-}}
-$paths += $binDir
-[Environment]::SetEnvironmentVariable("Path", ($paths -join ';'), "User")
-'''
-        result = subprocess.run(
-            ["powershell", "-Command", ps_cmd],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print_status("Environment variables set. Please restart your terminal.", "info")
-        else:
-            print_status(f"Set env failed: {result.stderr}", "error")
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS) as key:
+                winreg.SetValueEx(key, "GOBOL_HOME", 0, winreg.REG_SZ, str(install_dir))
+                winreg.SetValueEx(key, "GOBOL_INSTALL_DIR", 0, winreg.REG_SZ, str(install_dir))
+                
+                # 读取原类型
+                try:
+                    current_path, path_type = winreg.QueryValueEx(key, "Path")
+                except FileNotFoundError:
+                    current_path = ""
+                    path_type = winreg.REG_SZ # 如果不存在，用标准字符串
+                
+                # 去重
+                paths = [p.strip() for p in current_path.split(";") if p.strip()]
+                paths = [p for p in paths if p.lower() != bin_path.lower()]
+                paths.append(bin_path)
+                
+                # 使用原类型写回
+                winreg.SetValueEx(key, "Path", 0, path_type, ";".join(paths))
+                
+            print_status("Registry updated successfully.", "ok")
+            broadcast_env_change()
+            print_status("Environment broadcast sent. New terminals will reflect changes.", "info")
+            
+        except Exception as e:
+            print_status(f"Failed to update registry: {e}", "error")
     
     print_status("Installation complete! Gobol is installed globally.", "ok")
     if pause:
@@ -291,17 +291,58 @@ def task_uninstall(install_dir=None, assume_yes=False, pause=True):
             input("Press Enter to return to main menu...")
         return
     
+    # 1. 删目录
     if install_dir.exists():
         shutil.rmtree(install_dir)
         print_status(f"Removed {install_dir}", "ok")
-        print_status("Please manually clean up your shell PATH in .bashrc/.zshrc", "warn")
+    
+    # 2. 清理环境变量
+    bin_path = str(install_dir / "bin")
+    if is_windows():
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS) as key:
+                # 删除变量
+                for var in ["GOBOL_HOME", "GOBOL_INSTALL_DIR"]:
+                    try:
+                        winreg.DeleteValue(key, var)
+                    except FileNotFoundError:
+                        pass
+                
+                # 从 Path 中剔除
+                try:
+                    current_path, path_type = winreg.QueryValueEx(key, "Path")
+                    paths = [p.strip() for p in current_path.split(";") if p.strip()]
+                    paths = [p for p in paths if p.lower() != bin_path.lower()]
+                    winreg.SetValueEx(key, "Path", 0, path_type, ";".join(paths))
+                except FileNotFoundError:
+                    pass
+            print_status("Cleaned up Windows Registry.", "ok")
+            broadcast_env_change()
+        except Exception as e:
+            print_status(f"Failed to clean registry: {e}", "error")
     else:
-        print_status("No installation found.", "warn")
+        shell = os.environ.get("SHELL", "")
+        rc = Path.home() / (".zshrc" if "zsh" in shell else ".bashrc")
+        if rc.exists():
+            rc_text = rc.read_text()
+            lines = rc_text.splitlines()
+            new_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped == MARKER: continue
+                if stripped.startswith("export GOBOL_HOME="): continue
+                if stripped.startswith("export GOBOL_INSTALL_DIR="): continue
+                if stripped.startswith("export PATH=") and "GOBOL_HOME" in line: continue
+                new_lines.append(line)
+            with open(rc, "w") as f:
+                f.write("\n".join(new_lines) + "\n")
+            print_status(f"Cleaned up {rc}", "ok")
+
+    print_status("Uninstallation complete.", "ok")
     if pause:
         input("Press Enter to return to main menu...")
 
 def task_extension_guide(pause=True):
-    """显示 VS Code 扩展安装指南（跨平台命令）"""
     if pause:
         clear_screen()
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
@@ -329,95 +370,41 @@ def task_extension_guide(pause=True):
 # ==================== CLI and Main TUI Loop ====================
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Build and install the Gobol toolchain."
-    )
-    parser.add_argument(
-        "command",
-        nargs="?",
-        choices=("install", "uninstall", "extensions"),
-        help="run a task without opening the interactive menu",
-    )
-    parser.add_argument(
-        "--install-dir",
-        metavar="PATH",
-        help="installation directory (also honored by GOBOL_INSTALL_DIR)",
-    )
-    parser.add_argument(
-        "--no-build",
-        action="store_true",
-        help="install existing release binaries without running Cargo",
-    )
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="confirm destructive actions without prompting",
-    )
-    parser.add_argument(
-        "--non-interactive",
-        "--ci",
-        dest="non_interactive",
-        action="store_true",
-        help="never open the TUI or prompt; defaults to install",
-    )
+    parser = argparse.ArgumentParser(description="Build and install the Gobol toolchain.")
+    parser.add_argument("command", nargs="?", choices=("install", "uninstall", "extensions"), help="run a task without opening the interactive menu")
+    parser.add_argument("--install-dir", metavar="PATH", help="installation directory (also honored by GOBOL_INSTALL_DIR)")
+    parser.add_argument("--no-build", action="store_true", help="install existing release binaries without running Cargo")
+    parser.add_argument("--yes", action="store_true", help="confirm destructive actions without prompting")
+    parser.add_argument("--non-interactive", "--ci", dest="non_interactive", action="store_true", help="never open the TUI or prompt; defaults to install")
     return parser.parse_args()
-
 
 def run_cli(args):
     command = args.command or "install"
     if command == "install":
-        ok = task_build_and_install(
-            no_build=args.no_build,
-            install_dir=args.install_dir,
-            pause=False,
-        )
+        ok = task_build_and_install(no_build=args.no_build, install_dir=args.install_dir, pause=False)
         return 0 if ok else 1
     if command == "uninstall":
         if not args.yes:
             print_status("uninstall requires --yes in non-interactive mode.", "fail")
             return 2
-        task_uninstall(
-            install_dir=args.install_dir,
-            assume_yes=True,
-            pause=False,
-        )
+        task_uninstall(install_dir=args.install_dir, assume_yes=True, pause=False)
         return 0
     task_extension_guide(pause=False)
     return 0
 
-
 def main():
     args = parse_args()
-    if (
-        args.command
-        or args.non_interactive
-        or args.install_dir
-        or args.no_build
-        or args.yes
-    ):
+    if args.command or args.non_interactive or args.install_dir or args.no_build or args.yes:
         return run_cli(args)
 
     while True:
-        options = [
-            "Build & Install Gobol",
-            "Extension Guide (VS Code)",
-            "Uninstall Gobol",
-            "Exit"
-        ]
-        choice = choose_menu(
-            "Gobol Installer",
-            options,
-            footer=f"GOBOL_INSTALL_DIR: {gobol_home()}"
-        )
+        options = ["Build & Install Gobol", "Extension Guide (VS Code)", "Uninstall Gobol", "Exit"]
+        choice = choose_menu("Gobol Installer", options, footer=f"GOBOL_INSTALL_DIR: {gobol_home()}")
 
-        if choice == -1:
-            break
-        elif choice == 0:
-            task_build_and_install()
-        elif choice == 1:
-            task_extension_guide()
-        elif choice == 2:
-            task_uninstall()
+        if choice == -1: break
+        elif choice == 0: task_build_and_install()
+        elif choice == 1: task_extension_guide()
+        elif choice == 2: task_uninstall()
         elif choice == 3:
             print(f"{Colors.OKCYAN}Goodbye!{Colors.ENDC}")
             break

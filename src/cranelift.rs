@@ -4447,6 +4447,7 @@ mod link_tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn bare_metal_x86_64_uses_elf_object_format() {
         CraneliftBackend::new_for_target("x86_64-unknown-none").unwrap();
     }

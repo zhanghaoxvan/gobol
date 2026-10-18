@@ -1378,7 +1378,7 @@ impl IRBuilder {
             },
             IRExpr::Cast { target, .. } => target.clone(),
             IRExpr::ArrayIndex { array, .. } => match self.infer_expr_type(array) {
-                DataType::Str => DataType::Str,
+                DataType::Str => DataType::Char,
                 DataType::Array(element) => *element,
                 _ => DataType::Int,
             },

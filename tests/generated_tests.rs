@@ -47,10 +47,21 @@ fn test_string_index() {
         r#"func main() {
     var s = "hello";
     io::println(s[1]);
+    io::println(s[1] as int);
+    io::println(s.len());
+    var unicode = "A世😀";
+    io::println(unicode.len());
+    io::println(unicode[1] as int);
+    var letter: char = unicode[1];
+    io::println(letter);
+    io::println(unicode[2]);
 }"#,
     );
     result.assert_success();
-    assert_eq!(result.stdout.trim(), "e");
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        ["e", "101", "5", "3", "19990", "世", "😀"]
+    );
 }
 
 #[test]

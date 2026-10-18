@@ -593,10 +593,13 @@ Called when using `value as TargetType`.
 Character literals have type `char`. Cast `char` to `int` to get its Unicode
 code point; casting an `int` to `char` keeps the low 32 bits, and string
 conversion replaces invalid Unicode scalar values with U+FFFD.
+String indexing returns a `char`, and `str.len()` counts Unicode scalar values
+rather than UTF-8 bytes.
 
 字符字面量的类型是 `char`。将 `char` 转为 `int` 可取得 Unicode 码点；
 将 `int` 转为 `char` 会保留低 32 位，转成字符串时无效的 Unicode
-标量值会替换为 U+FFFD。
+标量值会替换为 U+FFFD。字符串索引返回 `char`，`str.len()` 统计 Unicode
+标量值的数量，而不是 UTF-8 字节数。
 
 ### 9.3 Iterator Protocol / 迭代器协议
 

@@ -277,7 +277,7 @@ impl TypeResolver {
             (DataType::Unknown, "add") => Some(DataType::None_),
             // String methods
             (DataType::Str, "len") => Some(DataType::Int),
-            (DataType::Str, "get") => Some(DataType::Int),
+            (DataType::Str, "get") => Some(DataType::Char),
             (DataType::Str, "contains") => Some(DataType::Bool),
             (DataType::Str, "trim") => Some(DataType::Str),
             (DataType::Str, "replace") => Some(DataType::Str),
@@ -376,7 +376,7 @@ impl TypeResolver {
                 DataType::Int
             }
             IRExpr::ArrayIndex { array, .. } => match self.infer_type(array) {
-                DataType::Str => DataType::Str,
+                DataType::Str => DataType::Char,
                 DataType::Array(element) => *element,
                 _ => DataType::Int,
             },
@@ -1842,7 +1842,7 @@ impl CraneliftBackend {
     ) -> Result<(), String> {
         let str_ptr = self.intern_string(bcx, s);
         let ch_name = &vars[0];
-        let ch_var = self.declare_variable(bcx, ch_name, types::I64, &DataType::Str);
+        let ch_var = self.declare_variable(bcx, ch_name, types::I32, &DataType::Char);
         let idx_var = self.declare_variable(
             bcx,
             &format!("__idx_{}", ch_name),
@@ -1850,8 +1850,8 @@ impl CraneliftBackend {
             &DataType::Int,
         );
         let zero = bcx.ins().iconst(types::I64, 0);
-        let empty_str = self.intern_string(bcx, "");
-        bcx.def_var(ch_var, empty_str);
+        let empty_char = bcx.ins().iconst(types::I32, 0);
+        bcx.def_var(ch_var, empty_char);
         bcx.def_var(idx_var, zero);
 
         let cond_b = bcx.create_block();
@@ -1875,7 +1875,7 @@ impl CraneliftBackend {
         self.diverged = false;
         let i = bcx.use_var(idx_var);
         let ch_code = self.call_runtime(bcx, "gobol_str_get", &[str_ptr, i]);
-        let ch = self.call_runtime(bcx, "gobol_str_char", &[ch_code]);
+        let ch = bcx.ins().ireduce(types::I32, ch_code);
         bcx.def_var(ch_var, ch);
         self.loop_stack.push((end_b, incr_b));
         self.translate_block(bcx, body)?;
@@ -2079,7 +2079,7 @@ impl CraneliftBackend {
                     let string = self.translate_expr(bcx, array)?;
                     let index = self.translate_expr(bcx, index)?;
                     let codepoint = self.call_runtime(bcx, "gobol_str_get", &[string, index]);
-                    return Ok(self.call_runtime(bcx, "gobol_str_char", &[codepoint]));
+                    return Ok(bcx.ins().ireduce(types::I32, codepoint));
                 }
 
                 // Check if this is a nested array access (e.g., arr[2][2])
@@ -2779,6 +2779,15 @@ impl CraneliftBackend {
             match method {
                 "len" => {
                     return Ok(self.call_runtime(bcx, "gobol_str_len", &[s]));
+                }
+                "get" => {
+                    let index = self
+                        .translate_args(bcx, args)?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| "str.get requires an index argument".to_string())?;
+                    let codepoint = self.call_runtime(bcx, "gobol_str_get", &[s, index]);
+                    return Ok(bcx.ins().ireduce(types::I32, codepoint));
                 }
                 "contains" => {
                     let mut vals = self.translate_args(bcx, args)?;

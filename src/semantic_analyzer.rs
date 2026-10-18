@@ -2464,7 +2464,7 @@ impl AstVisitor for SemanticAnalyzer {
             if loop_vars.len() >= 2 {
                 let val_type = match &iter_type {
                     DataType::Struct(s) if s == "Range" => DataType::Int,
-                    DataType::Str => DataType::Str,
+                    DataType::Str => DataType::Char,
                     DataType::Array(elem) => (**elem).clone(),
                     _ => DataType::Int, // default for arrays
                 };
@@ -4090,7 +4090,7 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         if matches!(array_type, DataType::Str) {
-            self.type_stack.push(DataType::Str);
+            self.type_stack.push(DataType::Char);
             return;
         }
 

@@ -3,7 +3,9 @@
 
 import argparse
 import os
+import queue
 import sys
+import threading
 import time
 import shutil
 import platform
@@ -77,9 +79,9 @@ def choose_menu(title, options, footer=""):
     else:
         import termios
         import tty
-        old_settings = termios.tcgetattr(sys.stdin)
+        old_settings = termios.tcgetattr(sys.stdin) # type: ignore
         try:
-            tty.setcbreak(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno()) # type: ignore
             while True:
                 print_menu(title, options, selected, footer)
                 key = sys.stdin.read(1)
@@ -98,7 +100,7 @@ def choose_menu(title, options, footer=""):
                     elif sequence == "[B":
                         selected = (selected + 1) % len(options)
         finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings) # type: ignore
 
 def print_status(message, status_type="info"):
     if status_type == "info":
@@ -111,6 +113,76 @@ def print_status(message, status_type="info"):
         print(f"{Colors.FAIL}[FAIL]{Colors.ENDC} {message}")
     elif status_type == "error":
         print(f"{Colors.FAIL}[ERR ]{Colors.ENDC} {message}")
+
+def run_build_with_progress(cmd, cwd):
+    """Stream Cargo's build status through a terminal-friendly progress bar."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as error:
+        print_status(f"Could not start Cargo build: {error}", "fail")
+        return 127
+    if process.stdout is None:
+        raise RuntimeError("Cargo build output pipe was not created")
+
+    lines = queue.Queue()
+
+    def read_output():
+        for line in process.stdout: # type: ignore
+            lines.put(line)
+        lines.put(None)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+
+    interactive = sys.stdout.isatty()
+    output = []
+    latest = "Waiting for compiler output..."
+    frame = 0
+    finished = False
+    while not finished:
+        try:
+            line = lines.get(timeout=0.1)
+        except queue.Empty:
+            line = ""
+
+        if line is None:
+            finished = True
+        elif line:
+            output.append(line)
+            latest = line.strip() or latest
+            if not interactive:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+
+        if interactive and not finished:
+            width = 20
+            start = frame % (width + 5) - 5
+            bar = [" "] * width
+            for offset in range(5):
+                position = start + offset
+                if 0 <= position < width:
+                    bar[position] = "="
+            bar[min(max(start + 5, 0), width - 1)] = ">"
+            status = f"Building [{''.join(bar)}] {latest}"
+            sys.stdout.write(f"\r\033[2K{status[:120]}")
+            sys.stdout.flush()
+            frame += 1
+
+    return_code = process.wait()
+    reader.join()
+    if interactive:
+        sys.stdout.write("\r\033[2K")
+        if return_code != 0:
+            sys.stdout.writelines(output)
+        sys.stdout.flush()
+    return return_code
 
 # ==================== Core Functions ====================
 
@@ -167,12 +239,14 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
     print_status(f"Installation directory set to: {install_dir}", "ok")
     
     if not no_build:
-        print_status("Building (cargo build --release)...", "info")
-        cmd = ["cargo", "build", "--release", "--bins"]
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path(__file__).resolve().parent)
-        if result.returncode != 0:
+        print_status("Compiling Gobol toolchain", "info")
+        cmd = ["cargo", "build", "--release", "--bins", "--message-format=human"]
+        return_code = run_build_with_progress(
+            cmd,
+            cwd=Path(__file__).resolve().parent,
+        )
+        if return_code != 0:
             print_status("Build failed!", "fail")
-            print(result.stderr)
             if pause:
                 input("Press Enter to return to main menu...")
             return False
@@ -366,6 +440,8 @@ def task_extension_guide(pause=True):
     print(f"{Colors.OKGREEN}│      vsce package{Colors.ENDC}")
     print(f"{Colors.OKGREEN}│      code --install-extension ./vscode-gobol-*.vsix{Colors.ENDC}")
     print(f"{Colors.OKGREEN}└─{Colors.ENDC}")
+    if pause:
+        input("Press Enter to return to main menu...")
 
 # ==================== CLI and Main TUI Loop ====================
 

@@ -1,0 +1,44 @@
+#[library_features(hidden = true)]
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+impl<T, E> Result<T, E> {
+    func is_ok(self): bool {
+        _tag == 0
+    }
+
+    func is_err(self): bool {
+        _tag == 1
+    }
+
+    func value(self, default: T): T {
+        if self.is_ok() {
+            _0
+        } else {
+            default
+        }
+    }
+
+    func unwrap_or(self, default: T): T {
+        self.value(default)
+    }
+
+    func or_else(self, fallback: func(E): T): T {
+        if self.is_ok() {
+            _0
+        } else {
+            fallback(_1)
+        }
+    }
+
+    func map<U>(self, f: func(T): U): Result<U, E> {
+        if self.is_ok() {
+            Result<U, E>::Ok(f(_0))
+        } else {
+            Result<U, E>::Err(_1)
+        }
+    }
+}

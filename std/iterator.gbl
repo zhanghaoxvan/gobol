@@ -1,6 +1,2 @@
-import option;
-
-trait Iterator<T> {
-    type Value;
-    func next(): Option<Value>;
-}
+// Compatibility module: the iterator trait lives in core.
+import core::iterator;

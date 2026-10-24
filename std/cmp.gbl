@@ -1,10 +1,2 @@
-trait Eq<T> {
-    func eq(self, other: T): bool
-}
-
-trait Cmp<T> {
-    func lt(self, other: T): bool
-    func le(self, other: T): bool
-    func gt(self, other: T): bool
-    func ge(self, other: T): bool
-}
+// Compatibility module: comparison traits now live in core.
+import core::cmp;

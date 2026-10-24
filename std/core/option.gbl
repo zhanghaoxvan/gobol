@@ -1,0 +1,61 @@
+#[library_features(hidden = true)]
+
+import core::result;
+import core::mem;
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+impl<T> Option<T> {
+    func is_some(self): bool {
+        _tag == 0
+    }
+
+    func is_none(self): bool {
+        _tag == 1
+    }
+
+    func value(self, default: T): T {
+        if self.is_none() {
+            default
+        } else {
+            _0
+        }
+    }
+
+    func map<U>(self, f: func(T): U): Option<U> {
+        if self.is_none() {
+            Option::None
+        } else {
+            Option::Some(f(_0))
+        }
+    }
+
+    func flat_map<U>(self, f: func(T): Option<U>): Option<U> {
+        if self.is_none() {
+            Option::None
+        } else {
+            f(_0)
+        }
+    }
+
+    func ok_or<E>(self, err: E): Result<T, E> {
+        if self.is_none() {
+            Result<T, E>::Err(err)
+        } else {
+            Result<T, E>::Ok(_0)
+        }
+    }
+}
+
+impl<T> New<T> for Option<T> {
+    func new(): Option<T> {
+        Option::None
+    }
+
+    func new(value: T): Option<T> {
+        Option::Some(value)
+    }
+}

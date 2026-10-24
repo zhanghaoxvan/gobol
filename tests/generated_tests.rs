@@ -65,6 +65,68 @@ fn test_string_index() {
 }
 
 #[test]
+fn test_string_to_int_cast() {
+    let result = run_inline_test(
+        r#"func main() {
+    io::println("0" as int);
+    io::println("40" as int);
+    io::println("-12345" as int);
+    io::println("+42" as int);
+    io::println("-9223372036854775808" as int);
+    io::println("9223372036854775807" as int);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        [
+            "0",
+            "40",
+            "-12345",
+            "42",
+            "-9223372036854775808",
+            "9223372036854775807"
+        ]
+    );
+}
+
+#[test]
+fn test_read_string_to_int_cast() {
+    let result = run_inline_test_with_stdin(
+        r#"func main() {
+    var input = io::read();
+    io::println(input as int);
+}"#,
+        Some(b"40\n"),
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.lines().last().unwrap(), "40");
+}
+
+#[test]
+fn test_invalid_string_to_int_cast_traps() {
+    let result = run_inline_test(
+        r#"func main() {
+    io::println("12x" as int);
+}"#,
+    );
+    assert!(
+        !result.success,
+        "invalid integer text must not become a value"
+    );
+}
+
+#[test]
+fn test_overflowing_string_to_int_cast_traps() {
+    let result = run_inline_test(
+        r#"func main() {
+    io::println("9223372036854775808" as int);
+}"#,
+    );
+    assert!(!result.success, "overflowing integer text must trap");
+}
+
+#[test]
 fn test_unicode_character_literals_and_conversions() {
     let result = run_inline_test(
         r#"func main() {

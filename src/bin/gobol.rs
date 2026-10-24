@@ -387,7 +387,8 @@ fn main() {
 
     let mut builder = AstBuilder::new(lexer);
     builder.set_error_formatter(error_fmt.clone());
-    builder.set_inject_prelude(true);
+    builder.set_inject_prelude(!link_cli.no_std);
+    builder.set_inject_core_prelude(link_cli.no_std);
     let prog = builder.build();
     if builder.has_error() {
         for msg in builder.get_error_message() {

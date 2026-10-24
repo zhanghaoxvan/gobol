@@ -27,6 +27,8 @@ pub struct AstBuilder {
     /// the prelude injected (it would create recursive / self imports that
     /// defeat relative resolution).
     inject_prelude: bool,
+    /// Use the C-runtime-free core prelude for `--no-std` builds.
+    inject_core_prelude: bool,
 }
 
 impl AstBuilder {
@@ -48,6 +50,7 @@ impl AstBuilder {
             structured_errors: Vec::new(),
             file_attributes: Vec::new(),
             inject_prelude: false,
+            inject_core_prelude: false,
         }
     }
 
@@ -62,10 +65,16 @@ impl AstBuilder {
         self.inject_prelude = enabled;
     }
 
+    pub fn set_inject_core_prelude(&mut self, enabled: bool) {
+        self.inject_core_prelude = enabled;
+    }
+
     pub fn build(&mut self) -> Option<Box<Program>> {
         self.root = None;
         let mut program = self.parse_program();
-        if self.inject_prelude {
+        if self.inject_core_prelude {
+            self.inject_core_prelude_modules(&mut program);
+        } else if self.inject_prelude {
             self.inject_basic_prelude(&mut program);
         }
         self.root = Some(Box::new(program));
@@ -637,6 +646,21 @@ impl AstBuilder {
                     ImportStatement::new(vec!["basic".to_string(), name.to_string()], None);
                 program.statements.insert(0, Box::new(import_stmt));
             }
+        }
+    }
+
+    fn inject_core_prelude_modules(&self, program: &mut Program) {
+        let mut imported = std::collections::HashSet::new();
+        for stmt in program.get_statements() {
+            if let Some(import) = stmt.as_any().downcast_ref::<ImportStatement>() {
+                imported.insert(import.get_module_name());
+            }
+        }
+        if !imported.contains("core") {
+            program.statements.insert(
+                0,
+                Box::new(ImportStatement::new(vec!["core".to_string()], None)),
+            );
         }
     }
 
@@ -3002,4 +3026,46 @@ fn as_number(expr: &Box<dyn Expression>) -> Option<f64> {
     expr.as_any()
         .downcast_ref::<NumberLiteral>()
         .map(|n| n.get_value())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn imported_modules(program: &Program) -> Vec<String> {
+        program
+            .get_statements()
+            .iter()
+            .filter_map(|statement| {
+                statement
+                    .as_any()
+                    .downcast_ref::<ImportStatement>()
+                    .map(ImportStatement::get_module_name)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_std_injects_only_core_prelude() {
+        let mut builder = AstBuilder::new(Lexer::new("func main() {}"));
+        builder.set_inject_prelude(true);
+        builder.set_inject_core_prelude(true);
+
+        let program = builder.build().expect("program should parse");
+        let imports = imported_modules(&program);
+
+        assert_eq!(imports, ["core"]);
+    }
+
+    #[test]
+    fn hosted_build_keeps_basic_prelude() {
+        let mut builder = AstBuilder::new(Lexer::new("func main() {}"));
+        builder.set_inject_prelude(true);
+
+        let program = builder.build().expect("program should parse");
+        let imports = imported_modules(&program);
+
+        assert!(imports.contains(&"basic::io".to_string()));
+        assert!(!imports.contains(&"core".to_string()));
+    }
 }

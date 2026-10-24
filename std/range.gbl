@@ -85,12 +85,12 @@ impl New for RangeIterator {
 impl RangeIterator {
     func next(self): Option<int> {
         if _step > 0 {
-            if _current >= _end { return None; }
+            if _current >= _end { return Option::None; }
         } else {
-            if _current <= _end { return None; }
+            if _current <= _end { return Option::None; }
         }
         var value: int = _current;
         _current += _step;
-        Some(value);
+        Option::Some(value);
     }
 }

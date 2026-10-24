@@ -499,62 +499,57 @@ fn is_capitalized(s: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Extract `{name}` interpolation identifiers from a format-string literal
-/// value (e.g. `"@{value: {x}}"` → `[(9, "x")]`). Respects `{{`/`}}` escapes
-/// so brace pairs used as escaping do not produce dummy interpolation vars.
-/// Byte offsets are relative to the start of `value`.
-fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
-    let mut out = Vec::new();
+/// Return each interpolation's opening brace, expression start/end, and
+/// closing brace byte offsets. Doubled braces are literal escapes.
+fn format_interpolation_ranges(value: &str) -> Vec<(usize, usize, usize, usize)> {
     let bytes = value.as_bytes();
+    let mut ranges = Vec::new();
     let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            i += 2; // escaped {{ — skip
+    while i < bytes.len() {
+        if (bytes[i] == b'{' || bytes[i] == b'}') && bytes.get(i + 1) == Some(&bytes[i]) {
+            i += 2;
             continue;
         }
-        if bytes[i] == b'}' && bytes[i + 1] == b'}' {
-            i += 2; // escaped }} — skip
+        if bytes[i] != b'{' {
+            i += 1;
             continue;
         }
-        if bytes[i] == b'{' {
-            // find matching close brace
-            let start = i + 1;
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != b'}' {
-                j += 1;
-            }
-            if j < bytes.len() {
-                let inner = &value[start..j];
-                let name = inner.trim();
-                // Only simple identifier interpolation (no format spec like `{x:.2}`).
-                if !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':')
-                {
-                    // Take the segment before any `.`/`:` suffix to get the binding.
-                    let ident = name
-                        .split(|c| c == '.' || c == ':')
-                        .next()
-                        .unwrap_or(name)
-                        .trim();
-                    if !ident.is_empty()
-                        && ident
-                            .chars()
-                            .next()
-                            .map(|c| c.is_alphabetic() || c == '_')
-                            .unwrap_or(false)
-                    {
-                        out.push((start, ident.to_string()));
-                    }
+
+        let open = i;
+        let start = i + 1;
+        let mut depth = 1usize;
+        let mut j = start;
+        let mut quote = None;
+        let mut escaped = false;
+        while j < bytes.len() {
+            let byte = bytes[j];
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    quote = None;
                 }
-                i = j + 1;
-                continue;
+            } else if byte == b'"' || byte == b'\'' {
+                quote = Some(byte);
+            } else if byte == b'{' {
+                depth += 1;
+            } else if byte == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    ranges.push((open, start, j, j));
+                    i = j + 1;
+                    break;
+                }
             }
+            j += 1;
         }
-        i += 1;
+        if depth != 0 {
+            i = start;
+        }
     }
-    out
+    ranges
 }
 
 /// Split the *literal* text of a string/format-string value into non-escape
@@ -571,6 +566,11 @@ fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
 fn string_literal_segments(value: &str, skip_braces: bool) -> Vec<(usize, usize)> {
     let bytes = value.as_bytes();
     let n = bytes.len();
+    let interpolation_ranges = if skip_braces {
+        format_interpolation_ranges(value)
+    } else {
+        Vec::new()
+    };
     let mut segs: Vec<(usize, usize)> = Vec::new();
     let mut seg_start = 0usize;
     let mut i = 0usize;
@@ -613,14 +613,15 @@ fn string_literal_segments(value: &str, skip_braces: bool) -> Vec<(usize, usize)
             i += len;
         } else {
             // `{` interpolation block (or escaped `{{`).
-            i += if i + 1 < n && bytes[i + 1] == b'{' {
-                2 // `{{` literal brace pair — skip both
+            i = if i + 1 < n && bytes[i + 1] == b'{' {
+                i + 2 // `{{` literal brace pair — skip both
+            } else if let Some((_, _, _, close)) = interpolation_ranges
+                .iter()
+                .find(|(open, _, _, _)| *open == i)
+            {
+                close + 1
             } else {
-                let mut j = i + 1;
-                while j < n && bytes[j] != b'}' {
-                    j += 1;
-                }
-                if j < n { j - i + 1 } else { n - i }
+                n
             };
         }
         seg_start = i;
@@ -669,19 +670,33 @@ fn classify_ident(
     symbols: &[SymbolEntry],
     ns_set: &std::collections::HashSet<(i32, i32)>,
 ) -> (u32, u32) {
+    classify_ident_with_scope(tokens, i, symbols, ns_set, tokens, i, true)
+}
+
+fn classify_ident_with_scope(
+    tokens: &[Token],
+    i: usize,
+    symbols: &[SymbolEntry],
+    ns_set: &std::collections::HashSet<(i32, i32)>,
+    scope_tokens: &[Token],
+    scope_index: usize,
+    allow_declaration: bool,
+) -> (u32, u32) {
     let t = &tokens[i];
     if t.value == "lambda" {
         return (type_index(SemanticTokenType::KEYWORD), 0);
     }
     // 1. Position is a declaration (from the symbol index) — use its kind.
-    if let Some(sym) = find_symbol_at(symbols, t.line, t.col) {
-        return symbol_semantic(&sym.kind);
+    if allow_declaration {
+        if let Some(sym) = find_symbol_at(symbols, t.line, t.col) {
+            return symbol_semantic(&sym.kind);
+        }
     }
     // Prefer a visible local binding over a same-named global function/method.
     if let Some(sym) = symbols.iter().find(|sym| {
         sym.name == t.value
             && matches!(sym.kind, SymKind::Variable | SymKind::Parameter)
-            && local_symbol_visible_at(tokens, sym, i)
+            && local_symbol_visible_at(scope_tokens, sym, scope_index)
     }) {
         return symbol_semantic(&sym.kind);
     }
@@ -779,18 +794,16 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 continue; // for-loop advances `i`
             }
-            // Format string `@"...{var}..."`: colour literal (non-escape) text
-            // as a string, and emit a `variable`/`type` token for each
-            // interpolation identifier so `{var}` is typed as its binding.
+            // Format string `@"...{expr}..."`: color literal text as a string,
+            // and classify the interpolation contents like ordinary code.
             TokenType::FormatString => {
                 let line = (t.line as u32).saturating_sub(1);
                 let start = t.col.max(0) as u32;
                 // String content begins after `@` and `"`.
                 let content_base = start + 2;
 
-                // Collect all sub-tokens for this literal (string segments and
-                // interpolation ids) and emit them in ascending column order so
-                // the delta encoding never has to go backwards.
+                // Collect all sub-tokens for this literal and emit in source
+                // order so delta encoding never has to go backwards.
                 let mut parts: Vec<(u32, u32, u32, u32)> = Vec::new(); // (col,len,type,mods)
                 for (off, len) in string_literal_segments(&t.value, true) {
                     parts.push((
@@ -800,32 +813,66 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                         0,
                     ));
                 }
-                for (off, ident) in format_interpolation_spans(&t.value) {
-                    let var_col = content_base + off as u32;
-                    let local = symbols.iter().find(|sym| {
-                        sym.name == ident
-                            && matches!(sym.kind, SymKind::Variable | SymKind::Parameter)
-                            && local_symbol_visible_at(tokens, sym, i)
-                    });
-                    let (ity, imods) = if let Some(sym) = local {
-                        symbol_semantic(&sym.kind)
-                    } else if is_capitalized(&ident) {
-                        (type_index(SemanticTokenType::TYPE), 0)
-                    } else if symbols.iter().any(|sym| {
-                        sym.name == ident
-                            && matches!(
-                                sym.kind,
-                                SymKind::Function
-                                    | SymKind::Method
-                                    | SymKind::StaticFunc
-                                    | SymKind::ExternFn
-                            )
-                    }) {
-                        (type_index(SemanticTokenType::FUNCTION), 0)
-                    } else {
-                        (type_index(SemanticTokenType::VARIABLE), 0)
-                    };
-                    parts.push((var_col, ident.len() as u32, ity, imods));
+                let no_namespaces = std::collections::HashSet::new();
+                for (open, expr_start, expr_end, close) in format_interpolation_ranges(&t.value) {
+                    let operator = type_index(SemanticTokenType::OPERATOR);
+                    parts.push((content_base + open as u32, 1, operator, 0));
+                    parts.push((content_base + close as u32, 1, operator, 0));
+
+                    let expression = &t.value[expr_start..expr_end];
+                    let mut lexer = Lexer::new(expression);
+                    let mut expression_tokens = Vec::new();
+                    loop {
+                        let token = lexer.get_next_token();
+                        if token.r#type == TokenType::EndOfFile {
+                            break;
+                        }
+                        expression_tokens.push(token);
+                    }
+                    for (expr_i, expr_token) in expression_tokens.iter().enumerate() {
+                        if matches!(
+                            expr_token.r#type,
+                            TokenType::EndOfLine | TokenType::Character | TokenType::Unknown
+                        ) {
+                            continue;
+                        }
+                        let (token_type, modifiers) = match expr_token.r#type {
+                            TokenType::Keyword => match expr_token.value.as_str() {
+                                "int" | "float" | "str" | "bool" | "void" | "char" | "unit" => {
+                                    (type_index(SemanticTokenType::TYPE), 0)
+                                }
+                                "func"
+                                    if expression_tokens
+                                        .get(expr_i + 1)
+                                        .map(|next| next.value == "(")
+                                        .unwrap_or(false) =>
+                                {
+                                    (type_index(SemanticTokenType::TYPE), 0)
+                                }
+                                _ => (type_index(SemanticTokenType::KEYWORD), 0),
+                            },
+                            TokenType::Number => (type_index(SemanticTokenType::NUMBER), 0),
+                            TokenType::String => (type_index(SemanticTokenType::STRING), 0),
+                            TokenType::Operator if expr_token.value == ":" => continue,
+                            TokenType::Operator => (operator, 0),
+                            TokenType::Identifier => classify_ident_with_scope(
+                                &expression_tokens,
+                                expr_i,
+                                symbols,
+                                &no_namespaces,
+                                tokens,
+                                i,
+                                false,
+                            ),
+                            _ => continue,
+                        };
+                        parts.push((
+                            content_base + expr_start as u32 + expr_token.col.max(0) as u32,
+                            expr_token.value.len() as u32,
+                            token_type,
+                            modifiers,
+                        ));
+                    }
                 }
                 parts.sort_by_key(|p| p.0);
                 for (col, len, ty, md) in parts {
@@ -2212,6 +2259,77 @@ fn brace_folding_ranges(tokens: &[Token]) -> Vec<FoldingRange> {
     ranges
 }
 
+fn imported_module_paths(tokens: &[Token]) -> Vec<(String, Option<String>)> {
+    let mut imports = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].r#type != TokenType::Keyword {
+            i += 1;
+            continue;
+        }
+
+        let is_from = tokens[i].value == "from";
+        if !is_from && tokens[i].value != "import" {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let mut parts = Vec::new();
+        while let Some(token) = tokens.get(j) {
+            if token.r#type != TokenType::Identifier && token.r#type != TokenType::Keyword {
+                break;
+            }
+            parts.push(token.value.clone());
+            j += 1;
+            if tokens
+                .get(j)
+                .map(|separator| separator.value == "::" || separator.value == ".")
+                .unwrap_or(false)
+            {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if parts.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        if is_from {
+            if tokens.get(j).map(|token| token.value.as_str()) == Some("import") {
+                imports.push((parts.join("::"), None));
+            }
+            i = j.saturating_add(1);
+        } else {
+            let alias = if tokens.get(j).map(|token| token.value.as_str()) == Some("as") {
+                tokens.get(j + 1).map(|token| token.value.clone())
+            } else {
+                None
+            };
+            imports.push((parts.join("::"), alias));
+            i = j;
+        }
+    }
+    imports
+}
+
+fn resolve_import_qualifier(tokens: &[Token], qualifier: &str) -> String {
+    imported_module_paths(tokens)
+        .into_iter()
+        .find_map(|(module, alias)| {
+            if alias.as_deref() == Some(qualifier)
+                || module == qualifier
+                || module.rsplit("::").next() == Some(qualifier)
+            {
+                Some(module)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| qualifier.to_string())
+}
+
 /// Best-effort inference of a simple expression's type, starting at
 /// `start_idx` of `tokens`. Returns a string type or `None`.
 ///
@@ -2276,6 +2394,7 @@ fn infer_expr_type(
             let module = t.value.clone();
             let member = tokens.get(idx + 2).map(|n| n.value.clone());
             let is_call = tokens.get(idx + 3).map(|n| n.value.as_str()) == Some("(");
+            let imported_module = resolve_import_qualifier(tokens, &module);
             if let Some(ref m) = member {
                 let rt = ret_type(m);
                 if rt.is_some() {
@@ -2283,18 +2402,16 @@ fn infer_expr_type(
                 }
                 if is_call {
                     if let (Some(lsp), Some(uri)) = (lsp, uri) {
+                        if let Some(sig) = lsp.imported_signature(uri, &imported_module, m) {
+                            return sig.return_type.or(Some("unknown".to_string()));
+                        }
                         if let Some(sig) = lsp.imported_method_signature(uri, &module, m) {
                             return sig.return_type.or(Some("unknown".to_string()));
                         }
                     }
-                }
-                if is_call {
-                    if let (Some(lsp), Some(uri)) = (lsp, uri) {
-                        if let Some(sig) = lsp.imported_signature(uri, &module, m) {
-                            return sig.return_type.or(Some("unknown".to_string()));
-                        }
+                    if lsp.is_some() {
+                        return Some("unknown".to_string());
                     }
-                    return Some("unknown".to_string());
                 }
             }
             return None;
@@ -2709,6 +2826,18 @@ fn resolve_module_file(
         }
     }
     None
+}
+
+fn imported_signature_from_path(
+    file_path: &str,
+    module: &str,
+    workspace_roots: &[PathBuf],
+    name: &str,
+) -> Option<FuncSignature> {
+    let module_path = resolve_module_file(file_path, module, workspace_roots)?;
+    let source = std::fs::read_to_string(module_path).ok()?;
+    let tokens = lex_source(&source);
+    collect_signatures(&tokens, &source).remove(name)
 }
 
 // ==================== Analysis ====================
@@ -3944,18 +4073,7 @@ impl GobolLsp {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let mod_path = resolve_module_file(&file_path, module, &roots)?;
-        let source = std::fs::read_to_string(mod_path).ok()?;
-        let mut lexer = Lexer::new(&source);
-        let mut toks = Vec::new();
-        loop {
-            let t = lexer.get_next_token();
-            if t.r#type == TokenType::EndOfFile {
-                break;
-            }
-            toks.push(t);
-        }
-        collect_signatures(&toks, &source).remove(name)
+        imported_signature_from_path(&file_path, module, &roots, name)
     }
 
     fn imported_method_signature(
@@ -4005,11 +4123,9 @@ impl GobolLsp {
             .ok()
             .and_then(|documents| documents.get(uri).cloned())
             .map(|state| {
-                state
-                    .symbols
-                    .iter()
-                    .filter(|symbol| symbol.kind == SymKind::Import)
-                    .map(|symbol| symbol.name.clone())
+                imported_module_paths(&state.tokens)
+                    .into_iter()
+                    .map(|(module, _)| module)
                     .collect()
             })
             .unwrap_or_default()
@@ -4193,11 +4309,9 @@ impl GobolLsp {
         // Imported modules: use imported_module_names but we need sync — clone
         // isn't async here; reuse imported_module_names_async via block_on not
         // available. Instead scan symbols for Import names directly.
-        for sym in &state.symbols {
-            if sym.kind == SymKind::Import {
-                if let Some(sig) = self.imported_signature(uri, &sym.name, name) {
-                    return Some(sig);
-                }
+        for (module, _) in imported_module_paths(&state.tokens) {
+            if let Some(sig) = self.imported_signature(uri, &module, name) {
+                return Some(sig);
             }
         }
         None
@@ -4551,11 +4665,9 @@ impl GobolLsp {
             state_guard
                 .get(uri)
                 .map(|state| {
-                    state
-                        .symbols
-                        .iter()
-                        .filter(|s| s.kind == SymKind::Import)
-                        .map(|s| s.name.clone())
+                    imported_module_paths(&state.tokens)
+                        .into_iter()
+                        .map(|(module, _)| module)
                         .collect()
                 })
                 .unwrap_or_default()
@@ -5144,6 +5256,28 @@ var tests: [(str, func(): bool)] = [(\"timeout\", test_connect_timeout)];\n";
 mod unit_new {
     use super::*;
 
+    fn decode(data: &[SemanticToken]) -> Vec<(u32, u32, String)> {
+        let mut line = 0;
+        let mut col = 0;
+        data.iter()
+            .map(|token| {
+                line += token.delta_line;
+                if token.delta_line == 0 {
+                    col += token.delta_start;
+                } else {
+                    col = token.delta_start;
+                }
+                (
+                    line,
+                    col,
+                    SEMANTIC_TYPES[token.token_type as usize]
+                        .as_str()
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
+
     fn lex(s: &str) -> Vec<Token> {
         let mut l = Lexer::new(s);
         let mut v = Vec::new();
@@ -5159,16 +5293,18 @@ mod unit_new {
 
     #[test]
     fn format_interpolation_parses_bindings() {
-        let v = format_interpolation_spans("value: {x}");
-        assert_eq!(v, vec![(8, "x".to_string())]);
-        // escaped braces are not bindings
-        let v2 = format_interpolation_spans("{{literal}} and {y}");
-        assert_eq!(v2, vec![(17, "y".to_string())]);
-        // format spec suffix still resolves to the binding name
-        let v3 = format_interpolation_spans("{n:04} and {p.x}");
-        assert_eq!(v3.len(), 2);
-        assert_eq!(v3[0], (1, "n".to_string()));
-        assert_eq!(v3[1], (12, "p".to_string()));
+        assert_eq!(
+            format_interpolation_ranges("value: {x}"),
+            vec![(7, 8, 9, 9)]
+        );
+        assert_eq!(
+            format_interpolation_ranges("{{literal}} and {y}"),
+            vec![(16, 17, 18, 18)]
+        );
+        assert_eq!(
+            format_interpolation_ranges("{n:04} and {p.x}"),
+            vec![(0, 1, 5, 5), (11, 12, 15, 15)]
+        );
     }
 
     #[test]
@@ -5279,6 +5415,35 @@ mod unit_new {
             decoded.contains(&(1, zzz_col, "variable".to_string())),
             "undeclared interpolation should remain a variable: {decoded:?}"
         );
+    }
+
+    #[test]
+    fn semantic_format_string_highlights_braces_and_expression_tokens() {
+        let source = "func render(name: str): str {\n\
+    return @\"{name + 42}\"\n\
+}\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let decoded = decode(&build_semantic_tokens(&tokens, &symbols));
+        let line = source.lines().nth(1).unwrap();
+        let open_col = line.find('{').unwrap() as u32;
+        let name_col = line.find("name").unwrap() as u32;
+        let plus_col = line.find('+').unwrap() as u32;
+        let number_col = line.find("42").unwrap() as u32;
+        let close_col = line.find('}').unwrap() as u32;
+
+        for (col, expected_type) in [
+            (open_col, "operator"),
+            (name_col, "parameter"),
+            (plus_col, "operator"),
+            (number_col, "number"),
+            (close_col, "operator"),
+        ] {
+            assert!(
+                decoded.contains(&(1, col, expected_type.to_string())),
+                "expected `{expected_type}` token at column {col}: {decoded:?}"
+            );
+        }
     }
 
     #[test]
@@ -5651,6 +5816,29 @@ mod e2e_doc {
             infer_expr_type(&unk, 0, &doc, None, None).as_deref(),
             Some("unknown")
         );
+    }
+
+    #[test]
+    fn aliased_nested_import_resolves_function_return_type() {
+        let imports = lexall("import std::math as m;\n");
+        assert_eq!(
+            imported_module_paths(&imports),
+            vec![("std::math".to_string(), Some("m".to_string()))]
+        );
+        assert_eq!(
+            resolve_import_qualifier(&imports, "m"),
+            "std::math".to_string()
+        );
+
+        let main_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("modules")
+            .join("main.gbl");
+        let signature =
+            imported_signature_from_path(&main_file.to_string_lossy(), "std::math", &[], "add")
+                .expect("std::math::add signature");
+        assert_eq!(signature.return_type.as_deref(), Some("int"));
     }
 
     #[test]

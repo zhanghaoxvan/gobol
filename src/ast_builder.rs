@@ -667,24 +667,25 @@ impl AstBuilder {
     fn parse_from_import(&mut self) -> Option<Box<dyn Statement>> {
         self.advance(); // consume 'from'
 
-        // Module name (single segment; identifiers or keywords like `int`)
+        // Module path (identifiers or keywords like `int`), matching the
+        // nested paths accepted by `import`.
         if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
             self.log_error("Expected module name after 'from'");
             return None;
         }
-        let module = self.current_token().value.clone();
+        let mut module_parts = vec![self.current_token().value.clone()];
         self.advance();
 
-        // Reject `from io::sub import ...` — only a single module name is allowed.
-        if self.match_value("::") || self.match_value(".") {
-            self.log_error("'from' only accepts a single module name");
-            while self.match_value("::") || self.match_value(".") {
-                self.advance();
-                if self.match_type(&TokenType::Identifier) || self.match_type(&TokenType::Keyword) {
-                    self.advance();
-                }
+        while self.match_value("::") || self.match_value(".") {
+            self.advance();
+            if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword) {
+                self.log_error("Expected identifier after separator in 'from' module path");
+                return None;
             }
+            module_parts.push(self.current_token().value.clone());
+            self.advance();
         }
+        let module = module_parts.join("::");
 
         // Expect `import` keyword
         if !self.match_type(&TokenType::Keyword) || self.current_token().value != "import" {
@@ -3067,5 +3068,21 @@ mod tests {
 
         assert!(imports.contains(&"basic::io".to_string()));
         assert!(!imports.contains(&"core".to_string()));
+    }
+
+    #[test]
+    fn from_import_accepts_nested_module_paths() {
+        let mut builder = AstBuilder::new(Lexer::new(
+            "from package::math import sqrt\nfunc main() {}\n",
+        ));
+        let program = builder.build().expect("program should parse");
+        let from_import = program
+            .get_statements()
+            .iter()
+            .find_map(|statement| statement.as_any().downcast_ref::<FromImportStatement>())
+            .expect("from-import statement");
+
+        assert_eq!(from_import.get_module(), "package::math");
+        assert_eq!(from_import.get_members(), &[("sqrt".to_string(), None)]);
     }
 }

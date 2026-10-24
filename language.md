@@ -28,6 +28,7 @@ Every `.gbl` file is a module. **The module name is derived from the file name**
 ```gobol
 import io                    // Import module / 导入模块
 import math as m             // Import with alias / 带别名导入
+from package::math import sqrt // Import a member from a nested module / 从嵌套模块导入成员
 ```
 
 ### 2.3 Prelude / 预置导入

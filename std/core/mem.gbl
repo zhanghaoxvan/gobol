@@ -1,0 +1,10 @@
+#[library_features(hidden = true)]
+
+trait New<T> {
+    #[dynamic]
+    func new(): T;
+}
+
+trait Drop {
+    func drop(self);
+}

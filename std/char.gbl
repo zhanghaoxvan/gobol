@@ -1,3 +1,2 @@
-// Unicode scalar value type. Character literals such as 'A' have this type.
-#[builtin("char32")]
-struct char {}
+// Compatibility module: the Unicode scalar type lives in core.
+import core::char;

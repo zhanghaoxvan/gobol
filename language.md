@@ -815,6 +815,37 @@ if next.is_some() {
 }
 ```
 
+### 11.10 Core Library and `no_std` / Core 库与 `no_std`
+
+Gobol's `core` library contains allocation-free language fundamentals,
+including `Option<T>`, `Result<T, E>`, primitive types, comparison and
+arithmetic traits, and the `Iterator` trait. It does not declare hosted I/O or
+depend on the C runtime.
+
+`--no-std` automatically selects the `core` prelude instead of the hosted
+`basic` prelude. Bare-metal targets ending in `-none` select it automatically.
+The core modules are also available explicitly with imports such as
+`import core::option;`. Existing imports such as `import option;` remain
+available in hosted builds and forward to the core definitions, adding
+hosted-only convenience methods such as `take()`.
+
+`core` does not provide I/O, a heap allocator, or a process entry point.
+Bare-metal programs must provide their own entry point and linker setup, and
+must provide any runtime or allocation hooks required by the operations they
+use.
+
+Gobol 的 `core` 库提供无需分配的语言基础，包括 `Option<T>`、`Result<T, E>`、
+基本类型、比较与算术 trait，以及 `Iterator` trait。它不声明宿主 I/O，也不依赖
+C 运行时。
+
+`--no-std` 会自动使用 `core` prelude，而不是宿主环境的 `basic` prelude。以
+`-none` 结尾的裸机目标也会自动选择它。也可以显式导入 core 模块，例如
+`import core::option;`。宿主构建中原有的 `import option;` 等导入仍然可用，
+并转发到 core 定义，同时提供 `take()` 等仅供宿主环境使用的便利方法。
+
+`core` 不提供 I/O、堆分配器或进程入口。裸机程序需要自行提供入口和链接配置，
+并为所用操作提供所需的运行时或分配钩子。
+
 ---
 
 ## 12. Built-in Functions / 内置函数

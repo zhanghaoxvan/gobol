@@ -287,6 +287,10 @@ impl DocState {
         let sym_line = sym.line;
         let sym_col = sym.col;
 
+        if target_line == sym_line && target_col >= sym_col && target_col < sym_col + sym.len {
+            return true;
+        }
+
         // 1. Parameters are visible anywhere after the function signature's
         //    opening brace; i.e. anywhere inside their function body. We treat
         //    them as visible if the cursor is after the parameter declaration.
@@ -368,10 +372,18 @@ impl DocState {
     }
 
     fn find_definition_at(&self, name: &str, line: u32, character: u32) -> Option<&SymbolEntry> {
-        self.symbols.iter().filter(|s| s.name == name).find(|s| {
-            !matches!(s.kind, SymKind::Variable | SymKind::Parameter)
-                || self.local_visible_at(s, line, character)
-        })
+        self.symbols
+            .iter()
+            .find(|s| {
+                s.name == name
+                    && matches!(s.kind, SymKind::Variable | SymKind::Parameter)
+                    && self.local_visible_at(s, line, character)
+            })
+            .or_else(|| {
+                self.symbols.iter().find(|s| {
+                    s.name == name && !matches!(s.kind, SymKind::Variable | SymKind::Parameter)
+                })
+            })
     }
 
     /// Find the brace depth where the cursor currently sits, and the local
@@ -665,6 +677,14 @@ fn classify_ident(
     if let Some(sym) = find_symbol_at(symbols, t.line, t.col) {
         return symbol_semantic(&sym.kind);
     }
+    // Prefer a visible local binding over a same-named global function/method.
+    if let Some(sym) = symbols.iter().find(|sym| {
+        sym.name == t.value
+            && matches!(sym.kind, SymKind::Variable | SymKind::Parameter)
+            && local_symbol_visible_at(tokens, sym, i)
+    }) {
+        return symbol_semantic(&sym.kind);
+    }
     // 2. Module name in an import statement.
     if ns_set.contains(&(t.line, t.col)) {
         return (type_index(SemanticTokenType::NAMESPACE), 0);
@@ -782,25 +802,28 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 for (off, ident) in format_interpolation_spans(&t.value) {
                     let var_col = content_base + off as u32;
-                    let (ity, imods) = if ident
-                        .chars()
-                        .next()
-                        .map(|c| c.is_ascii_uppercase())
-                        .unwrap_or(false)
-                    {
+                    let local = symbols.iter().find(|sym| {
+                        sym.name == ident
+                            && matches!(sym.kind, SymKind::Variable | SymKind::Parameter)
+                            && local_symbol_visible_at(tokens, sym, i)
+                    });
+                    let (ity, imods) = if let Some(sym) = local {
+                        symbol_semantic(&sym.kind)
+                    } else if is_capitalized(&ident) {
                         (type_index(SemanticTokenType::TYPE), 0)
+                    } else if symbols.iter().any(|sym| {
+                        sym.name == ident
+                            && matches!(
+                                sym.kind,
+                                SymKind::Function
+                                    | SymKind::Method
+                                    | SymKind::StaticFunc
+                                    | SymKind::ExternFn
+                            )
+                    }) {
+                        (type_index(SemanticTokenType::FUNCTION), 0)
                     } else {
-                        // Prefer declared variable type when known via symbol table.
-                        let ty = symbols
-                            .iter()
-                            .find(|s| s.name == ident)
-                            .map(|s| s.type_info.is_some())
-                            .unwrap_or(false);
-                        if ty {
-                            (type_index(SemanticTokenType::TYPE), 0)
-                        } else {
-                            (type_index(SemanticTokenType::VARIABLE), 0)
-                        }
+                        (type_index(SemanticTokenType::VARIABLE), 0)
                     };
                     parts.push((var_col, ident.len() as u32, ity, imods));
                 }
@@ -819,6 +842,7 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 continue; // for-loop advances `i`
             }
+            TokenType::Operator if t.value == ":" => continue,
             TokenType::Operator => (type_index(SemanticTokenType::OPERATOR), 0),
             TokenType::Character => continue,
             TokenType::Identifier => classify_ident(tokens, i, symbols, &ns_set),
@@ -849,6 +873,106 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
     }
 
     out
+}
+
+fn local_symbol_visible_at(tokens: &[Token], symbol: &SymbolEntry, token_index: usize) -> bool {
+    let Some(symbol_index) = tokens
+        .iter()
+        .position(|token| token.line == symbol.line && token.col == symbol.col)
+    else {
+        return false;
+    };
+    if symbol_index >= token_index {
+        return false;
+    }
+
+    let local_scope = if symbol.kind == SymKind::Parameter {
+        let function_index = (0..symbol_index).rev().find(|&index| {
+            tokens[index].r#type == TokenType::Keyword
+                && tokens[index].value == "func"
+                && function_parameter_contains(tokens, index, symbol_index)
+        });
+        let Some(function_index) = function_index else {
+            return false;
+        };
+        let Some(body_index) = function_body_start(tokens, function_index) else {
+            return false;
+        };
+        brace_scope_path(tokens, body_index)
+    } else {
+        brace_scope_path(tokens, symbol_index)
+    };
+    let cursor_scope = brace_scope_path(tokens, token_index);
+
+    local_scope.len() <= cursor_scope.len()
+        && local_scope
+            .iter()
+            .zip(cursor_scope.iter())
+            .all(|(local, cursor)| local == cursor)
+}
+
+fn function_parameter_contains(
+    tokens: &[Token],
+    function_index: usize,
+    parameter_index: usize,
+) -> bool {
+    let Some(open_paren) =
+        (function_index + 1..tokens.len()).find(|&index| tokens[index].value == "(")
+    else {
+        return false;
+    };
+    let mut depth = 0i32;
+    for index in open_paren..tokens.len() {
+        match tokens[index].value.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return open_paren < parameter_index && parameter_index < index;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn function_body_start(tokens: &[Token], function_index: usize) -> Option<usize> {
+    let open_paren =
+        (function_index + 1..tokens.len()).find(|&index| tokens[index].value == "(")?;
+    let mut depth = 0i32;
+    let mut close_paren = None;
+    for index in open_paren..tokens.len() {
+        match tokens[index].value.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    close_paren = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close_paren = close_paren?;
+    let body_or_end = (close_paren + 1..tokens.len())
+        .find(|&index| matches!(tokens[index].value.as_str(), "{" | ";"))?;
+    (tokens[body_or_end].value == "{").then_some(body_or_end)
+}
+
+fn brace_scope_path(tokens: &[Token], through_index: usize) -> Vec<usize> {
+    let mut path = Vec::new();
+    for (index, token) in tokens.iter().enumerate().take(through_index + 1) {
+        match token.value.as_str() {
+            "{" => path.push(index),
+            "}" => {
+                path.pop();
+            }
+            _ => {}
+        }
+    }
+    path
 }
 
 // ==================== Symbol Index Builder ====================
@@ -1111,7 +1235,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                         false
                     };
                     if let Some(name_tok) = tokens.get(j + 1) {
-                        if name_tok.r#type == TokenType::Identifier {
+                        if name_tok.r#type == TokenType::Identifier || name_tok.value == "new" {
                             let type_info = find_return_type(tokens, j);
                             let kind = if is_static {
                                 SymKind::StaticFunc
@@ -1335,7 +1459,9 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 if let Some(nt) = tokens.get(k + 1) {
                                     if nt.value == "func" {
                                         if let Some(name_tok) = tokens.get(k + 2) {
-                                            if name_tok.r#type == TokenType::Identifier {
+                                            if name_tok.r#type == TokenType::Identifier
+                                                || name_tok.value == "new"
+                                            {
                                                 let type_info = find_return_type(tokens, k + 1);
                                                 symbols.push(SymbolEntry {
                                                     name: name_tok.value.clone(),
@@ -1357,7 +1483,9 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                             // normal func method
                             if t.r#type == TokenType::Keyword && t.value == "func" {
                                 if let Some(name_tok) = tokens.get(k + 1) {
-                                    if name_tok.r#type == TokenType::Identifier {
+                                    if name_tok.r#type == TokenType::Identifier
+                                        || name_tok.value == "new"
+                                    {
                                         let type_info = find_return_type(tokens, k);
                                         symbols.push(SymbolEntry {
                                             name: name_tok.value.clone(),
@@ -4882,6 +5010,91 @@ fib(10) == 55
     }
 
     #[test]
+    fn semantic_tokens_keep_type_colon_as_punctuation_and_highlight_type_keyword() {
+        let source = "var item: Alias;\ntype Alias;\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let decoded = decode(&build_semantic_tokens(&tokens, &symbols));
+
+        assert!(
+            !decoded.contains(&(0, 8, "operator".to_string())),
+            "type annotation colon should be left to TextMate punctuation scope: {decoded:?}"
+        );
+        assert!(
+            decoded.contains(&(1, 0, "keyword".to_string())),
+            "`type` should be semantically highlighted as a keyword: {decoded:?}"
+        );
+        assert!(
+            decoded.contains(&(1, 5, "type".to_string())),
+            "type alias name should be highlighted as a type: {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn local_parameter_reference_wins_over_same_named_function() {
+        let source = "func value(): int { 1 }\n\
+impl<T> New<T> for Option<T> {\n\
+    func new(value: T): Option<T> {\n\
+        Option::Some(value)\n\
+    }\n\
+}\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let usage = tokens
+            .iter()
+            .find(|token| token.line == 4 && token.value == "value")
+            .expect("parameter use in Some(value)");
+        let decoded = decode(&build_semantic_tokens(&tokens, &symbols));
+
+        assert!(
+            decoded.contains(&(3, usage.col as u32, "parameter".to_string())),
+            "local `value` should be a parameter, not a same-named function: {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn hover_prefers_parameter_declaration_over_same_named_method() {
+        let source = "impl<T> Option<T> {\n\
+    func value(self): T { _0 }\n\
+    func new(value: T): Option<T> {\n\
+        Option::Some(value)\n\
+    }\n\
+}\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let parameter = symbols
+            .iter()
+            .find(|sym| sym.name == "value" && sym.kind == SymKind::Parameter)
+            .expect("new's value parameter");
+        let parameter_line = (parameter.line - 1) as u32;
+        let parameter_col = parameter.col as u32;
+        let reference = tokens
+            .iter()
+            .find(|token| token.line == 4 && token.value == "value")
+            .expect("value parameter reference");
+        let reference_line = (reference.line - 1) as u32;
+        let reference_col = reference.col as u32;
+        let state = DocState {
+            source: source.into(),
+            tokens,
+            symbols,
+            errors: vec![],
+            signatures: Default::default(),
+            func_types: Default::default(),
+        };
+
+        let declaration = state
+            .find_definition_at("value", parameter_line, parameter_col)
+            .expect("hover on parameter declaration");
+        assert_eq!(declaration.kind, SymKind::Parameter);
+
+        let reference = state
+            .find_definition_at("value", reference_line, reference_col)
+            .expect("hover on parameter reference");
+        assert_eq!(reference.kind, SymKind::Parameter);
+    }
+
+    #[test]
     fn test_semantic_tokens_type_qualifier_and_variable() {
         let source = "var v = io::MAX;\nimport io;\n";
         let tokens = lex(source);
@@ -5027,44 +5240,44 @@ mod unit_new {
 
     #[test]
     fn semantic_format_string_marks_interpolation_variable() {
-        // `@"hello {name}"` with a local var `name` → interpolation is TYPE
-        // (declared variable) vs a plain undeclared `zzz` → VARIABLE.
+        // Both declared and undeclared lowercase interpolation names are
+        // variables; a declared variable's type does not change its token kind.
         let source = "var name: str = \"\";\nvar s: str = @\"hi {name} {zzz}\";\n";
         let tokens = lex(source);
         let symbols = build_symbol_index(&tokens, source);
         let data = build_semantic_tokens(&tokens, &symbols);
 
-        // Decode to (line, col, typename).
-        let mut line = 0;
-        let mut col = 0;
-        let mut out = Vec::new();
-        for st in data {
-            line += st.delta_line;
-            if st.delta_line == 0 {
-                col += st.delta_start;
-            } else {
-                col = st.delta_start;
-            }
-            out.push((
-                line,
-                col,
-                SEMANTIC_TYPES[st.token_type as usize].as_str().to_string(),
-            ));
-        }
-        // line2: `var s: str = @"hi {name} {zzz}";`
-        // name at content base col=?? content_base = @ col + 2. Find `name` token (TYPE).
-        // Both name(declared) and zzz(undeclared) should appear; assert presence + types.
-        let declared = out.iter().any(|(l, _c, t)| *l == 1 && t == "type");
+        let mut line_number = 0;
+        let mut column = 0;
+        let decoded: Vec<_> = data
+            .iter()
+            .map(|token| {
+                line_number += token.delta_line;
+                if token.delta_line == 0 {
+                    column += token.delta_start;
+                } else {
+                    column = token.delta_start;
+                }
+                (
+                    line_number,
+                    column,
+                    SEMANTIC_TYPES[token.token_type as usize]
+                        .as_str()
+                        .to_string(),
+                )
+            })
+            .collect();
+        let line = source.lines().nth(1).unwrap();
+        let name_col = line.find("{name}").unwrap() as u32 + 1;
+        let zzz_col = line.find("{zzz}").unwrap() as u32 + 1;
+
         assert!(
-            declared,
-            "expected a `type` token on interpolation of a declared var; got {:?}",
-            out
+            decoded.contains(&(1, name_col, "variable".to_string())),
+            "declared interpolation should be a variable, not its declared type: {decoded:?}"
         );
-        let has_var = out.iter().any(|(l, _, t)| *l == 1 && t == "variable");
         assert!(
-            has_var,
-            "expected a `variable` token for undeclared interpolation; got {:?}",
-            out
+            decoded.contains(&(1, zzz_col, "variable".to_string())),
+            "undeclared interpolation should remain a variable: {decoded:?}"
         );
     }
 

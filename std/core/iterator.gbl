@@ -1,0 +1,6 @@
+import core::option;
+
+trait Iterator<T> {
+    type Value;
+    func next(): Option<Value>;
+}

@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once};
 
@@ -86,6 +87,10 @@ pub fn init_test_env() {
 }
 
 pub fn run_gobol(file_path: &str, _verbose: bool) -> TestResult {
+    run_gobol_with_stdin(file_path, _verbose, None)
+}
+
+pub fn run_gobol_with_stdin(file_path: &str, _verbose: bool, stdin: Option<&[u8]>) -> TestResult {
     init_test_env();
 
     let temp_dir = std::env::temp_dir();
@@ -115,9 +120,23 @@ pub fn run_gobol(file_path: &str, _verbose: bool) -> TestResult {
         };
     }
 
-    let run_output = Command::new(&temp_bin)
-        .output()
-        .expect("failed to run compiled binary");
+    let mut command = Command::new(&temp_bin);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command.spawn().expect("failed to run compiled binary");
+    if let Some(stdin) = stdin {
+        child
+            .stdin
+            .take()
+            .expect("child stdin should be piped")
+            .write_all(stdin)
+            .expect("failed to write test input");
+    }
+    let run_output = child
+        .wait_with_output()
+        .expect("failed to wait for compiled binary");
 
     let run_stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
     let run_stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
@@ -161,11 +180,16 @@ pub fn run_fixture_test(relative_path: &str) -> TestResult {
 
 #[allow(dead_code)]
 pub fn run_inline_test(content: &str) -> TestResult {
+    run_inline_test_with_stdin(content, None)
+}
+
+#[allow(dead_code)]
+pub fn run_inline_test_with_stdin(content: &str, stdin: Option<&[u8]>) -> TestResult {
     let temp_dir = std::env::temp_dir();
     let uid = unique_id();
     let file_path = temp_dir.join(format!("gobol_inline_{}.gbl", uid));
     fs::write(&file_path, content).unwrap();
-    let res = run_gobol(file_path.to_str().unwrap(), false);
+    let res = run_gobol_with_stdin(file_path.to_str().unwrap(), false, stdin);
     let _ = fs::remove_file(file_path);
     res
 }

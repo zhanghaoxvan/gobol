@@ -682,7 +682,8 @@ impl CraneliftBackend {
         self.declare_import("gobol_eprintln", sig);
 
         // char* read()
-        let sig = self.module.make_signature();
+        let mut sig = self.module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
         self.declare_import("gobol_read", sig);
 
         // char* gobol_str_int(i64)
@@ -3252,13 +3253,163 @@ impl CraneliftBackend {
                 let codepoint = bcx.ins().uextend(types::I64, v);
                 self.call_runtime(bcx, "gobol_str_char", &[codepoint])
             }
-            (DataType::Str, DataType::Int) => {
-                // parse via runtime not available; return 0
-                let _ = v;
-                bcx.ins().iconst(types::I64, 0)
-            }
+            (DataType::Str, DataType::Int) => self.translate_str_to_int(bcx, v),
             _ => v,
         })
+    }
+
+    fn translate_str_to_int(&mut self, bcx: &mut FunctionBuilder, value: ir::Value) -> ir::Value {
+        let index_var = bcx.declare_var(types::I64);
+        let magnitude_var = bcx.declare_var(types::I64);
+        let negative_var = bcx.declare_var(types::I64);
+        let digit_count_var = bcx.declare_var(types::I64);
+
+        let zero = bcx.ins().iconst(types::I64, 0);
+        bcx.def_var(index_var, zero);
+        bcx.def_var(magnitude_var, zero);
+        bcx.def_var(negative_var, zero);
+        bcx.def_var(digit_count_var, zero);
+
+        let negative_sign = bcx.create_block();
+        let sign_check = bcx.create_block();
+        let positive_sign = bcx.create_block();
+        let loop_block = bcx.create_block();
+        let non_null = bcx.create_block();
+        let digit_block = bcx.create_block();
+        let overflow_check = bcx.create_block();
+        let digit_limit_check = bcx.create_block();
+        let accumulate = bcx.create_block();
+        let end_block = bcx.create_block();
+        let return_block = bcx.create_block();
+        let trap_invalid = bcx.create_block();
+        let trap_overflow = bcx.create_block();
+
+        let first_byte = bcx.ins().load(types::I8, MemFlagsData::trusted(), value, 0);
+        let first_byte = bcx.ins().uextend(types::I64, first_byte);
+        let is_negative = bcx.ins().icmp_imm_u(IntCC::Equal, first_byte, b'-' as i64);
+        bcx.ins()
+            .brif(is_negative, negative_sign, &[], sign_check, &[]);
+
+        bcx.switch_to_block(negative_sign);
+        let one = bcx.ins().iconst(types::I64, 1);
+        bcx.def_var(index_var, one);
+        bcx.def_var(negative_var, one);
+        bcx.ins().jump(loop_block, &[]);
+
+        bcx.switch_to_block(sign_check);
+        let is_positive = bcx.ins().icmp_imm_u(IntCC::Equal, first_byte, b'+' as i64);
+        bcx.ins()
+            .brif(is_positive, positive_sign, &[], loop_block, &[]);
+
+        bcx.switch_to_block(positive_sign);
+        let one = bcx.ins().iconst(types::I64, 1);
+        bcx.def_var(index_var, one);
+        bcx.ins().jump(loop_block, &[]);
+
+        bcx.switch_to_block(loop_block);
+        let index = bcx.use_var(index_var);
+        let address = bcx.ins().iadd(value, index);
+        let byte = bcx
+            .ins()
+            .load(types::I8, MemFlagsData::trusted(), address, 0);
+        let byte = bcx.ins().uextend(types::I64, byte);
+        let is_terminator = bcx.ins().icmp_imm_u(IntCC::Equal, byte, 0);
+        bcx.ins().brif(is_terminator, end_block, &[], non_null, &[]);
+
+        bcx.switch_to_block(non_null);
+        let at_least_zero = bcx
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, byte, 48);
+        let at_most_nine = bcx
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, byte, 57);
+        let is_digit = bcx.ins().band(at_least_zero, at_most_nine);
+        bcx.ins()
+            .brif(is_digit, digit_block, &[], trap_invalid, &[]);
+
+        bcx.switch_to_block(digit_block);
+        let ascii_zero = bcx.ins().iconst(types::I64, 48);
+        let digit = bcx.ins().isub(byte, ascii_zero);
+        let magnitude = bcx.use_var(magnitude_var);
+        let above_maximum_prefix =
+            bcx.ins()
+                .icmp_imm_u(IntCC::UnsignedGreaterThan, magnitude, 922337203685477580);
+        bcx.ins().brif(
+            above_maximum_prefix,
+            trap_overflow,
+            &[],
+            overflow_check,
+            &[],
+        );
+
+        bcx.switch_to_block(overflow_check);
+        let at_maximum_prefix = bcx
+            .ins()
+            .icmp_imm_u(IntCC::Equal, magnitude, 922337203685477580);
+        bcx.ins()
+            .brif(at_maximum_prefix, digit_limit_check, &[], accumulate, &[]);
+
+        bcx.switch_to_block(digit_limit_check);
+        let negative = bcx.use_var(negative_var);
+        let negative_limit = bcx.ins().icmp_imm_u(IntCC::NotEqual, negative, 0);
+        let negative_maximum = bcx.ins().iconst(types::I64, 8);
+        let positive_maximum = bcx.ins().iconst(types::I64, 7);
+        let maximum_digit = bcx
+            .ins()
+            .select(negative_limit, negative_maximum, positive_maximum);
+        let digit_exceeds_limit = bcx
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, digit, maximum_digit);
+        bcx.ins()
+            .brif(digit_exceeds_limit, trap_overflow, &[], accumulate, &[]);
+
+        bcx.switch_to_block(accumulate);
+        let magnitude = bcx.use_var(magnitude_var);
+        let scaled = bcx.ins().imul_imm_s(magnitude, 10);
+        let magnitude = bcx.ins().iadd(scaled, digit);
+        bcx.def_var(magnitude_var, magnitude);
+        let index = bcx.use_var(index_var);
+        let index = bcx.ins().iadd_imm_s(index, 1);
+        bcx.def_var(index_var, index);
+        let one = bcx.ins().iconst(types::I64, 1);
+        bcx.def_var(digit_count_var, one);
+        bcx.ins().jump(loop_block, &[]);
+
+        bcx.switch_to_block(end_block);
+        let digit_count = bcx.use_var(digit_count_var);
+        let has_digits = bcx.ins().icmp_imm_u(IntCC::NotEqual, digit_count, 0);
+        bcx.ins()
+            .brif(has_digits, return_block, &[], trap_invalid, &[]);
+
+        bcx.switch_to_block(trap_invalid);
+        bcx.ins().trap(ir::TrapCode::BAD_CONVERSION_TO_INTEGER);
+
+        bcx.switch_to_block(trap_overflow);
+        bcx.ins().trap(ir::TrapCode::INTEGER_OVERFLOW);
+
+        bcx.switch_to_block(return_block);
+        let magnitude = bcx.use_var(magnitude_var);
+        let negative = bcx.use_var(negative_var);
+        let is_negative = bcx.ins().icmp_imm_u(IntCC::NotEqual, negative, 0);
+        let zero = bcx.ins().iconst(types::I64, 0);
+        let negated = bcx.ins().isub(zero, magnitude);
+        let result = bcx.ins().select(is_negative, negated, magnitude);
+
+        bcx.seal_block(negative_sign);
+        bcx.seal_block(sign_check);
+        bcx.seal_block(positive_sign);
+        bcx.seal_block(loop_block);
+        bcx.seal_block(non_null);
+        bcx.seal_block(digit_block);
+        bcx.seal_block(overflow_check);
+        bcx.seal_block(digit_limit_check);
+        bcx.seal_block(accumulate);
+        bcx.seal_block(end_block);
+        bcx.seal_block(return_block);
+        bcx.seal_block(trap_invalid);
+        bcx.seal_block(trap_overflow);
+
+        result
     }
 
     // ==================== call helpers ====================

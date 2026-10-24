@@ -1,0 +1,21 @@
+#[library_features(hidden = true)]
+
+trait Add<T> {
+    func add(self, other: T): T
+}
+
+trait Sub<T> {
+    func sub(self, other: T): T
+}
+
+trait Mul<T> {
+    func mul(self, other: T): T
+}
+
+trait Div<T> {
+    func div(self, other: T): T
+}
+
+trait Rem<T> {
+    func rem(self, other: T): T
+}

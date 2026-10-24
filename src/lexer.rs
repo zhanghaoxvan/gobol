@@ -16,7 +16,7 @@ impl Lexer {
             "if", "else", "for", "return", "int", "float", "str", "char", "func", "var", "val",
             "import", "in", "as", "true", "false", "while", "break", "continue", "from", "self",
             "export", "struct", "impl", "new", "match", "convert", "extern", "trait", "enum",
-            "lambda",
+            "lambda", "type",
         ];
         for k in &kw {
             keywords.insert(k.to_string());

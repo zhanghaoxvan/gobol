@@ -573,7 +573,6 @@ fn cmd_list() -> Result<()> {
 // ============ cmd_run — build + optionally execute ============
 
 fn cmd_run(args: &[String]) -> Result<()> {
-    println!("{}", " Running Gobol program...".bold().green());
     // run => compile + execute.
     build_project(args, false)
 }
@@ -581,7 +580,6 @@ fn cmd_run(args: &[String]) -> Result<()> {
 // ============ cmd_build — independent build command ============
 
 fn cmd_build(args: &[String]) -> Result<()> {
-    println!("{}", " Building Gobol project...".bold().green());
     // build only, never execute.
     build_project(args, true)
 }
@@ -675,12 +673,14 @@ fn parse_build_cli(args: &[String]) -> BuildCli {
 /// translates the result into `gobol` flags, builds, and — for `grape run` —
 /// executes the result (directly on the host, or via QEMU for cross targets).
 fn build_project(args: &[String], compile_only: bool) -> Result<()> {
+    let stage_count = if compile_only { 4 } else { 5 };
     if !Path::new(GRAPE_TOML).exists() {
         return Err(GrapeError::NotFound(
             "grape.toml not found. Run 'grape init' first.".to_string(),
         ));
     }
 
+    println!("[1/{stage_count}] Checking project configuration");
     let config = read_grape_toml()?;
     let cli = parse_build_cli(args);
 
@@ -742,6 +742,7 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     }
 
     // Resolve dependencies into lib/<name>/
+    println!("[2/{stage_count}] Resolving dependencies");
     let mut resolved_deps: HashSet<String> = HashSet::new();
     resolve_dependencies(&config, &mut resolved_deps, cli.verbose)?;
     let effective_config = collect_dependency_manifests(&config)?;
@@ -855,16 +856,33 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
         }
     }
 
-    let status = cmd.status().map_err(|_| {
-        GrapeError::CommandFailed("Failed to run gobol. Make sure gobol is installed.".to_string())
+    println!("[3/{stage_count}] Compiling {}", config.project.name);
+    let output = cmd.output().map_err(|e| {
+        GrapeError::CommandFailed(format!(
+            "Failed to run gobol. Make sure gobol is installed. {}",
+            e
+        ))
     })?;
 
-    if !status.success() {
-        process::exit(status.code().unwrap_or(1));
+    if cli.verbose || !output.status.success() {
+        print!("{}", String::from_utf8_lossy(&output.stdout));
     }
+    if cli.verbose || !output.status.success() || !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+    if !output.status.success() {
+        process::exit(output.status.code().unwrap_or(1));
+    }
+
+    println!(
+        "[4/{stage_count}] Finished {} -> {}",
+        config.project.name,
+        final_out.display()
+    );
 
     // Execute the compiled binary unless compile-only.
     if !compile_only {
+        println!("[5/{stage_count}] Running {}", final_out.display());
         run_compiled_binary(&final_out, &target_triple, &cli.program_args, cli.verbose)?;
     }
 

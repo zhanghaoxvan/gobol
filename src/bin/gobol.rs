@@ -307,10 +307,11 @@ fn main() {
         }
     }
 
-    // Effective target: CLI --target, else host. no_std is implied for
-    // bare-metal triples unless explicitly overridden.
+    // Effective target: CLI --target, else host. Hosted std cannot be used
+    // for bare-metal triples.
     let target = link_cli.target.clone().unwrap_or_else(host_target_string);
-    if target_is_bare_metal(&target) {
+    let bare_metal_target = target_is_bare_metal(&target);
+    if bare_metal_target {
         link_cli.no_std = true;
         // A non-main entry point implies "don't require main()".
         if link_cli
@@ -345,16 +346,13 @@ fn main() {
         }
     };
 
-    let source = get_source(&filename);
-    // A global `--no-gc` (from `grape.toml`'s `build.no_gc` or CLI) injects
-    // a synthetic file-level `#![no_gc]` attribute, which the attribute
-    // system then propagates to every function — routing allocations to the
-    // non-GC allocator. This reuses the Task-1 file-attribute machinery.
-    let source = if link_cli.no_gc {
-        format!("#![no_gc]\n{}", source)
-    } else {
-        source
-    };
+    let mut source = get_source(&filename);
+    if link_cli.no_std {
+        source = format!("#![std(false)]\n{}", source);
+    }
+    if link_cli.no_gc {
+        source = format!("#![gc(false)]\n{}", source);
+    }
     let source_for_errors = source.clone();
 
     if is_verbose {
@@ -387,8 +385,9 @@ fn main() {
 
     let mut builder = AstBuilder::new(lexer);
     builder.set_error_formatter(error_fmt.clone());
-    builder.set_inject_prelude(!link_cli.no_std);
-    builder.set_inject_core_prelude(link_cli.no_std);
+    builder.set_default_std_enabled(!link_cli.no_std);
+    builder.set_inject_prelude(true);
+    builder.set_inject_core_prelude(true);
     let prog = builder.build();
     if builder.has_error() {
         for msg in builder.get_error_message() {
@@ -404,6 +403,15 @@ fn main() {
             process::exit(1);
         }
     };
+    if bare_metal_target && builder.requires_std_runtime() {
+        eprintln!(
+            "{}",
+            "Error: std support is not available for bare-metal targets; use #![std(false)] or #[std(false)]"
+                .red()
+        );
+        process::exit(1);
+    }
+    link_cli.no_std = !builder.requires_std_runtime();
 
     if is_verbose {
         let mut printer = AstPrinter::new();

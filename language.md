@@ -33,9 +33,28 @@ from package::math import sqrt // Import a member from a nested module / 从嵌�
 
 ### 2.3 Prelude / 预置导入
 
-The compiler automatically injects `import basic::xxx` for the language-fundamental standard-library modules in the entry program. The `basic` namespace maps to a bundled `basic/` tree when present and falls back to the corresponding `std/` module in the default distribution. The implicit modules include `assert`, `io`, the primitive type implementations, and their operator/comparison traits. Optional facilities such as `math`, `fs`, `net`, `option`, `range`, and `vec` must be imported explicitly.
+The compiler automatically injects `import basic::xxx` for the language-fundamental standard-library modules in the entry program. The `basic` namespace maps to a bundled `basic/` tree when present and falls back to the corresponding `std/` module in the default distribution. The implicit modules include `assert`, `io`, the primitive type implementations, and their operator/comparison traits. Optional facilities such as `math`, `fs`, `net`, `option`, `range`, `time`, and `vec` must be imported explicitly.
 
-编译器会在入口程序中自动注入语言基础标准库模块的 `import basic::xxx;`。如果存在独立的 `basic/` 目录则优先使用它；默认发行版会回退到对应的 `std/` 模块。隐式导入包括 `assert`、`io`、基本类型实现及其运算/比较 trait；`math`、`fs`、`net`、`option`、`range`、`vec` 等可选功能必须显式导入。
+编译器会在入口程序中自动注入语言基础标准库模块的 `import basic::xxx;`。如果存在独立的 `basic/` 目录则优先使用它；默认发行版会回退到对应的 `std/` 模块。隐式导入包括 `assert`、`io`、基本类型实现及其运算/比较 trait；`math`、`fs`、`net`、`option`、`range`、`time`、`vec` 等可选功能必须显式导入。
+
+### 2.3.1 Time / 时间
+
+The hosted `time` module provides a monotonic millisecond clock for elapsed-time measurements, Unix epoch time in milliseconds, and millisecond sleep:
+
+```gobol
+import std::time;
+
+func main() {
+    var started = time::now_ms();
+    time::sleep_ms(10);
+    io::println(time::now_ms() - started);
+    io::println(time::unix_time_ms());
+}
+```
+
+`now_ms()` is monotonic and has an arbitrary origin; use differences rather than treating it as a date. `unix_time_ms()` returns milliseconds since 1970-01-01 UTC. `sleep_ms()` returns `0` on success and `-1` for a negative duration or a platform error. These functions require the hosted runtime and are unavailable with `--no-std`.
+
+Hosted `time` 模块提供用于测量耗时的单调毫秒时钟、Unix 毫秒时间戳和毫秒级休眠。`now_ms()` 的起点不固定，应通过差值测量耗时；`unix_time_ms()` 返回自 1970-01-01 UTC 起的毫秒数；`sleep_ms()` 成功返回 `0`，负时长或平台错误返回 `-1`。这些功能依赖 hosted runtime，不适用于 `--no-std`。
 
 Note: This injection only applies to the main program file. Standard library modules and dependencies must declare their own imports explicitly.
 
@@ -145,9 +164,13 @@ val name = "Gobol"     // Inferred as str / 推导为 str
 ### 3.3 Destructuring / 解构
 
 ```gobol
-val (a, b) = (1, 2);
+val (a, b) = (1, "two");
 val Point { x, y } = p;
 ```
+
+Tuple patterns bind each element in order. Use `var` for mutable bindings or `val` for immutable bindings. Tuple destructuring requires an initializer, and the number of names must match the number of elements.
+
+元组解构会按顺序绑定每个元素。使用 `var` 创建可变绑定，使用 `val` 创建不可变绑定。元组解构必须有初始化表达式，名称数量也必须与元素数量一致。
 
 ---
 
@@ -162,6 +185,23 @@ val Point { x, y } = p;
 | `str` | String / 字符串 | `const char*` | `"hello"`, `"世界"` |
 | `bool` | Boolean / 布尔值 | `bool` | `true`, `false` |
 | `char` | Unicode scalar value / Unicode 标量值 | `uint32_t` | `'A'`, `'世'`, `'\u{1F600}'` |
+
+### 4.2 Tuples / 元组
+
+Tuples are fixed-size, ordered values whose elements can have different types. Write tuple literals with parentheses and commas; a trailing comma may be used for a one-element tuple. Use `.N` to access the element at zero-based index `N`. Tuple types use the corresponding parenthesized type list:
+
+```gobol
+var point_and_name: (int, str) = (42, "answer");
+io::println(point_and_name.0);
+io::println(point_and_name.1);
+
+var (number, word) = point_and_name;
+var one_element: (bool,) = (true,);
+```
+
+`var` permits assigning to tuple fields (for example, `point_and_name.0 = 7`); a tuple bound with `val` is immutable. Tuple indexes are checked against the tuple's statically known size. Unlike arrays, tuples may contain heterogeneous element types and have a fixed shape.
+
+元组是固定大小、有序且可包含不同类型元素的值。使用圆括号和逗号书写元组字面量；单元素元组可以使用尾随逗号。使用从零开始的 `.N` 访问元素；元组类型使用相应的圆括号类型列表。`var` 允许修改元组字段（例如 `point_and_name.0 = 7`），`val` 绑定的元组不可变。元组索引会根据编译期已知的长度检查。与数组不同，元组可以包含异构元素并具有固定结构。
 
 ---
 
@@ -279,19 +319,35 @@ struct Empty;
 
 ### 6.2 Constructors / 构造函数
 
-```gobol
+Create a struct value directly by listing its fields. Named struct literals initialize the fields as written and do not call `new` or any `New` trait implementation:
 
-impl New for Point {
-    func new(x: int, y: int): Point {
-        self.x = x;
-        self.y = y;
-        self           // Implicit return / 隐式返回
-    }
+```gobol
+var p = Point {
+    x: 3,
+    y: 4,
+};
+
+struct Pair<T, U> {
+    first: T,
+    second: U,
 }
 
+var pair = Pair<int, str> {
+    first: 1,
+    second: "one",
+};
+```
+
+`StructName { field: value, ... }` is direct field initialization. All field accesses in methods use an explicit receiver, such as `self.x`; `self` must be declared as a method parameter. A method without a `self` parameter is an associated function and cannot access an instance.
+
+结构体值可以直接通过列出字段创建。命名结构体字面量只初始化所列字段，不会调用 `new` 或任何 `New` trait 实现。方法中必须显式使用 `self.x` 等接收者访问字段，并且 `self` 必须是方法参数。没有 `self` 参数的方法是关联函数，不能访问实例。
+
+For an associated constructor, return a struct literal:
+
+```gobol
 impl Point {
-    func from_origin(): Point {
-        new Point(0, 0)
+    func new(x: int, y: int): Point {
+        Point { x: x, y: y }
     }
 }
 ```
@@ -320,12 +376,10 @@ trait New<T> {
     func new(): T
 }
 
-// Usage example / 使用示例
+// Associated constructor / 关联构造函数
 impl Point {
     func new(x: int, y: int): Point {   // Any arity allowed / 允许任意参数
-        self.x = x;
-        self.y = y;
-        self
+        Point { x: x, y: y }
     }
 }
 ```
@@ -816,15 +870,24 @@ if next.is_some() {
 }
 ```
 
-### 11.10 Core Library and `no_std` / Core 库与 `no_std`
+### 11.10 Core Library and `std` Configuration / Core 库与 `std` 配置
 
 Gobol's `core` library contains allocation-free language fundamentals,
 including `Option<T>`, `Result<T, E>`, primitive types, comparison and
 arithmetic traits, and the `Iterator` trait. It does not declare hosted I/O or
 depend on the C runtime.
 
-`--no-std` automatically selects the `core` prelude instead of the hosted
-`basic` prelude. Bare-metal targets ending in `-none` select it automatically.
+Hosted standard-library support is enabled by default. Use the file-level
+attribute `#![std(false)]` to select the `core` prelude instead of the hosted
+`basic` prelude. `#[std(false)]` on a function prevents that function from
+calling hosted std functions; `#[std(true)]` enables hosted support for that
+function even when the file default is disabled. The runtime is linked when
+the file or any function requires hosted std. Bare-metal targets ending in
+`-none` cannot use hosted std. The equivalent `--no-std` compiler flag and
+`no_std = true` manifest setting remain supported as compatibility forms.
+The `[build].std` manifest setting defaults to `true`. Settings are resolved
+in this order: manifest, file attribute, then function attribute.
+
 The core modules are also available explicitly with imports such as
 `import core::option;`. Existing imports such as `import option;` remain
 available in hosted builds and forward to the core definitions, adding
@@ -839,10 +902,17 @@ Gobol 的 `core` 库提供无需分配的语言基础，包括 `Option<T>`、`Re
 基本类型、比较与算术 trait，以及 `Iterator` trait。它不声明宿主 I/O，也不依赖
 C 运行时。
 
-`--no-std` 会自动使用 `core` prelude，而不是宿主环境的 `basic` prelude。以
-`-none` 结尾的裸机目标也会自动选择它。也可以显式导入 core 模块，例如
-`import core::option;`。宿主构建中原有的 `import option;` 等导入仍然可用，
-并转发到 core 定义，同时提供 `take()` 等仅供宿主环境使用的便利方法。
+宿主标准库默认启用。文件级属性 `#![std(false)]` 会选择 `core` prelude，而不是
+宿主环境的 `basic` prelude。函数上的 `#[std(false)]` 禁止该函数调用宿主 std
+函数；即使文件默认禁用了 std，函数上的 `#[std(true)]` 也能为该函数启用宿主
+支持。文件或任一函数需要宿主 std 时会链接运行时。以 `-none` 结尾的裸机目标
+不能使用宿主 std。编译器参数 `--no-std` 和清单配置 `no_std = true` 仍作为兼容
+写法支持。`[build].std` 清单项默认是 `true`，覆盖顺序为：清单、文件属性、函数
+属性。
+
+也可以显式导入 core 模块，例如 `import core::option;`。宿主构建中原有的
+`import option;` 等导入仍然可用，并转发到 core 定义，同时提供 `take()` 等仅供
+宿主环境使用的便利方法。
 
 `core` 不提供 I/O、堆分配器或进程入口。裸机程序需要自行提供入口和链接配置，
 并为所用操作提供所需的运行时或分配钩子。
@@ -869,7 +939,7 @@ C 运行时。
 #[dynamic_args]
 #[expand]
 #[header("std/runtime.h")]
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 #[internal]
 #[debug]
 #[intrinsic("runtime_name")]
@@ -882,12 +952,14 @@ C 运行时。
 | `#[dynamic]` | Trait method / Trait 方法 | Allow impls to define arbitrary functions / 允许实现者自由定义函数 |
 | `#[expand]` | Function / 函数 | AST-level macro; inline body at every call site (see §14) / AST 级宏；在每个调用点内联函数体（见 §14） |
 | `#[header("path")]` | `extern "C"` block / 外部块 | C header for function validation / 用于函数验证的 C 头文件 |
-| `#[library_features(hidden = true)]` | Module / 模块 | Hide module prefix in qualified names / 隐藏模块前缀 |
+| `#![library_features(hidden = true)]` | File / 文件 | Hide module prefix in qualified names / 隐藏模块前缀 |
 | `#[internal]` | Function, Struct, Trait | Not exported; module-private / 不导出，模块私有 |
 | `#[debug]` | Function / 函数 | Remove in release mode (zero overhead) / Release 模式下移除（零开销） |
 | `#[intrinsic("name")]` | Function / 函数 | Map to named C runtime function / 映射到指定 C 运行时函数 |
 | `#[inline]` | Function / 函数 | Inline hint to codegen / 代码生成内联提示 |
-| `#[no_gc]` | Struct, Enum | Opt out of GC tracking (rare; only for types with custom allocators) / 退出 GC 追踪（极少使用；仅用于自定义分配器的类型） |
+| `#![std(false)]`, `#[std(false)]` | File, Function / 文件、函数 | Disable hosted std for the file or function / 为文件或函数禁用宿主 std |
+| `#![gc(false)]`, `#[gc(false)]` | File, Function, Struct, Enum / 文件、函数、结构体、枚举 | Use non-GC allocation / 使用非 GC 分配 |
+| `#[no_gc]` | Struct, Enum | Legacy alias for `#[gc(false)]` / `#[gc(false)]` 的旧别名 |
 | `#[deprecated("msg")]` | Function, Struct, Trait | Mark as deprecated / 标记为弃用 |
 | `#[no_export]` | Function, Struct, Trait | Exclude from module exports / 从模块导出中排除 |
 
@@ -897,11 +969,11 @@ Gobol uses a mark-sweep garbage collector for heap-allocated values. By default,
 
 Gobol 使用标记-清除垃圾回收器管理堆分配的值。默认情况下，所有结构体和枚举分配使用 `gobol_gc_alloc`，将对象注册到 GC 中。GC 会清除未标记的对象，释放不可达内存。
 
-**`#[no_gc]` — Manual memory / 手动内存管理:**
+**`gc(false)` — Manual memory / 手动内存管理:**
 
-Types that manage OS resources or raw heap memory should opt out of GC tracking with `#[no_gc]`. The compiler will use `gobol_alloc` (manual `calloc`) instead. These types must implement the `Drop` trait for cleanup.
+GC is enabled by default. Set `gc = false` in `[build]`, use `#![gc(false)]` for a file, or use `#[gc(false)]` for a function/type to route allocations through `gobol_alloc` (manual `calloc`). A node-level setting overrides the file setting, which overrides `grape.toml`. `#[no_gc]` remains a compatibility alias. Types that manage OS resources or raw heap memory should use non-GC allocation and implement the `Drop` trait for cleanup.
 
-管理 OS 资源或原始堆内存的类型应使用 `#[no_gc]` 退出 GC 追踪。编译器将使用 `gobol_alloc`（手动分配）。这些类型必须实现 `Drop` trait 进行清理。
+GC 默认启用。可以在 `[build]` 中设置 `gc = false`，用文件级 `#![gc(false)]`，或用函数/类型级 `#[gc(false)]` 将分配转到 `gobol_alloc`（手动 `calloc`）。节点级设置覆盖文件级设置，文件级设置覆盖 `grape.toml`。`#[no_gc]` 仍是兼容别名。管理 OS 资源或原始堆内存的类型应使用非 GC 分配，并实现 `Drop` trait 进行清理。
 
 ```gobol
 // GC-managed by default / 默认由 GC 管理
@@ -909,7 +981,7 @@ struct Point { x: int, y: int }
 var p = new Point(3, 4);  // allocated via gobol_gc_alloc
 
 // Manual memory — must implement Drop / 手动管理——必须实现 Drop
-#[no_gc]
+#[gc(false)]
 struct File {
     _handle: int,
 }
@@ -921,9 +993,9 @@ impl File {
 }
 ```
 
-All standard library types are GC-managed by default — no stdlib type uses `#[no_gc]`. The attribute exists for advanced use cases where a type implements its own allocator or wraps externally-managed memory.
+All standard library types are GC-managed by default. `#[gc(false)]` (or its legacy alias `#[no_gc]`) is intended for advanced use cases where a type implements its own allocator or wraps externally-managed memory.
 
-所有标准库类型默认由 GC 管理——标准库中没有类型使用 `#[no_gc]`。该属性仅用于高级场景，如类型实现了自定义分配器或包装了外部管理的内存。
+所有标准库类型默认由 GC 管理。`#[gc(false)]`（或旧别名 `#[no_gc]`）仅用于高级场景，如类型实现了自定义分配器或包装了外部管理的内存。
 
 ---
 

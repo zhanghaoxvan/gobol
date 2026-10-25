@@ -1,4 +1,4 @@
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 import iterator::Iterator;
 
@@ -16,81 +16,72 @@ struct RangeIterator {
 
 impl New for Range {
     func new(start: int, end: int): Range {
-        _start = start;
-        _end = end;
-        _step = 1;
-        self
+        Range { _start: start, _end: end, _step: 1 }
     }
 
     func new(start: int, end: int, step: int): Range {
-        _start = start;
-        _end = end;
-        _step = step;
-        self
+        Range { _start: start, _end: end, _step: step }
     }
 }
 
 impl Range {
     convert int[](self): int[] {
         var result: int[];
-        var i: int = _start;
-        if _step > 0 {
-            while i < _end {
+        var i: int = self._start;
+        if self._step > 0 {
+            while i < self._end {
                 result.add(i);
-                i += _step;
+                i += self._step;
             }
         } else {
-            while i > _end {
+            while i > self._end {
                 result.add(i);
-                i += _step;
+                i += self._step;
             }
         }
         result
     }
 
 
-    func start(self): int { _start }
-    func end(self): int { _end }
-    func step(self): int { _step }
+    func start(self): int { self._start }
+    func end(self): int { self._end }
+    func step(self): int { self._step }
 
     func len(self): int {
-        if _step == 0 { return 0; }
-        if _step > 0 {
-            if _start >= _end { return 0; }
-            (_end - _start + _step - 1) / _step
+        if self._step == 0 { return 0; }
+        if self._step > 0 {
+            if self._start >= self._end { return 0; }
+            (self._end - self._start + self._step - 1) / self._step
         } else {
-            if _start <= _end { return 0; }
-            (_start - _end - _step - 1) / (-_step)
+            if self._start <= self._end { return 0; }
+            (self._start - self._end - self._step - 1) / (-self._step)
         }
     }
 
     func contains(self, value: int): bool {
-        if _step > 0 {
-            value >= _start && value < _end && (value - _start) % _step == 0
+        if self._step > 0 {
+            value >= self._start && value < self._end && (value - self._start) % self._step == 0
         } else {
-            value <= _start && value > _end && (value - _start) % _step == 0
+            value <= self._start && value > self._end && (value - self._start) % self._step == 0
         }
     }
 }
 
 impl New for RangeIterator {
     func new(current: int, end: int, step: int): RangeIterator {
-        _current = current;
-        _end = end;
-        _step = step;
-        self
+        RangeIterator { _current: current, _end: end, _step: step }
     }
 }
 
 impl RangeIterator {
     func next(self): Option<int> {
-        if _step > 0 {
-            if _current >= _end { return Option::None; }
+        if self._step > 0 {
+            if self._current >= self._end { return Option::None; }
         } else {
-            if _current <= _end { return Option::None; }
+            if self._current <= self._end { return Option::None; }
         }
-        var value: int = _current;
-        _current += _step;
+        var value: int = self._current;
+        self._current += self._step;
         Option::Some(value);
     }
 }

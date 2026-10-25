@@ -7,8 +7,7 @@ struct Num {
 // Inherent impl must come before trait impl that calls its methods
 impl Num {
     func new(value: int): Num {
-        self.value = value;
-        self
+        Num { value: value }
     }
 }
 

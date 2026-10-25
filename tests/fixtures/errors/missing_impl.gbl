@@ -6,8 +6,7 @@ struct Bad {
 
 impl Bad {
     func new(value: int): Bad {
-        self.value = value;
-        self
+        Bad { value: value }
     }
 }
 

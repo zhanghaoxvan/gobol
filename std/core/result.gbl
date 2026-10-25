@@ -1,4 +1,4 @@
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 enum Result<T, E> {
     Ok(T),
@@ -7,16 +7,16 @@ enum Result<T, E> {
 
 impl<T, E> Result<T, E> {
     func is_ok(self): bool {
-        _tag == 0
+        self._tag == 0
     }
 
     func is_err(self): bool {
-        _tag == 1
+        self._tag == 1
     }
 
     func value(self, default: T): T {
         if self.is_ok() {
-            _0
+            self._0
         } else {
             default
         }
@@ -28,17 +28,17 @@ impl<T, E> Result<T, E> {
 
     func or_else(self, fallback: func(E): T): T {
         if self.is_ok() {
-            _0
+            self._0
         } else {
-            fallback(_1)
+            fallback(self._1)
         }
     }
 
     func map<U>(self, f: func(T): U): Result<U, E> {
         if self.is_ok() {
-            Result<U, E>::Ok(f(_0))
+            Result<U, E>::Ok(f(self._0))
         } else {
-            Result<U, E>::Err(_1)
+            Result<U, E>::Err(self._1)
         }
     }
 }

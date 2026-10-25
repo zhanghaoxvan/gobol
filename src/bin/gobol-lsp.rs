@@ -2340,6 +2340,52 @@ fn resolve_import_qualifier(tokens: &[Token], qualifier: &str) -> String {
 /// used as a type.
 fn infer_expr_type(
     tokens: &[Token],
+    idx: usize,
+    state: &DocState,
+    lsp: Option<&GobolLsp>,
+    uri: Option<&str>,
+) -> Option<String> {
+    if let Some(cast_type) = infer_cast_type(tokens, idx) {
+        return Some(cast_type);
+    }
+    infer_expr_type_without_cast(tokens, idx, state, lsp, uri)
+}
+
+fn infer_cast_type(tokens: &[Token], start_idx: usize) -> Option<String> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(start_idx) {
+        match token.value.as_str() {
+            "as" if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                return tokens.get(index + 1).map(|ty| ty.value.clone());
+            }
+            "(" => paren_depth += 1,
+            ")" if paren_depth > 0 => paren_depth -= 1,
+            ")" if paren_depth == 0 => return None,
+            "[" => bracket_depth += 1,
+            "]" if bracket_depth > 0 => bracket_depth -= 1,
+            "{" => brace_depth += 1,
+            "}" if brace_depth > 0 => brace_depth -= 1,
+            "}" if brace_depth == 0 => return None,
+            ";" | "," if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                return None;
+            }
+            _ => {}
+        }
+        if token.r#type == TokenType::EndOfLine
+            && paren_depth == 0
+            && bracket_depth == 0
+            && brace_depth == 0
+        {
+            return None;
+        }
+    }
+    None
+}
+
+fn infer_expr_type_without_cast(
+    tokens: &[Token],
     mut idx: usize,
     state: &DocState,
     lsp: Option<&GobolLsp>,
@@ -5741,6 +5787,47 @@ mod e2e_doc {
     }
 
     #[test]
+    fn semantic_array_diagnostic_points_at_indexed_use() {
+        let source = "func main() {\n    var s = 1;\n    s[0];\n}\n";
+        let doc = analyze_document("file:///tmp/array-error.gbl", source, &[]);
+        let (line, col, message) = doc
+            .errors
+            .iter()
+            .find(|(_, _, message)| message.contains("is not an array"))
+            .expect("array diagnostic");
+
+        assert_eq!((*line, *col), (3, 4));
+        let diagnostic = error_to_diagnostic(source, &doc.tokens, *line, *col, message);
+        assert_eq!(diagnostic.range.start, Position::new(2, 4));
+        assert_eq!(diagnostic.range.end, Position::new(2, 5));
+    }
+
+    #[test]
+    fn undeclared_function_diagnostic_points_at_call() {
+        let source = "func main() {\n    missing();\n    missing();\n}\n";
+        let doc = analyze_document("file:///tmp/function-error.gbl", source, &[]);
+        let diagnostics: Vec<_> = doc
+            .errors
+            .iter()
+            .filter(|(_, _, message)| message.contains("Undeclared function"))
+            .collect();
+        assert_eq!(diagnostics.len(), 2, "expected both missing-call errors");
+
+        for ((line, col, message), expected_line) in diagnostics.iter().zip([2, 3]) {
+            assert_eq!((*line, *col), (expected_line, 4));
+            let diagnostic = error_to_diagnostic(source, &doc.tokens, *line, *col, message);
+            assert_eq!(
+                diagnostic.range.start,
+                Position::new((expected_line - 1) as u32, 4)
+            );
+            assert_eq!(
+                diagnostic.range.end,
+                Position::new((expected_line - 1) as u32, 11)
+            );
+        }
+    }
+
+    #[test]
     fn char_type_is_semantically_highlighted_as_type() {
         let source = "func f(value: char): char { value }\n";
         let tokens = lex_source(source);
@@ -5815,6 +5902,18 @@ mod e2e_doc {
         assert_eq!(
             infer_expr_type(&unk, 0, &doc, None, None).as_deref(),
             Some("unknown")
+        );
+    }
+
+    #[test]
+    fn infer_explicit_cast_type_before_expression_return_type() {
+        let source = "func read(): str { \"input\" }\n";
+        let doc = analyze_document("file:///tmp/cast.gbl", source, &[]);
+        let cast_call = lexall("io::read() as int;");
+
+        assert_eq!(
+            infer_expr_type(&cast_call, 0, &doc, None, None).as_deref(),
+            Some("int")
         );
     }
 

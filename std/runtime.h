@@ -12,6 +12,7 @@
 #include "runtime/mem.h"
 #include "runtime/array.h"
 #include "runtime/math.h"
+#include "runtime/time.h"
 #include "runtime/fs.h"
 #include "runtime/net.h"
 #include "runtime/thread.h"

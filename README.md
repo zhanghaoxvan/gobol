@@ -35,12 +35,14 @@ That's it! The installer will:
 - Copy binaries to the installation directory (default `~/.gobol`)
 - Add `~/.gobol/bin` to your PATH
 - Copy the standard library to `~/.gobol/lib/std`
+- Remove an identical legacy copy from `~/.gobol/std` when upgrading
 
 就是这样！安装程序会：
 - 编译编译器、包管理器和 LSP 服务器
 - 复制二进制文件到安装目录（默认 `~/.gobol`）
 - 添加 `~/.gobol/bin` 到 PATH
 - 复制标准库到 `~/.gobol/lib/std`
+- 升级时删除 `~/.gobol/std` 中内容完全相同的旧版副本
 
 #### Custom Install Directory / 自定义安装目录
 

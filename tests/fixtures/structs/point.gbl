@@ -5,9 +5,7 @@ struct Point {
 
 impl Point {
     func new(x: int, y: int): Point {
-        self.x = x;
-        self.y = y;
-        self
+        Point { x: x, y: y }
     }
 
     func distance(self): float {

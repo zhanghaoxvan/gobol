@@ -9,7 +9,7 @@
 // `gobol_mem_store`, `gobol_array_elem_addr`) are declared once in
 // std/builtins.gbl, which every Gobol program auto-imports.
 
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 struct Ref<T> {
     _addr: int
@@ -17,27 +17,26 @@ struct Ref<T> {
 
 impl<T> Ref<T> {
     func new(addr: int): Ref<T> {
-        _addr = addr;
-        self
+        Ref<T> { _addr: addr }
     }
 
     func read(self): T {
-        builtins::gobol_mem_load(_addr)
+        builtins::gobol_mem_load(self._addr)
     }
 
     func write(self, value: T) {
-        builtins::gobol_mem_store(_addr, value);
+        builtins::gobol_mem_store(self._addr, value);
     }
 
     func drop(self) {
-        _addr = 0;
+        self._addr = 0;
     }
 
     func is_null(self): bool {
-        _addr == 0
+        self._addr == 0
     }
 
     func addr(self): int {
-        _addr
+        self._addr
     }
 }

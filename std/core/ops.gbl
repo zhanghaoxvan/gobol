@@ -1,4 +1,4 @@
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 trait Add<T> {
     func add(self, other: T): T

@@ -25,6 +25,216 @@ fn test_advanced_prime_numbers() {
     result.assert_success();
 }
 
+#[test]
+fn test_std_time_clocks_and_sleep() {
+    let result = run_inline_test(
+        r#"import std::time;
+
+func main() {
+    var started = time::now_ms();
+    var sleep_status = time::sleep_ms(30);
+    var elapsed = time::now_ms() - started;
+    io::println(sleep_status);
+    io::println(elapsed >= 20);
+    io::println(time::unix_time_ms() > 1700000000000);
+    io::println(time::sleep_ms(-1));
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        ["0", "true", "true", "-1"]
+    );
+}
+
+#[test]
+fn test_heterogeneous_tuples_fields_types_and_destructuring() {
+    let result = run_inline_test(
+        r#"func make_pair(): (int, str) {
+    (42, "answer")
+}
+
+func second(pair: (int, str)): str {
+    pair.1
+}
+
+func identity<T>(value: T): T {
+    value
+}
+
+func main() {
+    var tuple: (int, str, bool, float, char) = (1, "two", true, 3.5, 'x');
+    tuple.0 = 7;
+    io::println(tuple.0);
+    io::println(tuple.1);
+    io::println(tuple.2);
+    io::println(tuple.3);
+    io::println(tuple.4);
+    var (number, word) = make_pair();
+    io::println(number);
+    io::println(word);
+    io::println(second(make_pair()));
+    io::println(identity((9, "generic")).1);
+    var one_element: (bool,) = (true,);
+    io::println(one_element.0);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        [
+            "7", "two", "true", "3.5", "x", "42", "answer", "answer", "generic", "true"
+        ]
+    );
+}
+
+#[test]
+fn test_tuple_immutability_and_bounds_are_semantic_errors() {
+    let immutable = run_inline_test(
+        r#"func main() {
+    val tuple = (1, "two");
+    tuple.0 = 3;
+}"#,
+    );
+    immutable.assert_failure(ExitCode::CompileError);
+    assert!(
+        immutable
+            .stderr
+            .contains("Cannot assign to tuple in constant variable")
+    );
+
+    let out_of_bounds = run_inline_test(
+        r#"func main() {
+    val tuple = (1, "two");
+    io::println(tuple.2);
+}"#,
+    );
+    out_of_bounds.assert_failure(ExitCode::CompileError);
+    assert!(out_of_bounds.stderr.contains("out of bounds"));
+
+    let mismatched_arity = run_inline_test(
+        r#"func main() {
+    var (first, second) = (1, "two", true);
+}"#,
+    );
+    mismatched_arity.assert_failure(ExitCode::CompileError);
+    assert!(mismatched_arity.stderr.contains("expects 2 values, got 3"));
+
+    let mismatched_types = run_inline_test(
+        r#"func main() {
+    var pair: (int, str) = ("one", 2);
+}"#,
+    );
+    mismatched_types.assert_failure(ExitCode::CompileError);
+}
+
+#[test]
+fn test_struct_literals_initialize_fields_without_calling_new() {
+    let result = run_inline_test(
+        r#"struct Point {
+    x: int,
+    y: int,
+}
+
+impl Point {
+    func new(x: int, y: int): Point {
+        Point { x: x + 100, y: y }
+    }
+
+    func get_x(self): int {
+        self.x
+    }
+}
+
+func main() {
+    var direct = Point {
+        y: 4,
+        x: 2,
+    };
+    var constructed = Point::new(3, 5);
+    io::println(direct.x);
+    io::println(direct.get_x());
+    io::println(constructed.x);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.lines().collect::<Vec<_>>(), ["2", "2", "103"]);
+}
+
+#[test]
+fn test_generic_struct_literal_initializes_named_fields() {
+    let result = run_inline_test(
+        r#"struct Box<T> {
+    value: T,
+}
+
+func main() {
+    var boxed = Box<int> {
+        value: 42,
+    };
+    io::println(boxed.value);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.lines().collect::<Vec<_>>(), ["42"]);
+}
+
+#[test]
+fn test_self_requires_explicit_method_parameter_and_field_access() {
+    let missing_self = run_inline_test(
+        r#"struct Point {
+    x: int,
+}
+
+impl Point {
+    func broken(): int {
+        self.x
+    }
+}
+
+func main() {}"#,
+    );
+    missing_self.assert_failure(ExitCode::CompileError);
+    assert!(missing_self.stderr.contains("without a self parameter"));
+
+    let implicit_field = run_inline_test(
+        r#"struct Point {
+    x: int,
+}
+
+impl Point {
+    func broken(self): int {
+        x
+    }
+}
+
+func main() {}"#,
+    );
+    implicit_field.assert_failure(ExitCode::CompileError);
+    assert!(implicit_field.stderr.contains("Undeclared identifier: 'x'"));
+
+    let field_without_receiver = run_inline_test(
+        r#"struct Point {
+    x: int,
+}
+
+impl Point {
+    func broken(): Point {
+        x = 1;
+        self
+    }
+}
+
+func main() {}"#,
+    );
+    field_without_receiver.assert_failure(ExitCode::CompileError);
+    assert!(
+        field_without_receiver
+            .stderr
+            .contains("Undeclared identifier: 'x'")
+    );
+}
+
 /// 用例：arrays/array_add.gbl | 预期正常运行
 #[test]
 fn test_arrays_array_add() {

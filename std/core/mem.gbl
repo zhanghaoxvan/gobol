@@ -1,4 +1,4 @@
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 trait New<T> {
     #[dynamic]

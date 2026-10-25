@@ -6,7 +6,7 @@
 // The struct is a pure OOP-style façade over the C runtime; each call
 // re-queries the OS so callers observe up-to-date values.
 
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 #[header("std/runtime.h")]
 extern "C" {

@@ -17,6 +17,7 @@ pub enum DataType {
     Struct(String),
     Nullable(Box<DataType>),
     Array(Box<DataType>),
+    Tuple(Vec<DataType>),
     Reference(Box<DataType>),
     Pointer(Box<DataType>),
 }
@@ -35,6 +36,18 @@ impl fmt::Display for DataType {
             DataType::Struct(name) => return write!(f, "{}", name),
             DataType::Nullable(inner) => return write!(f, "{}?", inner),
             DataType::Array(elem) => return write!(f, "{}[]", elem),
+            DataType::Tuple(elements) => {
+                write!(
+                    f,
+                    "({})",
+                    elements
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )?;
+                return Ok(());
+            }
             DataType::Reference(inner) => return write!(f, "&{}", inner),
             DataType::Pointer(inner) => return write!(f, "*{}", inner),
         };
@@ -413,6 +426,13 @@ impl Environment {
     pub fn is_type_compatible(target: &DataType, source: &DataType) -> bool {
         if target == source {
             return true;
+        }
+        if let (DataType::Tuple(targets), DataType::Tuple(sources)) = (target, source) {
+            return targets.len() == sources.len()
+                && targets
+                    .iter()
+                    .zip(sources)
+                    .all(|(target, source)| Self::is_type_compatible(target, source));
         }
         // None_ is compatible with Nullable<T>
         if let DataType::Nullable(inner) = target {

@@ -14,7 +14,7 @@ import result;
 // `gobol_thread_join`, `gobol_chan_*`) are declared once in
 // std/builtins.gbl, which every Gobol program auto-imports.
 
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 struct Thread {
     _id: int
@@ -24,23 +24,21 @@ impl Thread {
     // Spawn a new thread running `f(arg)`.
     // `f` must be a function whose address is known at link time.
     func spawn(f: func(int): int, arg: int): Thread {
-        _id = builtins::gobol_thread_spawn(f, arg);
-        self
+        Thread { _id: builtins::gobol_thread_spawn(f, arg) }
     }
 
     // Spawn a new thread running `f` with no argument.
     func spawn(f: func(): int): Thread {
-        _id = builtins::gobol_thread_spawn(f, 0);
-        self
+        Thread { _id: builtins::gobol_thread_spawn(f, 0) }
     }
 
     // Wait for the thread to finish and return its exit code.
     func join(self): int {
-        builtins::gobol_thread_join(_id)
+        builtins::gobol_thread_join(self._id)
     }
 
     func id(self): int {
-        _id
+        self._id
     }
 }
 
@@ -50,24 +48,23 @@ struct Channel<T> {
 
 impl<T> Channel<T> {
     func new(): Channel<T> {
-        _handle = builtins::gobol_chan_create();
-        self
+        Channel<T> { _handle: builtins::gobol_chan_create() }
     }
 
     // Send a value into the channel. Returns 0 on success, -1 on failure.
     func send(self, value: T): int {
-        builtins::gobol_chan_send(_handle, value)
+        builtins::gobol_chan_send(self._handle, value)
     }
 
     // Receive a value from the channel. Blocks until a value is available.
     // Returns Result<T, int>: Ok(value) on success, Err(-1) if channel closed.
     func recv(self): Result<T, int> {
-        var value = builtins::gobol_chan_recv(_handle);
+        var value = builtins::gobol_chan_recv(self._handle);
         // TODO: distinguish "value 0" from "channel closed" via status out-param
         Result<T, int>::Ok(value)
     }
 
     func drop(self) {
-        builtins::gobol_chan_destroy(_handle);
+        builtins::gobol_chan_destroy(self._handle);
     }
 }

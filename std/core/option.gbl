@@ -1,4 +1,4 @@
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 import core::result;
 import core::mem;
@@ -10,18 +10,18 @@ enum Option<T> {
 
 impl<T> Option<T> {
     func is_some(self): bool {
-        _tag == 0
+        self._tag == 0
     }
 
     func is_none(self): bool {
-        _tag == 1
+        self._tag == 1
     }
 
     func value(self, default: T): T {
         if self.is_none() {
             default
         } else {
-            _0
+            self._0
         }
     }
 
@@ -29,7 +29,7 @@ impl<T> Option<T> {
         if self.is_none() {
             Option::None
         } else {
-            Option::Some(f(_0))
+            Option::Some(f(self._0))
         }
     }
 
@@ -37,7 +37,7 @@ impl<T> Option<T> {
         if self.is_none() {
             Option::None
         } else {
-            f(_0)
+            f(self._0)
         }
     }
 
@@ -45,7 +45,7 @@ impl<T> Option<T> {
         if self.is_none() {
             Result<T, E>::Err(err)
         } else {
-            Result<T, E>::Ok(_0)
+            Result<T, E>::Ok(self._0)
         }
     }
 }

@@ -1,0 +1,19 @@
+// Hosted time utilities backed by the C runtime.
+import builtins;
+
+// Milliseconds from an arbitrary monotonic epoch. Use differences to measure
+// elapsed time; this value is not a calendar timestamp.
+func now_ms(): int {
+    builtins::gobol_time_monotonic_ms()
+}
+
+// Milliseconds since 1970-01-01T00:00:00Z.
+func unix_time_ms(): int {
+    builtins::gobol_time_unix_ms()
+}
+
+// Sleep for the requested number of milliseconds. Returns 0 on success and
+// -1 if the duration is negative or the platform sleep operation fails.
+func sleep_ms(milliseconds: int): int {
+    builtins::gobol_time_sleep_ms(milliseconds)
+}

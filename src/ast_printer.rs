@@ -300,7 +300,13 @@ impl AstVisitor for AstPrinter {
 
     fn visit_declaration(&mut self, node: &Declaration) {
         self.print_indent();
-        print!("{} {} ", node.get_keyword(), node.get_name());
+        print!("{} ", node.get_keyword());
+        if node.is_tuple_pattern() {
+            print!("({})", node.get_names().join(", "));
+        } else {
+            print!("{}", node.get_name());
+        }
+        print!(" ");
         if let Some(t) = node.get_type() {
             print!(": ");
             t.accept(self);
@@ -741,14 +747,22 @@ impl AstVisitor for AstPrinter {
     }
 
     fn visit_array_literal(&mut self, node: &ArrayLiteral) {
-        print!("[");
+        if node.is_tuple() {
+            print!("(");
+        } else {
+            print!("[");
+        }
         for (i, elem) in node.get_elements().iter().enumerate() {
             if i > 0 {
                 print!(", ");
             }
             elem.accept(self);
         }
-        print!("]");
+        if node.is_tuple() {
+            print!(")");
+        } else {
+            print!("]");
+        }
     }
 
     fn visit_struct_literal(&mut self, node: &StructLiteral) {

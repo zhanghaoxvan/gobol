@@ -12,8 +12,8 @@
 //! [build]
 //! target = "aarch64-unknown-none"   # omitted => host target
 //! entry_point = "_start"            # default "main"; != "main" => no_main
-//! no_std = true                     # don't link the C runtime
-//! no_gc = true                      # global #[![no_gc]] file attribute
+//! std = false                       # disable hosted std by default
+//! gc = false                        # disable GC by default
 //! link_script = "kernel.ld"         # custom linker script
 //! opt_level = "release"             # debug | release | size
 //!
@@ -79,11 +79,16 @@ pub struct BuildConfig {
     /// implicit `no_main` behaviour for kernel / bare-metal builds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_point: Option<String>,
-    /// Don't link the C runtime. Implied for bare-metal triples.
+    /// Enable hosted standard-library support. Defaults to `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub std: Option<bool>,
+    /// Enable garbage-collected allocations. Defaults to `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc: Option<bool>,
+    /// Legacy inverse of `std`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_std: Option<bool>,
-    /// Globally disable GC by injecting a synthetic `#![no_gc]` file
-    /// attribute into the compiled source.
+    /// Legacy inverse of `gc`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_gc: Option<bool>,
     /// Path to a custom linker script (bare-metal / kernel builds).
@@ -142,13 +147,21 @@ impl BuildConfig {
             .map(|s| s.to_string())
             .or_else(|| self.link_script.clone());
 
+        let configured_std = self
+            .std
+            .or_else(|| self.no_std.map(|disabled| !disabled))
+            .unwrap_or(true);
+        let configured_gc = self
+            .gc
+            .or_else(|| self.no_gc.map(|disabled| !disabled))
+            .unwrap_or(true);
         let no_std = cli_no_std
-            || self.no_std.unwrap_or(false)
+            || !configured_std
             || target
                 .as_deref()
                 .map(crate::cranelift::target_is_bare_metal)
                 .unwrap_or(false);
-        let no_gc = cli_no_gc || self.no_gc.unwrap_or(false);
+        let no_gc = cli_no_gc || !configured_gc;
 
         // entry_point != "main" => implicit no_main.
         let no_main = entry_point.as_deref().map(|e| e != "main").unwrap_or(false);
@@ -238,6 +251,29 @@ mod tests {
         });
         assert_eq!(resolve_with(false, None, opt.clone()).opt_level, 1);
         assert_eq!(resolve_with(true, None, opt).opt_level, 2);
+    }
+
+    #[test]
+    fn std_and_gc_are_enabled_by_default() {
+        let resolved =
+            BuildConfig::default().resolve(None, None, None, false, false, false, None, &None);
+        assert!(!resolved.no_std);
+        assert!(!resolved.no_gc);
+    }
+
+    #[test]
+    fn positive_build_settings_override_legacy_inverse_fields() {
+        let config = BuildConfig {
+            std: Some(true),
+            gc: Some(true),
+            no_std: Some(true),
+            no_gc: Some(true),
+            ..BuildConfig::default()
+        };
+        let resolved = config.resolve(None, None, None, false, false, false, None, &None);
+
+        assert!(!resolved.no_std);
+        assert!(!resolved.no_gc);
     }
 
     #[test]

@@ -22,31 +22,29 @@ struct FuncArgs {
 impl new for FuncArgs {
     /// Wrap a raw slot buffer for index-based access.
     func new(count: int, data: int): FuncArgs {
-        _count = count;
-        _data  = data;
-        self
+        FuncArgs { _count: count, _data: data }
     }
 }
 
 impl FuncArgs {
     /// Number of variadic arguments in the call.
     func len(self): int {
-        _count
+        self._count
     }
 
     /// True when no variadic arguments were supplied.
     func is_empty(self): bool {
-        _count == 0
+        self._count == 0
     }
 
     /// Read the `i`-th argument as a raw machine word.
     /// The caller is responsible for reinterpreting the bits to the
     /// appropriate GoType (int, float, pointer-to-string, etc.).
     func get(self, i: int): int {
-        if i < 0 || i >= _count {
+        if i < 0 || i >= self._count {
             panic("FuncArgs index out of bounds");
         }
-        var slot: int = builtins::gobol_mem_load(_data + i * 8);
+        var slot: int = builtins::gobol_mem_load(self._data + i * 8);
         slot
     }
 }

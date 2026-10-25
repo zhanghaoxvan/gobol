@@ -29,6 +29,8 @@ pub struct AstBuilder {
     inject_prelude: bool,
     /// Use the C-runtime-free core prelude for `--no-std` builds.
     inject_core_prelude: bool,
+    default_std_enabled: bool,
+    requires_std_runtime: bool,
 }
 
 impl AstBuilder {
@@ -51,6 +53,8 @@ impl AstBuilder {
             file_attributes: Vec::new(),
             inject_prelude: false,
             inject_core_prelude: false,
+            default_std_enabled: true,
+            requires_std_runtime: true,
         }
     }
 
@@ -69,12 +73,42 @@ impl AstBuilder {
         self.inject_core_prelude = enabled;
     }
 
+    pub fn set_default_std_enabled(&mut self, enabled: bool) {
+        self.default_std_enabled = enabled;
+    }
+
+    pub fn requires_std_runtime(&self) -> bool {
+        self.requires_std_runtime
+    }
+
     pub fn build(&mut self) -> Option<Box<Program>> {
         self.root = None;
         let mut program = self.parse_program();
-        if self.inject_core_prelude {
+        let file_std = Attribute::get_feature_setting(&program.attributes, "std")
+            .unwrap_or(self.default_std_enabled);
+        self.requires_std_runtime = file_std
+            || program.get_statements().iter().any(|statement| {
+                if let Some(function) = statement.as_any().downcast_ref::<Function>() {
+                    return Attribute::get_feature_setting(function.get_attributes(), "std")
+                        .unwrap_or(file_std);
+                }
+                if let Some(impl_block) = statement.as_any().downcast_ref::<ImplBlock>() {
+                    let impl_std =
+                        Attribute::get_feature_setting(impl_block.get_attributes(), "std")
+                            .unwrap_or(file_std);
+                    return impl_block.get_items().iter().any(|item| {
+                        let function = match item {
+                            ImplItem::Method(function) | ImplItem::Convert(function) => function,
+                        };
+                        Attribute::get_feature_setting(function.get_attributes(), "std")
+                            .unwrap_or(impl_std)
+                    });
+                }
+                false
+            });
+        if !file_std && self.inject_core_prelude {
             self.inject_core_prelude_modules(&mut program);
-        } else if self.inject_prelude {
+        } else if file_std && self.inject_prelude {
             self.inject_basic_prelude(&mut program);
         }
         self.root = Some(Box::new(program));
@@ -183,6 +217,12 @@ impl AstBuilder {
                 } else if self.match_type(&TokenType::String) {
                     let val = self.current_token().value.clone();
                     self.advance();
+                    if attr.value.is_none() {
+                        attr.value = Some(val.clone());
+                    }
+                    attr.values.push(val);
+                } else if self.match_type(&TokenType::Keyword) {
+                    let val = self.parse_attribute_value();
                     if attr.value.is_none() {
                         attr.value = Some(val.clone());
                     }
@@ -492,7 +532,9 @@ impl AstBuilder {
         let mut merged = Vec::with_capacity(self.file_attributes.len() + attrs.len());
         for fa in &self.file_attributes {
             if !local_names.iter().any(|n| n == &fa.name) {
-                merged.push(fa.clone());
+                let mut inherited = fa.clone();
+                inherited.inherited = true;
+                merged.push(inherited);
             }
         }
         merged.append(&mut attrs);
@@ -1366,18 +1408,7 @@ impl AstBuilder {
         let mut return_type = None;
         if self.match_value(":") {
             self.advance();
-            if self.match_value("(") {
-                // Tuple return type - skip for now
-                self.advance();
-                return_type = self.parse_type();
-                while self.match_value(",") {
-                    self.advance();
-                    self.parse_type();
-                }
-                self.consume_value(")", "Expected ')' closing tuple type");
-            } else {
-                return_type = self.parse_type();
-            }
+            return_type = self.parse_type();
         }
 
         // If { follows, parse body; otherwise just declaration
@@ -1568,6 +1599,31 @@ impl AstBuilder {
             return self.parse_function_type();
         }
 
+        if self.match_value("(") {
+            self.advance();
+            if self.match_value(")") {
+                self.advance();
+                return Some(Box::new(BasicType::new("()")));
+            }
+
+            let first = self.parse_type()?;
+            if !self.match_value(",") {
+                self.consume_value(")", "Expected ')' after parenthesized type");
+                return Some(first);
+            }
+
+            let mut elements = vec![first];
+            while self.match_value(",") {
+                self.advance();
+                if self.match_value(")") {
+                    break;
+                }
+                elements.push(self.parse_type()?);
+            }
+            self.consume_value(")", "Expected ')' after tuple type");
+            return Some(Box::new(GenericType::new("tuple", elements)));
+        }
+
         if self.match_value("&") {
             self.advance();
             let referent = self.parse_type()?;
@@ -1603,7 +1659,11 @@ impl AstBuilder {
                 }
                 self.consume_value(")", "Expected ')' after tuple type");
                 self.consume_value("]", "Expected ']' after tuple type");
-                return Some(Box::new(GenericType::new("tuple", args)));
+                let tuple_type = Box::new(GenericType::new("tuple", args));
+                return Some(Box::new(ArrayType::new_nested(
+                    tuple_type,
+                    Box::new(NumberLiteral::new(0.0)),
+                )));
             }
             if !self.match_type(&TokenType::Keyword) && !self.match_type(&TokenType::Identifier) {
                 self.log_error("Expected type name after '['");
@@ -1779,13 +1839,38 @@ impl AstBuilder {
         let keyword = self.current_token().value.clone();
         self.advance();
 
-        if !self.match_type(&TokenType::Identifier) {
-            self.log_error("Expected identifier in declaration");
-            return None;
+        let tuple_pattern = self.match_value("(");
+        let mut names = Vec::new();
+        if tuple_pattern {
+            self.advance();
+            loop {
+                if !self.match_type(&TokenType::Identifier) {
+                    self.log_error("Expected identifier in tuple declaration");
+                    return None;
+                }
+                names.push(self.current_token().value.clone());
+                self.advance();
+                if !self.match_value(",") {
+                    break;
+                }
+                self.advance();
+                if self.match_value(")") {
+                    break;
+                }
+            }
+            self.consume_value(")", "Expected ')' after tuple declaration");
+            if names.is_empty() {
+                self.log_error("Tuple declaration requires at least one binding");
+                return None;
+            }
+        } else {
+            if !self.match_type(&TokenType::Identifier) {
+                self.log_error("Expected identifier in declaration");
+                return None;
+            }
+            names.push(self.current_token().value.clone());
+            self.advance();
         }
-
-        let var_name = self.current_token().value.clone();
-        self.advance();
 
         let mut var_type = None;
         if self.match_value(":") {
@@ -1798,15 +1883,28 @@ impl AstBuilder {
             self.advance();
             initializer = self.parse_expression();
         }
+        if tuple_pattern && initializer.is_none() {
+            self.log_error("Tuple declaration requires an initializer");
+            return None;
+        }
 
         self.consume_end_of_line();
 
-        Some(Box::new(Declaration::new(
-            keyword,
-            var_name,
-            var_type,
-            initializer,
-        )))
+        if tuple_pattern {
+            Some(Box::new(Declaration::new_tuple(
+                keyword,
+                names,
+                var_type,
+                initializer,
+            )))
+        } else {
+            Some(Box::new(Declaration::new(
+                keyword,
+                names.into_iter().next().unwrap(),
+                var_type,
+                initializer,
+            )))
+        }
     }
 
     /// Desugar `a[i] = v` → `a.index_mut(i).write(v)`.
@@ -2455,7 +2553,7 @@ impl AstBuilder {
                     elements.push(self.parse_expression()?);
                 }
                 self.consume_value(")", "Expected ')' after tuple expression");
-                return Some(Box::new(ArrayLiteral::new(elements)));
+                return Some(Box::new(ArrayLiteral::new_tuple(elements)));
             }
             let expr = first;
             while self.match_value(",") {
@@ -2520,8 +2618,14 @@ impl AstBuilder {
         self.advance(); // consume '{'
 
         let mut fields: Vec<StructFieldInit> = Vec::new();
+        self.consume_end_of_line();
 
         while !self.match_value("}") && !self.error_occurred {
+            self.consume_end_of_line();
+            if self.match_value("}") {
+                break;
+            }
+
             // Peek ahead: if we see `identifier :`, it's a named field
             if self.match_type(&TokenType::Identifier) && self.peek_next_token().value == ":" {
                 let name = self.current_token().value.clone();
@@ -2537,6 +2641,7 @@ impl AstBuilder {
 
             if self.match_value(",") {
                 self.advance();
+                self.consume_end_of_line();
             } else {
                 break;
             }
@@ -2965,6 +3070,11 @@ impl AstBuilder {
         }
         self.consume_value(">", "Expected '>' after generic arguments");
 
+        if self.match_value("{") {
+            let generic_name = format!("{}<{}>", name, type_args.join(", "));
+            return self.parse_struct_literal(Box::new(Identifier::new(generic_name)));
+        }
+
         // 处理泛型类型后的 `::method(args)` 调用链，如 `Ref<T>::new(addr)`
         if self.match_value("::") {
             self.advance(); // consume '::'
@@ -3048,7 +3158,7 @@ mod tests {
 
     #[test]
     fn no_std_injects_only_core_prelude() {
-        let mut builder = AstBuilder::new(Lexer::new("func main() {}"));
+        let mut builder = AstBuilder::new(Lexer::new("#![std(false)]\nfunc main() {}"));
         builder.set_inject_prelude(true);
         builder.set_inject_core_prelude(true);
 
@@ -3068,6 +3178,58 @@ mod tests {
 
         assert!(imports.contains(&"basic::io".to_string()));
         assert!(!imports.contains(&"core".to_string()));
+    }
+
+    #[test]
+    fn file_std_attribute_overrides_manifest_default() {
+        let mut builder = AstBuilder::new(Lexer::new("#![std(true)]\nfunc main() {}"));
+        builder.set_default_std_enabled(false);
+        builder.set_inject_prelude(true);
+        builder.set_inject_core_prelude(true);
+
+        let program = builder.build().expect("program should parse");
+
+        assert!(builder.requires_std_runtime());
+        assert!(imported_modules(&program).contains(&"basic::io".to_string()));
+    }
+
+    #[test]
+    fn node_std_attribute_enables_runtime_without_changing_file_prelude() {
+        let mut builder =
+            AstBuilder::new(Lexer::new("#![std(false)]\n#[std(true)]\nfunc main() {}\n"));
+        builder.set_inject_prelude(true);
+        builder.set_inject_core_prelude(true);
+
+        let program = builder.build().expect("program should parse");
+
+        assert!(builder.requires_std_runtime());
+        assert_eq!(imported_modules(&program), ["core"]);
+    }
+
+    #[test]
+    fn legacy_feature_attributes_are_overridable() {
+        let mut builder = AstBuilder::new(Lexer::new(
+            "#![no_std]\n#![no_gc]\n#[no_std(false)]\n#[no_gc(false)]\nfunc main() {}\n",
+        ));
+        let program = builder.build().expect("program should parse");
+        let function = program
+            .get_statements()
+            .iter()
+            .find_map(|statement| statement.as_any().downcast_ref::<Function>())
+            .expect("function");
+
+        assert_eq!(
+            Attribute::get_feature_setting(&program.attributes, "std"),
+            Some(false)
+        );
+        assert_eq!(
+            Attribute::get_feature_setting(function.get_attributes(), "std"),
+            Some(true)
+        );
+        assert_eq!(
+            Attribute::get_feature_setting(function.get_attributes(), "gc"),
+            Some(true)
+        );
     }
 
     #[test]

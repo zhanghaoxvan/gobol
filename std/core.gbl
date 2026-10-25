@@ -1,6 +1,6 @@
 // Gobol core prelude. These modules use compiler intrinsics and Gobol code
 // only; they do not declare or call the hosted C runtime.
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 import core::byte;
 import core::char;

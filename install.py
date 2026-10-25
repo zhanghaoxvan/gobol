@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import shutil
+import filecmp
 import platform
 import subprocess
 from pathlib import Path
@@ -212,6 +213,32 @@ def broadcast_env_change():
             HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, None
         )
 
+def same_directory_contents(left, right):
+    left_files = {
+        path.relative_to(left)
+        for path in left.rglob("*")
+        if path.is_file()
+    }
+    right_files = {
+        path.relative_to(right)
+        for path in right.rglob("*")
+        if path.is_file()
+    }
+    return left_files == right_files and all(
+        filecmp.cmp(left / relative, right / relative, shallow=False)
+        for relative in left_files
+    )
+
+def remove_duplicate_legacy_std(legacy_std, installed_std):
+    if (
+        not legacy_std.is_dir()
+        or legacy_std.is_symlink()
+        or not same_directory_contents(legacy_std, installed_std)
+    ):
+        return False
+    shutil.rmtree(legacy_std)
+    return True
+
 # ==================== TUI Task Functions ====================
 
 def task_build_and_install(no_build=False, install_dir=None, pause=True):
@@ -282,6 +309,17 @@ def task_build_and_install(no_build=False, install_dir=None, pause=True):
             shutil.rmtree(dst_std)
         shutil.copytree(src_std, dst_std)
         print_status(f"std/ -> {dst_std}", "ok")
+
+        # Older installers placed std directly under GOBOL_HOME. Keep the
+        # current lib/std layout as canonical and remove only an exact copy.
+        legacy_std = install_dir / "std"
+        if remove_duplicate_legacy_std(legacy_std, dst_std):
+            print_status(f"Removed duplicate legacy std/ -> {legacy_std}", "ok")
+        elif legacy_std.is_dir() and not legacy_std.is_symlink():
+            print_status(
+                f"Preserving non-identical legacy std/ directory: {legacy_std}",
+                "warn",
+            )
     else:
         print_status("std/ directory not found", "warn")
     

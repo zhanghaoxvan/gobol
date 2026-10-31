@@ -2267,6 +2267,8 @@ impl CraneliftBackend {
             "&" => bcx.ins().band(l, r),
             "|" => bcx.ins().bor(l, r),
             "^" => bcx.ins().bxor(l, r),
+            "<<" => bcx.ins().ishl(l, r),
+            ">>" => bcx.ins().sshr(l, r),
             _ => {
                 let _ = format!("unsupported operator: {}", op);
                 bcx.ins().iconst(types::I64, 0)
@@ -2388,6 +2390,7 @@ impl CraneliftBackend {
                 let one = bcx.ins().iconst(types::I8, 1);
                 bcx.ins().bxor(b, one)
             }
+            "~" => bcx.ins().bnot(v),
             "*" => {
                 let DataType::Pointer(inner) = ty else {
                     return Err(format!("cannot dereference non-pointer type '{}'", ty));

@@ -427,6 +427,10 @@ impl Lexer {
             }
             '&' => {
                 self.consume();
+                if self.peek() == '=' {
+                    self.consume();
+                    return Token::with_pos(TokenType::Operator, "&=", tok_line, tok_col);
+                }
                 if self.peek() == '&' {
                     self.consume();
                     return Token::with_pos(TokenType::Operator, "&&", tok_line, tok_col);
@@ -436,11 +440,27 @@ impl Lexer {
             }
             '|' => {
                 self.consume();
+                if self.peek() == '=' {
+                    self.consume();
+                    return Token::with_pos(TokenType::Operator, "|=", tok_line, tok_col);
+                }
                 if self.peek() == '|' {
                     self.consume();
                     return Token::with_pos(TokenType::Operator, "||", tok_line, tok_col);
                 }
-                Token::with_pos(TokenType::Unknown, "|", tok_line, tok_col)
+                Token::with_pos(TokenType::Operator, "|", tok_line, tok_col)
+            }
+            '^' => {
+                self.consume();
+                if self.peek() == '=' {
+                    self.consume();
+                    return Token::with_pos(TokenType::Operator, "^=", tok_line, tok_col);
+                }
+                Token::with_pos(TokenType::Operator, "^", tok_line, tok_col)
+            }
+            '~' => {
+                self.consume();
+                Token::with_pos(TokenType::Operator, "~", tok_line, tok_col)
             }
             '!' => {
                 self.consume();

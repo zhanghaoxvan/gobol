@@ -705,6 +705,35 @@ func to_str(self): str {
 
 ## 10. Operator Overloading / 运算符重载
 
+### 10.1 Integer Bitwise Operators / 整数位运算
+
+Integer expressions support bitwise AND (`&`), OR (`|`), XOR (`^`), NOT
+(`~`), left shift (`<<`), and arithmetic right shift (`>>`). Compound
+assignments `&=`, `|=`, `^=`, `<<=`, and `>>=` are also available. These
+operators require `int` operands.
+
+Logical `&&` and `||` bind less tightly than bitwise operators. Precedence,
+from lower to higher among the listed operators, is `|`, `^`, `&`, equality,
+comparison, shifts, addition, and multiplication. Unary `~` binds more tightly
+than binary operators.
+
+```gobol
+func main() {
+    var flags = 1 | 2;
+    flags |= 4
+    io::println(flags & 5);   // 5
+    io::println(1 << 3);      // 8
+    io::println(~0);          // -1
+}
+```
+
+整数表达式支持按位与（`&`）、或（`|`）、异或（`^`）、取反（`~`）、左移
+（`<<`）和算术右移（`>>`）。同时支持 `&=`、`|=`、`^=`、`<<=` 和 `>>=`
+复合赋值。这些运算符的操作数必须是 `int`。
+
+优先级从低到高依次为：`|`、`^`、`&`、相等比较、关系比较、移位、加减、乘除。
+逻辑运算符 `&&` 和 `||` 的优先级低于位运算；一元 `~` 的优先级高于二元运算符。
+
 ```gobol
 // Operators are provided by traits rather than operator declarations.
 impl std::ops::Add for Point {

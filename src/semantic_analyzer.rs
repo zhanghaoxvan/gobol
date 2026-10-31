@@ -3222,7 +3222,10 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         // 处理复合赋值运算符 +=, -=, *=, /=
-        if op == "+=" || op == "-=" || op == "*=" || op == "/=" {
+        if matches!(
+            op,
+            "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+        ) {
             let mut is_assignable = false;
             let mut var_name = String::new();
 
@@ -3265,7 +3268,17 @@ impl AstVisitor for SemanticAnalyzer {
             }
 
             // 检查类型兼容性
-            let base_op = &op[0..1];
+            let base_op = op.strip_suffix('=').unwrap_or(op);
+
+            if matches!(base_op, "&" | "|" | "^" | "<<" | ">>") {
+                if left_type != DataType::Int || right_type != DataType::Int {
+                    self.error(&format!("Operator '{}' requires int operands", op));
+                    self.type_stack.push(DataType::Unknown);
+                    return;
+                }
+                self.type_stack.push(DataType::Int);
+                return;
+            }
 
             // 字符串拼接
             if base_op == "+" && (left_type == DataType::Str || right_type == DataType::Str) {
@@ -3355,6 +3368,16 @@ impl AstVisitor for SemanticAnalyzer {
             return;
         }
 
+        if matches!(op, "&" | "|" | "^" | "<<" | ">>") {
+            if left_type != DataType::Int || right_type != DataType::Int {
+                self.error(&format!("Operator '{}' requires int operands", op));
+                self.type_stack.push(DataType::Unknown);
+                return;
+            }
+            self.type_stack.push(DataType::Int);
+            return;
+        }
+
         if op == ".." {
             // Range literal: a..b → Range struct. Ensure Range is declared.
             if !self.struct_fields.contains_key("Range") {
@@ -3418,6 +3441,13 @@ impl AstVisitor for SemanticAnalyzer {
                 self.error("Logical not '!' requires boolean operand");
             }
             self.type_stack.push(DataType::Bool);
+        } else if op == "~" {
+            if operand_type != DataType::Int {
+                self.error("Bitwise not '~' requires int operand");
+                self.type_stack.push(DataType::Unknown);
+            } else {
+                self.type_stack.push(DataType::Int);
+            }
         } else if op == "*" {
             match operand_type {
                 DataType::Pointer(inner) => self.type_stack.push(*inner),

@@ -89,6 +89,31 @@ func main() {
 }
 
 #[test]
+fn test_integer_bitwise_operators_and_assignments() {
+    let result = run_inline_test(
+        r#"func main() {
+    io::println(1 | 2 ^ 3 & 1);
+    io::println(1 + 2 << 2);
+    io::println(20 >> 2);
+    io::println(~0);
+
+    var value = 12;
+    value &= 10;
+    value |= 1;
+    value ^= 3;
+    value <<= 1;
+    value >>= 2;
+    io::println(value);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        ["3", "12", "5", "-1", "5"]
+    );
+}
+
+#[test]
 fn test_tuple_immutability_and_bounds_are_semantic_errors() {
     let immutable = run_inline_test(
         r#"func main() {

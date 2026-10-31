@@ -403,7 +403,7 @@ impl IRBuilder {
             ">" => Some("gt"),
             "<=" => Some("le"),
             ">=" => Some("ge"),
-            _ => None, // &&, ||, &, |, ^ stay as Binary
+            _ => None, // logical, bitwise, and shift operators stay as Binary
         }
     }
 
@@ -1267,6 +1267,11 @@ impl IRBuilder {
                 ">=" => Some(LitValue::Bool(a >= b)),
                 "&&" => Some(LitValue::Bool(a != 0 && b != 0)),
                 "||" => Some(LitValue::Bool(a != 0 || b != 0)),
+                "&" => Some(LitValue::Int(a & b)),
+                "|" => Some(LitValue::Int(a | b)),
+                "^" => Some(LitValue::Int(a ^ b)),
+                "<<" => Some(LitValue::Int(a.wrapping_shl((b as u32) & 63))),
+                ">>" => Some(LitValue::Int(a.wrapping_shr((b as u32) & 63))),
                 _ => None,
             },
             (LitValue::Float(a), LitValue::Float(b)) => match op {
@@ -1310,6 +1315,7 @@ impl IRBuilder {
             LitValue::Int(n) => match op {
                 "-" => Some(LitValue::Int(-n)),
                 "!" => Some(LitValue::Bool(n == 0)),
+                "~" => Some(LitValue::Int(!n)),
                 _ => None,
             },
             LitValue::Float(f) => match op {
@@ -2308,7 +2314,10 @@ impl AstVisitor for IRBuilder {
         let op = node.get_operator().to_string();
 
         // 处理赋值
-        if op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=" {
+        if matches!(
+            op.as_str(),
+            "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+        ) {
             let right = node.get_right().unwrap();
             right.accept(self);
             let right_val = self.pop_expr();
@@ -2322,7 +2331,7 @@ impl AstVisitor for IRBuilder {
             let value = if op == "=" {
                 right_val
             } else {
-                let real_op = &op[..1]; // "+=" → "+", "-=" → "-", etc.
+                let real_op = op.strip_suffix('=').unwrap_or(&op);
                 left.accept(self); // push left again as the value operand
                 let left_val = self.pop_expr();
                 // Convert to method call via trait

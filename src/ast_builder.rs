@@ -599,7 +599,7 @@ impl AstBuilder {
         let is_expr_operator = self.match_type(&TokenType::Operator)
             && matches!(
                 self.current_token().value.as_str(),
-                "(" | "!" | "-" | "+" | "&" | "*" | "[" | "{"
+                "(" | "!" | "~" | "-" | "+" | "&" | "*" | "[" | "{"
             );
         if self.match_type(&TokenType::Identifier)
             || self.match_type(&TokenType::Number)
@@ -2245,11 +2245,20 @@ impl AstBuilder {
             || self.match_value("-=")
             || self.match_value("*=")
             || self.match_value("/=")
+            || self.match_value("%=")
+            || self.match_value("&=")
+            || self.match_value("|=")
+            || self.match_value("^=")
         {
             let op = self.current_token().value.clone();
             self.advance();
             let value = self.parse_assignment();
             expr = Box::new(BinaryExpression::new(Some(expr), op, value));
+        } else if let Some(op) = self.shift_assignment_operator_at_current() {
+            self.advance();
+            self.advance();
+            let value = self.parse_assignment();
+            expr = Box::new(BinaryExpression::new(Some(expr), format!("{}=", op), value));
         }
 
         Some(expr)
@@ -2269,9 +2278,48 @@ impl AstBuilder {
     }
 
     fn parse_logical_and(&mut self) -> Option<Box<dyn Expression>> {
-        let mut expr = self.parse_equality()?;
+        let mut expr = self.parse_bitwise_or()?;
 
         while self.match_value("&&") {
+            let op = self.current_token().value.clone();
+            self.advance();
+            let right = self.parse_bitwise_or()?;
+            expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
+        }
+
+        Some(expr)
+    }
+
+    fn parse_bitwise_or(&mut self) -> Option<Box<dyn Expression>> {
+        let mut expr = self.parse_bitwise_xor()?;
+
+        while self.match_value("|") {
+            let op = self.current_token().value.clone();
+            self.advance();
+            let right = self.parse_bitwise_xor()?;
+            expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
+        }
+
+        Some(expr)
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Option<Box<dyn Expression>> {
+        let mut expr = self.parse_bitwise_and()?;
+
+        while self.match_value("^") {
+            let op = self.current_token().value.clone();
+            self.advance();
+            let right = self.parse_bitwise_and()?;
+            expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
+        }
+
+        Some(expr)
+    }
+
+    fn parse_bitwise_and(&mut self) -> Option<Box<dyn Expression>> {
+        let mut expr = self.parse_equality()?;
+
+        while self.match_value("&") {
             let op = self.current_token().value.clone();
             self.advance();
             let right = self.parse_equality()?;
@@ -2295,14 +2343,64 @@ impl AstBuilder {
     }
 
     fn parse_comparison(&mut self) -> Option<Box<dyn Expression>> {
-        let mut expr = self.parse_additive()?;
+        let mut expr = self.parse_shift()?;
 
         while self.match_value("<")
             || self.match_value("<=")
             || self.match_value(">")
             || self.match_value(">=")
         {
+            if self.shift_assignment_operator_at_current().is_some() {
+                break;
+            }
             let op = self.current_token().value.clone();
+            self.advance();
+            let right = self.parse_shift()?;
+            expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
+        }
+
+        Some(expr)
+    }
+
+    fn shift_operator_at_current(&self) -> Option<&'static str> {
+        let op = match self.current_token().value.as_str() {
+            "<" => "<<",
+            ">" => ">>",
+            _ => return None,
+        };
+        let first = self.current_token();
+        let second = self.peek_next_token();
+        if second.value != first.value
+            || first.line != second.line
+            || second.col != first.col + first.value.len() as i32
+        {
+            return None;
+        }
+        Some(op)
+    }
+
+    fn shift_assignment_operator_at_current(&self) -> Option<&'static str> {
+        let op = match self.current_token().value.as_str() {
+            "<" => ("<<", "<="),
+            ">" => (">>", ">="),
+            _ => return None,
+        };
+        let first = self.current_token();
+        let second = self.peek_next_token();
+        if second.value != op.1
+            || first.line != second.line
+            || second.col != first.col + first.value.len() as i32
+        {
+            return None;
+        }
+        Some(op.0)
+    }
+
+    fn parse_shift(&mut self) -> Option<Box<dyn Expression>> {
+        let mut expr = self.parse_additive()?;
+
+        while let Some(op) = self.shift_operator_at_current() {
+            self.advance();
             self.advance();
             let right = self.parse_additive()?;
             expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
@@ -2355,6 +2453,7 @@ impl AstBuilder {
             || self.match_value("+")
             || self.match_value("&")
             || self.match_value("*")
+            || self.match_value("~")
         {
             let op = self.current_token().value.clone();
             self.advance();

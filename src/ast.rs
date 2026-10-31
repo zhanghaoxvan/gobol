@@ -11,7 +11,6 @@ pub struct Attribute {
     pub value: Option<String>,
     pub values: Vec<String>,
     pub named: Vec<(String, String)>,
-    pub inherited: bool,
 }
 
 impl Attribute {
@@ -21,7 +20,6 @@ impl Attribute {
             value: None,
             values: Vec::new(),
             named: Vec::new(),
-            inherited: false,
         }
     }
 
@@ -54,23 +52,6 @@ impl Attribute {
                 .iter()
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.as_str())
-        })
-    }
-
-    pub fn get_feature_setting(attrs: &[Attribute], feature: &str) -> Option<bool> {
-        let legacy_name = match feature {
-            "std" => "no_std",
-            "gc" => "no_gc",
-            _ => return None,
-        };
-        attrs.iter().fold(None, |setting, attr| {
-            if attr.name == feature {
-                Some(attr.value.as_deref().map_or(true, |v| v != "false"))
-            } else if attr.name == legacy_name {
-                Some(!attr.value.as_deref().map_or(true, |v| v == "true"))
-            } else {
-                setting
-            }
         })
     }
 }
@@ -154,7 +135,6 @@ pub trait AstVisitor {
     fn visit_grouped_expression(&mut self, _node: &GroupedExpression) {}
     fn visit_identifier(&mut self, _node: &Identifier) {}
     fn visit_number_literal(&mut self, _node: &NumberLiteral) {}
-    fn visit_character_literal(&mut self, _node: &CharacterLiteral) {}
     fn visit_string_literal(&mut self, _node: &StringLiteral) {}
     fn visit_boolean_literal(&mut self, _node: &BooleanLiteral) {}
     fn visit_null_literal(&mut self, _node: &NullLiteral) {}
@@ -1641,8 +1621,6 @@ impl Statement for ContinueStatement {
 pub struct Declaration {
     keyword: String,
     name: String,
-    names: Vec<String>,
-    tuple_pattern: bool,
     r#type: Option<Box<dyn Type>>,
     initializer: Option<Box<dyn Expression>>,
     pub attributes: Vec<Attribute>,
@@ -1658,25 +1636,6 @@ impl Declaration {
         Declaration {
             keyword: keyword.into(),
             name: name.into(),
-            names: Vec::new(),
-            tuple_pattern: false,
-            r#type,
-            initializer,
-            attributes: Vec::new(),
-        }
-    }
-
-    pub fn new_tuple(
-        keyword: impl Into<String>,
-        names: Vec<String>,
-        r#type: Option<Box<dyn Type>>,
-        initializer: Option<Box<dyn Expression>>,
-    ) -> Self {
-        Declaration {
-            keyword: keyword.into(),
-            name: names.first().cloned().unwrap_or_default(),
-            names,
-            tuple_pattern: true,
             r#type,
             initializer,
             attributes: Vec::new(),
@@ -1689,18 +1648,6 @@ impl Declaration {
 
     pub fn get_name(&self) -> &str {
         &self.name
-    }
-
-    pub fn get_names(&self) -> &[String] {
-        if self.tuple_pattern {
-            &self.names
-        } else {
-            std::slice::from_ref(&self.name)
-        }
-    }
-
-    pub fn is_tuple_pattern(&self) -> bool {
-        self.tuple_pattern
     }
 
     pub fn get_type(&self) -> Option<&dyn Type> {
@@ -2290,43 +2237,6 @@ impl Expression for NumberLiteral {
     }
 }
 
-// ==================== CharacterLiteral ====================
-
-pub struct CharacterLiteral {
-    value: char,
-    pub attributes: Vec<Attribute>,
-}
-
-impl CharacterLiteral {
-    pub fn new(value: char) -> Self {
-        Self {
-            value,
-            attributes: Vec::new(),
-        }
-    }
-
-    pub fn get_value(&self) -> char {
-        self.value
-    }
-}
-
-impl_attributable!(CharacterLiteral);
-
-impl AstNode for CharacterLiteral {
-    fn accept(&self, visitor: &mut dyn AstVisitor) {
-        visitor.visit_character_literal(self);
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl Expression for CharacterLiteral {
-    fn as_expression(&self) -> &dyn Expression {
-        self
-    }
-}
-
 // ==================== StringLiteral ====================
 
 pub struct StringLiteral {
@@ -2357,14 +2267,6 @@ impl StringLiteral {
                     }
                     '"' => {
                         res.push('"');
-                        i += 1;
-                    }
-                    'r' => {
-                        res.push('\r');
-                        i += 1;
-                    }
-                    '0' => {
-                        res.push('\0');
                         i += 1;
                     }
                     _ => res.push(chars[i]),
@@ -2998,7 +2900,6 @@ impl Expression for RangeExpression {
 
 pub struct ArrayLiteral {
     elements: Vec<Box<dyn Expression>>,
-    tuple: bool,
     pub attributes: Vec<Attribute>,
 }
 
@@ -3006,25 +2907,12 @@ impl ArrayLiteral {
     pub fn new(elements: Vec<Box<dyn Expression>>) -> Self {
         ArrayLiteral {
             elements,
-            tuple: false,
-            attributes: Vec::new(),
-        }
-    }
-
-    pub fn new_tuple(elements: Vec<Box<dyn Expression>>) -> Self {
-        ArrayLiteral {
-            elements,
-            tuple: true,
             attributes: Vec::new(),
         }
     }
 
     pub fn get_elements(&self) -> &Vec<Box<dyn Expression>> {
         &self.elements
-    }
-
-    pub fn is_tuple(&self) -> bool {
-        self.tuple
     }
 }
 

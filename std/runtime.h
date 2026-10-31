@@ -12,12 +12,13 @@
 #include "runtime/mem.h"
 #include "runtime/array.h"
 #include "runtime/math.h"
-#include "runtime/time.h"
 #include "runtime/fs.h"
 #include "runtime/net.h"
 #include "runtime/thread.h"
 #include "runtime/channel.h"
 #include "runtime/gc.h"
 #include "runtime/entry.h"
+
+char *getenv(const char *name);
 
 #endif /* GOBOL_RUNTIME_H */

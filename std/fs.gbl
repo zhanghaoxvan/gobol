@@ -81,11 +81,10 @@ func write_file(path: str, content: str) {
 func exists(path: str): bool;
 
 func try_read_to_string(path: str): Result<str, str> {
-    var opened = try_open(path, "r");
-    if opened.is_err() {
-        Result::Err(opened.take())
+    var file = File::open(path, "r");
+    if !file.is_valid() {
+        Result::Err("failed to open file")
     } else {
-        var file = opened.take();
         var result = file.try_read_all();
         file.close();
         result
@@ -93,11 +92,10 @@ func try_read_to_string(path: str): Result<str, str> {
 }
 
 func try_write_file(path: str, content: str): Result<int, str> {
-    var opened = try_open(path, "w");
-    if opened.is_err() {
-        Result::Err(opened.take())
+    var file = File::open(path, "w");
+    if !file.is_valid() {
+        Result::Err("failed to open file")
     } else {
-        var file = opened.take();
         var result = file.try_write(content);
         file.close();
         result

@@ -33,7 +33,6 @@ fn resolve_enum_payload_type(scrutinee: &DataType, declared: &DataType) -> DataT
             "float" => DataType::Float,
             "str" => DataType::Str,
             "bool" => DataType::Bool,
-            "char" => DataType::Char,
             other => DataType::Struct(other.to_string()),
         })
         .unwrap_or_else(|| declared.clone())
@@ -52,21 +51,17 @@ pub struct SemanticAnalyzer {
     error_formatter: Option<ErrorFormatter>,
     current_function: String,
     current_function_return_type: DataType,
-    current_function_std_enabled: bool,
     has_return_statement: bool,
     loop_depth: i32,
     current_module: String,
     type_stack: Vec<DataType>,
     struct_fields: HashMap<String, HashMap<String, DataType>>,
-    struct_generic_params: HashMap<String, Vec<String>>,
     current_impl_struct: Option<String>,
     lib_paths: Vec<String>,
     loaded_modules: HashSet<String>,
     loaded_programs: Vec<Box<Program>>,
     current_module_dir: Option<String>,
     module_aliases: HashMap<String, String>,
-    hosted_std_modules: HashSet<(String, String)>,
-    hosted_std_functions: HashSet<(String, String)>,
     /// Per-module visibility: module-name → set of module names that the
     /// module may address with a *bare* qualifier (`mod::fn`). Each loaded
     /// module only gets the modules it explicitly imports (plus the compiler
@@ -84,7 +79,6 @@ pub struct SemanticAnalyzer {
     /// Structured errors for LSP: (line, col, message)
     pub structured_errors: Vec<(i32, i32, String)>,
     diagnostic_tokens: Vec<Token>,
-    diagnostic_search_positions: HashMap<String, usize>,
     /// External libraries to link (e.g. "C", "m") from extern "C" blocks.
     pub extern_libs: Vec<String>,
     pub extern_links: Vec<ExternLink>,
@@ -139,21 +133,17 @@ impl SemanticAnalyzer {
             error_formatter: None,
             current_function: String::new(),
             current_function_return_type: DataType::None_,
-            current_function_std_enabled: true,
             has_return_statement: false,
             loop_depth: 0,
             current_module: String::new(),
             type_stack: Vec::new(),
             struct_fields: HashMap::new(),
-            struct_generic_params: HashMap::new(),
             current_impl_struct: None,
             lib_paths: vec!["lib".to_string()],
             loaded_modules: HashSet::new(),
             loaded_programs: Vec::new(),
             current_module_dir: None,
             module_aliases: HashMap::new(),
-            hosted_std_modules: HashSet::new(),
-            hosted_std_functions: HashSet::new(),
             visible_modules: HashMap::new(),
             current_generic_params: Vec::new(),
             build_mode: BuildMode::Debug,
@@ -161,7 +151,6 @@ impl SemanticAnalyzer {
             pending_trait_impls: Vec::new(),
             structured_errors: Vec::new(),
             diagnostic_tokens: Vec::new(),
-            diagnostic_search_positions: HashMap::new(),
             extern_libs: Vec::new(),
             extern_links: Vec::new(),
             target: String::new(),
@@ -181,7 +170,6 @@ impl SemanticAnalyzer {
     pub fn set_source(&mut self, source: &str) {
         let mut lexer = Lexer::new(source);
         self.diagnostic_tokens.clear();
-        self.diagnostic_search_positions.clear();
         loop {
             let token = lexer.get_next_token();
             if token.r#type == TokenType::EndOfFile {
@@ -498,8 +486,6 @@ impl SemanticAnalyzer {
         self.declare_program_signatures(program);
 
         // Clear impl_methods so that program.accept(self) can freshly register method bodies
-        self.current_function_std_enabled =
-            Attribute::get_feature_setting(&program.attributes, "std").unwrap_or(true);
         program.accept(self);
 
         if self.has_error {
@@ -678,123 +664,21 @@ impl SemanticAnalyzer {
         }
     }
 
-    fn error_position(&mut self, msg: &str) -> (i32, i32) {
+    fn error_position(&self, msg: &str) -> (i32, i32) {
         let needle = msg
             .split(['\'', '"'])
             .nth(1)
             .filter(|value| !value.is_empty());
         if let Some(needle) = needle {
-            let token_name = needle.rsplit("::").next().unwrap_or(needle);
-            if let Some((start, end)) = self.current_function_token_range() {
-                let key = format!(
-                    "{}:{}:{}:{}",
-                    self.current_module, self.current_function, start, token_name
-                );
-                let search_from = self
-                    .diagnostic_search_positions
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(start)
-                    .max(start);
-                if let Some(index) = (search_from..end).find(|&index| {
-                    self.diagnostic_tokens[index].value == token_name
-                        && self.diagnostic_token_matches_error(index, msg)
-                }) {
-                    self.diagnostic_search_positions.insert(key, index + 1);
-                    let token = &self.diagnostic_tokens[index];
-                    return (token.line, token.col);
-                }
-            }
             if let Some(token) = self
                 .diagnostic_tokens
                 .iter()
-                .enumerate()
-                .find(|(index, token)| {
-                    token.value == token_name && self.diagnostic_token_matches_error(*index, msg)
-                })
-                .map(|(_, token)| token)
+                .find(|token| token.value == needle)
             {
                 return (token.line, token.col);
             }
         }
         (1, 0)
-    }
-
-    fn current_function_token_range(&self) -> Option<(usize, usize)> {
-        if self.current_function.is_empty() {
-            return None;
-        }
-        for (index, token) in self.diagnostic_tokens.iter().enumerate() {
-            if token.value != "func"
-                || self
-                    .diagnostic_tokens
-                    .get(index + 1)
-                    .map(|name| name.value.as_str())
-                    != Some(self.current_function.as_str())
-            {
-                continue;
-            }
-            let body_start = (index + 2..self.diagnostic_tokens.len())
-                .find(|&i| self.diagnostic_tokens[i].value == "{")?;
-            let mut depth = 0usize;
-            for end in body_start..self.diagnostic_tokens.len() {
-                match self.diagnostic_tokens[end].value.as_str() {
-                    "{" => depth += 1,
-                    "}" => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return Some((body_start, end + 1));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            return Some((body_start, self.diagnostic_tokens.len()));
-        }
-        None
-    }
-
-    fn diagnostic_token_matches_error(&self, index: usize, msg: &str) -> bool {
-        let Some(token) = self.diagnostic_tokens.get(index) else {
-            return false;
-        };
-        if msg.contains("is not an array") {
-            return self
-                .diagnostic_tokens
-                .get(index + 1)
-                .map(|next| next.value.as_str())
-                == Some("[");
-        }
-        if msg.contains("Undeclared function") || msg.contains("cannot use hosted std") {
-            let mut next = index + 1;
-            while self
-                .diagnostic_tokens
-                .get(next)
-                .map(|token| token.value.as_str())
-                == Some("::")
-            {
-                next += 2;
-            }
-            if self
-                .diagnostic_tokens
-                .get(next)
-                .map(|candidate| candidate.value.as_str())
-                == Some("<")
-            {
-                while next < self.diagnostic_tokens.len()
-                    && self.diagnostic_tokens[next].value != ">"
-                {
-                    next += 1;
-                }
-                next += 1;
-            }
-            return self
-                .diagnostic_tokens
-                .get(next)
-                .map(|candidate| candidate.value.as_str())
-                == Some("(");
-        }
-        !token.value.is_empty()
     }
 
     /// Report a semantic error at a specific source position (for LSP).
@@ -825,12 +709,7 @@ impl SemanticAnalyzer {
                 return elem_type; // treated as element type (array)
             }
             if base == "tuple" {
-                return DataType::Tuple(
-                    gt.get_type_args()
-                        .iter()
-                        .map(|arg| self.get_data_type_from_ast(Some(&**arg)))
-                        .collect(),
-                );
+                return DataType::Array(Box::new(DataType::Unknown));
             }
             // PascalCase generic types (Vec<T>, Result<T, E>, etc.) — treat as struct
             return DataType::Struct(base.to_string());
@@ -872,7 +751,6 @@ impl SemanticAnalyzer {
             "float" => DataType::Float,
             "str" => DataType::Str,
             "bool" => DataType::Bool,
-            "char" => DataType::Char,
             // byte and unit aliases
             "byte" => DataType::Byte,
             "()" => DataType::None_,
@@ -999,13 +877,6 @@ impl SemanticAnalyzer {
                     other => self.unify_generic_pattern(inner, other, bindings),
                 }
             }
-            DataType::Tuple(elements) => {
-                if let DataType::Tuple(actual_elements) = actual {
-                    for (pattern, actual) in elements.iter().zip(actual_elements) {
-                        self.unify_generic_pattern(pattern, actual, bindings);
-                    }
-                }
-            }
             DataType::Nullable(inner) => {
                 if let DataType::Nullable(a) = actual {
                     self.unify_generic_pattern(inner, a, bindings);
@@ -1027,50 +898,11 @@ impl SemanticAnalyzer {
             DataType::Array(inner) => {
                 DataType::Array(Box::new(self.substitute_generic_types(inner, bindings)))
             }
-            DataType::Tuple(elements) => DataType::Tuple(
-                elements
-                    .iter()
-                    .map(|element| self.substitute_generic_types(element, bindings))
-                    .collect(),
-            ),
             DataType::Nullable(inner) => {
                 DataType::Nullable(Box::new(self.substitute_generic_types(inner, bindings)))
             }
             _ => dt.clone(),
         }
-    }
-
-    fn struct_literal_generic_bindings(&self, type_name: &str) -> HashMap<String, DataType> {
-        let Some((base_name, arguments)) = type_name.split_once('<') else {
-            return HashMap::new();
-        };
-        let Some(parameters) = self.struct_generic_params.get(base_name) else {
-            return HashMap::new();
-        };
-        let arguments = arguments.trim_end_matches('>').split(',').map(str::trim);
-        parameters
-            .iter()
-            .zip(arguments)
-            .map(|(parameter, argument)| {
-                let ty = match argument {
-                    "int" => DataType::Int,
-                    "float" => DataType::Float,
-                    "str" => DataType::Str,
-                    "bool" => DataType::Bool,
-                    "char" => DataType::Char,
-                    "byte" => DataType::Byte,
-                    name if self
-                        .current_generic_params
-                        .iter()
-                        .any(|generic| generic == name) =>
-                    {
-                        DataType::Struct(name.to_string())
-                    }
-                    name => DataType::Struct(name.to_string()),
-                };
-                (parameter.clone(), ty)
-            })
-            .collect()
     }
 
     fn get_current_type(&self) -> DataType {
@@ -1499,21 +1331,8 @@ impl SemanticAnalyzer {
                 imported_mods.push(name.clone());
                 self.load_module(&name);
                 self.note_import(&name);
-                if name == "std" || name.starts_with("std::") || name.starts_with("basic::") {
-                    let module = self.current_module.clone();
-                    self.hosted_std_modules
-                        .insert((module.clone(), name.clone()));
-                    if let Some(short_name) = name.rsplit("::").next() {
-                        self.hosted_std_modules
-                            .insert((module.clone(), short_name.to_string()));
-                    }
-                }
                 if let Some(alias) = import_stmt.get_alias() {
                     self.module_aliases.insert(alias.to_string(), name.clone());
-                    if name == "std" || name.starts_with("std::") || name.starts_with("basic::") {
-                        self.hosted_std_modules
-                            .insert((self.current_module.clone(), alias.to_string()));
-                    }
                     // Also make the alias usable as a bare qualifier.
                     self.ensure_visible(&self.current_module.clone());
                     self.visible_modules
@@ -1535,13 +1354,6 @@ impl SemanticAnalyzer {
                         let return_type = sym.data_type.clone();
                         self.env
                             .declare_function(&name, &return_type, &self.current_module);
-                        if mod_name == "std"
-                            || mod_name.starts_with("std::")
-                            || mod_name.starts_with("basic::")
-                        {
-                            self.hosted_std_functions
-                                .insert((self.current_module.clone(), name.clone()));
-                        }
                         declared_funcs.push((name, return_type));
                     }
                 } else {
@@ -1556,15 +1368,6 @@ impl SemanticAnalyzer {
                                 &return_type,
                                 &self.current_module,
                             );
-                            if mod_name == "std"
-                                || mod_name.starts_with("std::")
-                                || mod_name.starts_with("basic::")
-                            {
-                                self.hosted_std_functions.insert((
-                                    self.current_module.clone(),
-                                    effective_name.to_string(),
-                                ));
-                            }
                             declared_funcs.push((effective_name.to_string(), return_type));
                         }
                     }
@@ -1585,8 +1388,6 @@ impl SemanticAnalyzer {
                 self.current_generic_params = prev_generic;
             } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
                 let struct_name = struct_def.get_name().to_string();
-                self.struct_generic_params
-                    .insert(struct_name.clone(), struct_def.get_generic_params().clone());
                 let prev_generic = self.current_generic_params.clone();
                 self.current_generic_params = struct_def.get_generic_params().clone();
                 let mut fields = HashMap::new();
@@ -1845,8 +1646,6 @@ impl AstVisitor for SemanticAnalyzer {
 
     fn visit_struct_definition(&mut self, node: &StructDefinition) {
         let struct_name = node.get_name().to_string();
-        self.struct_generic_params
-            .insert(struct_name.clone(), node.get_generic_params().clone());
         #[cfg(debug_assertions)]
         println!("  Struct definition: {}", struct_name);
 
@@ -2216,28 +2015,9 @@ impl AstVisitor for SemanticAnalyzer {
 
         self.load_module(&module_name);
         self.note_import(&module_name);
-        if module_name == "std"
-            || module_name.starts_with("std::")
-            || module_name.starts_with("basic::")
-        {
-            let current_module = self.current_module.clone();
-            self.hosted_std_modules
-                .insert((current_module.clone(), module_name.clone()));
-            if let Some(short_name) = module_name.rsplit("::").next() {
-                self.hosted_std_modules
-                    .insert((current_module.clone(), short_name.to_string()));
-            }
-        }
         if let Some(alias) = node.get_alias() {
             self.module_aliases
                 .insert(alias.to_string(), module_name.clone());
-            if module_name == "std"
-                || module_name.starts_with("std::")
-                || module_name.starts_with("basic::")
-            {
-                self.hosted_std_modules
-                    .insert((self.current_module.clone(), alias.to_string()));
-            }
             // Also make the alias usable as a bare qualifier.
             self.ensure_visible(&self.current_module.clone());
             self.visible_modules
@@ -2268,13 +2048,6 @@ impl AstVisitor for SemanticAnalyzer {
                 let return_type = sym.data_type.clone();
                 self.env
                     .declare_function(&name, &return_type, &self.current_module);
-                if module_name == "std"
-                    || module_name.starts_with("std::")
-                    || module_name.starts_with("basic::")
-                {
-                    self.hosted_std_functions
-                        .insert((self.current_module.clone(), name.clone()));
-                }
             }
             return;
         }
@@ -2289,13 +2062,6 @@ impl AstVisitor for SemanticAnalyzer {
                 let effective_name = alias.as_ref().unwrap_or(member_name);
                 self.env
                     .declare_function(effective_name, &return_type, &self.current_module);
-                if module_name == "std"
-                    || module_name.starts_with("std::")
-                    || module_name.starts_with("basic::")
-                {
-                    self.hosted_std_functions
-                        .insert((self.current_module.clone(), effective_name.to_string()));
-                }
             } else {
                 self.error(&format!(
                     "Cannot import '{}' from module '{}': member not found",
@@ -2368,13 +2134,10 @@ impl AstVisitor for SemanticAnalyzer {
         // Save context
         let prev_function = self.current_function.clone();
         let prev_return_type = self.current_function_return_type.clone();
-        let prev_std_enabled = self.current_function_std_enabled;
         let prev_has_return = self.has_return_statement;
 
         self.current_function = func_name;
         self.current_function_return_type = return_type.clone();
-        self.current_function_std_enabled =
-            Attribute::get_feature_setting(node.get_attributes(), "std").unwrap_or(true);
         self.has_return_statement = false;
 
         self.env.enter_scope();
@@ -2425,7 +2188,6 @@ impl AstVisitor for SemanticAnalyzer {
 
         self.current_function = prev_function;
         self.current_function_return_type = prev_return_type;
-        self.current_function_std_enabled = prev_std_enabled;
         self.has_return_statement = prev_has_return;
         self.current_generic_params = prev_generic_params;
     }
@@ -2518,41 +2280,6 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_declaration(&mut self, node: &Declaration) {
-        if node.is_tuple_pattern() {
-            let is_mut = node.get_keyword() == "var";
-            let Some(initializer) = node.get_initializer() else {
-                return;
-            };
-            initializer.accept(self);
-            let inferred_type = self.type_stack.pop().unwrap_or(DataType::Unknown);
-            let tuple_type = if let Some(declared) = node.get_type() {
-                let declared_type = self.get_data_type_from_ast(Some(declared));
-                self.check_type_compatibility(
-                    declared_type.clone(),
-                    inferred_type,
-                    "tuple destructuring initializer",
-                );
-                declared_type
-            } else {
-                inferred_type
-            };
-            let DataType::Tuple(elements) = tuple_type else {
-                self.error("Tuple destructuring requires a tuple initializer");
-                return;
-            };
-            if elements.len() != node.get_names().len() {
-                self.error(&format!(
-                    "Tuple destructuring expects {} values, got {}",
-                    node.get_names().len(),
-                    elements.len()
-                ));
-                return;
-            }
-            for (name, ty) in node.get_names().iter().zip(elements) {
-                self.env.declare_variable(name, &ty, is_mut);
-            }
-            return;
-        }
         let var_name = node.get_name().to_string();
         let is_mut = node.get_keyword() == "var";
 
@@ -2735,7 +2462,7 @@ impl AstVisitor for SemanticAnalyzer {
             if loop_vars.len() >= 2 {
                 let val_type = match &iter_type {
                     DataType::Struct(s) if s == "Range" => DataType::Int,
-                    DataType::Str => DataType::Char,
+                    DataType::Str => DataType::Str,
                     DataType::Array(elem) => (**elem).clone(),
                     _ => DataType::Int, // default for arrays
                 };
@@ -2810,17 +2537,22 @@ impl AstVisitor for SemanticAnalyzer {
         // Check for 'self' inside an impl block
         if name == "self" {
             if let Some(ref struct_name) = self.current_impl_struct {
-                if self.env.lookup_symbol("self").is_some() {
-                    self.type_stack.push(DataType::Struct(struct_name.clone()));
-                    return;
-                }
-                self.error("'self' used in a method without a self parameter");
-                self.type_stack.push(DataType::Unknown);
+                self.type_stack.push(DataType::Struct(struct_name.clone()));
                 return;
             }
             self.error("'self' used outside of impl block");
             self.type_stack.push(DataType::Unknown);
             return;
+        }
+
+        // Check for bare struct field access inside an impl block
+        if let Some(ref struct_name) = self.current_impl_struct {
+            if let Some(fields) = self.struct_fields.get(struct_name) {
+                if let Some(field_type) = fields.get(name) {
+                    self.type_stack.push(field_type.clone());
+                    return;
+                }
+            }
         }
 
         // Look up: bare name first (local vars/params shadow module-level),
@@ -2925,10 +2657,6 @@ impl AstVisitor for SemanticAnalyzer {
         }
     }
 
-    fn visit_character_literal(&mut self, _node: &CharacterLiteral) {
-        self.type_stack.push(DataType::Char);
-    }
-
     fn visit_string_literal(&mut self, _node: &StringLiteral) {
         self.type_stack.push(DataType::Str);
     }
@@ -2938,15 +2666,6 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_array_literal(&mut self, node: &ArrayLiteral) {
-        if node.is_tuple() {
-            let mut element_types = Vec::with_capacity(node.get_elements().len());
-            for elem in node.get_elements() {
-                elem.accept(self);
-                element_types.push(self.type_stack.pop().unwrap_or(DataType::Unknown));
-            }
-            self.type_stack.push(DataType::Tuple(element_types));
-            return;
-        }
         let mut first = true;
         let mut elem_type = DataType::Unknown;
         let contains_nested_array = node
@@ -3049,22 +2768,6 @@ impl AstVisitor for SemanticAnalyzer {
                         }
                     }
                 } else if let Some(member) = left.as_any().downcast_ref::<MemberAccess>() {
-                    if member.get_member().parse::<usize>().is_ok() {
-                        if let Some(object) = member.get_object() {
-                            if let Some(id) = object.as_any().downcast_ref::<Identifier>() {
-                                if let Some(symbol) = self.env.lookup_symbol(id.get_name()) {
-                                    if symbol.is_mut {
-                                        is_assignable = true;
-                                    } else {
-                                        self.error(&format!(
-                                            "Cannot assign to tuple in constant variable '{}'",
-                                            id.get_name()
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
                     // Check for self.field assignment inside impl block
                     if let Some(obj) = member.get_object() {
                         if let Some(obj_id) = obj.as_any().downcast_ref::<Identifier>() {
@@ -3222,10 +2925,7 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         // 处理复合赋值运算符 +=, -=, *=, /=
-        if matches!(
-            op,
-            "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
-        ) {
+        if op == "+=" || op == "-=" || op == "*=" || op == "/=" {
             let mut is_assignable = false;
             let mut var_name = String::new();
 
@@ -3268,17 +2968,7 @@ impl AstVisitor for SemanticAnalyzer {
             }
 
             // 检查类型兼容性
-            let base_op = op.strip_suffix('=').unwrap_or(op);
-
-            if matches!(base_op, "&" | "|" | "^" | "<<" | ">>") {
-                if left_type != DataType::Int || right_type != DataType::Int {
-                    self.error(&format!("Operator '{}' requires int operands", op));
-                    self.type_stack.push(DataType::Unknown);
-                    return;
-                }
-                self.type_stack.push(DataType::Int);
-                return;
-            }
+            let base_op = &op[0..1];
 
             // 字符串拼接
             if base_op == "+" && (left_type == DataType::Str || right_type == DataType::Str) {
@@ -3368,16 +3058,6 @@ impl AstVisitor for SemanticAnalyzer {
             return;
         }
 
-        if matches!(op, "&" | "|" | "^" | "<<" | ">>") {
-            if left_type != DataType::Int || right_type != DataType::Int {
-                self.error(&format!("Operator '{}' requires int operands", op));
-                self.type_stack.push(DataType::Unknown);
-                return;
-            }
-            self.type_stack.push(DataType::Int);
-            return;
-        }
-
         if op == ".." {
             // Range literal: a..b → Range struct. Ensure Range is declared.
             if !self.struct_fields.contains_key("Range") {
@@ -3441,13 +3121,6 @@ impl AstVisitor for SemanticAnalyzer {
                 self.error("Logical not '!' requires boolean operand");
             }
             self.type_stack.push(DataType::Bool);
-        } else if op == "~" {
-            if operand_type != DataType::Int {
-                self.error("Bitwise not '~' requires int operand");
-                self.type_stack.push(DataType::Unknown);
-            } else {
-                self.type_stack.push(DataType::Int);
-            }
         } else if op == "*" {
             match operand_type {
                 DataType::Pointer(inner) => self.type_stack.push(*inner),
@@ -3741,33 +3414,6 @@ impl AstVisitor for SemanticAnalyzer {
                 .find(|o| o.is_some())
                 .flatten()
         });
-
-        let module_uses_hosted_std = resolved_module_bare == "std"
-            || resolved_module_bare.starts_with("std::")
-            || resolved_module_bare.starts_with("basic::")
-            || self
-                .hosted_std_modules
-                .contains(&(self.current_module.clone(), resolved_module_bare.clone()));
-        let imported_hosted_function = self
-            .hosted_std_functions
-            .contains(&(self.current_module.clone(), func_name.clone()));
-        if !self.current_function_std_enabled
-            && sym_data_type.is_some()
-            && (module_uses_hosted_std || imported_hosted_function)
-        {
-            self.error(&format!(
-                "Call to '{}::{}' cannot use hosted std while std is disabled",
-                resolved_module_bare, func_name
-            ));
-            if let Some(args) = node.get_arguments() {
-                for arg in args {
-                    arg.accept(self);
-                    self.type_stack.pop();
-                }
-            }
-            self.type_stack.push(DataType::Unknown);
-            return;
-        }
 
         // If not found but it's a method call on a variable (e.g. arr.len, arr.add),
         // allow it with sensible return types
@@ -4135,13 +3781,7 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_struct_literal(&mut self, node: &StructLiteral) {
-        let literal_type_name = node.get_type_name().to_string();
-        let type_name = literal_type_name
-            .split('<')
-            .next()
-            .unwrap_or(&literal_type_name)
-            .to_string();
-        let generic_bindings = self.struct_literal_generic_bindings(&literal_type_name);
+        let type_name = node.get_type_name().to_string();
 
         // Look up struct definition
         let struct_fields = match self.struct_fields.get(&type_name) {
@@ -4187,7 +3827,7 @@ impl AstVisitor for SemanticAnalyzer {
 
                     let expected_type = struct_fields
                         .get(name)
-                        .map(|ty| self.substitute_generic_types(ty, &generic_bindings))
+                        .cloned()
                         .unwrap_or(DataType::Unknown);
                     if expected_type != DataType::Unknown && value_type != DataType::Unknown {
                         self.check_type_compatibility(
@@ -4253,7 +3893,7 @@ impl AstVisitor for SemanticAnalyzer {
 
                         let expected_type = struct_fields
                             .get(field_name)
-                            .map(|ty| self.substitute_generic_types(ty, &generic_bindings))
+                            .cloned()
                             .unwrap_or(DataType::Unknown);
                         if expected_type != DataType::Unknown && value_type != DataType::Unknown {
                             self.check_type_compatibility(
@@ -4277,22 +3917,11 @@ impl AstVisitor for SemanticAnalyzer {
         let obj_type = self.get_current_type();
         self.type_stack.pop();
 
-        if let Ok(index) = node.get_member().parse::<usize>() {
-            match obj_type {
-                DataType::Tuple(elements) => {
-                    if let Some(element) = elements.get(index) {
-                        self.type_stack.push(element.clone());
-                    } else {
-                        self.error(&format!(
-                            "Tuple index {} is out of bounds for tuple of size {}",
-                            index,
-                            elements.len()
-                        ));
-                        self.type_stack.push(DataType::Unknown);
-                    }
-                }
-                DataType::Array(element_type) => self.type_stack.push(*element_type),
-                _ => self.type_stack.push(DataType::Unknown),
+        if node.get_member().parse::<usize>().is_ok() {
+            if let DataType::Array(element_type) = obj_type {
+                self.type_stack.push(*element_type);
+            } else {
+                self.type_stack.push(DataType::Unknown);
             }
             return;
         }
@@ -4305,10 +3934,6 @@ impl AstVisitor for SemanticAnalyzer {
                 // Handle 'self.field' inside an impl block
                 if obj_name == "self" {
                     if let Some(ref struct_name) = self.current_impl_struct {
-                        if self.env.lookup_symbol("self").is_none() {
-                            self.type_stack.push(DataType::Unknown);
-                            return;
-                        }
                         if let Some(fields) = self.struct_fields.get(struct_name) {
                             if let Some(field_type) = fields.get(member) {
                                 self.type_stack.push(field_type.clone());
@@ -4459,7 +4084,7 @@ impl AstVisitor for SemanticAnalyzer {
         }
 
         if matches!(array_type, DataType::Str) {
-            self.type_stack.push(DataType::Char);
+            self.type_stack.push(DataType::Str);
             return;
         }
 
@@ -4597,43 +4222,6 @@ mod tests {
             Some("true")
         );
         assert!(link.values.is_empty());
-    }
-
-    #[test]
-    fn std_disabled_function_cannot_call_hosted_module() {
-        let source = r#"
-            import basic::io;
-            #[std(false)]
-            func main() {
-                io::println("blocked");
-            }
-        "#;
-        let mut builder = AstBuilder::new(Lexer::new(source.to_string()));
-        let program = builder.build().expect("expected AST");
-        let function = program
-            .get_statements()
-            .iter()
-            .find_map(|statement| statement.as_any().downcast_ref::<Function>())
-            .expect("function");
-        assert_eq!(
-            Attribute::get_feature_setting(function.get_attributes(), "std"),
-            Some(false)
-        );
-        let mut analyzer = SemanticAnalyzer::new();
-        let std_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("std")
-            .to_string_lossy()
-            .into_owned();
-        analyzer.set_lib_paths(vec![std_path]);
-
-        let analyzed = analyzer.analyze(&program);
-        assert!(
-            analyzer
-                .hosted_std_modules
-                .iter()
-                .any(|(_, module)| module == "io")
-        );
-        assert!(!analyzed);
     }
 
     // // Regression test for the macOS CI failure on `test_ffi_variadic`:

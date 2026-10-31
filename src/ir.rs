@@ -14,7 +14,6 @@ pub struct GobolIR {
     /// Module-level mutable `var` declarations, shared storage across all
     /// functions. Each entry is (name, type, initializer).
     pub globals: Vec<(String, DataType, Option<IRExpr>)>,
-    pub default_gc_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +42,7 @@ pub struct IRStruct {
     pub name: String,
     pub generic_params: Vec<String>,
     pub fields: Vec<IRField>,
-    /// Simple string attributes (e.g. "gc=false", "internal").
+    /// Simple string attributes (e.g. "no_gc", "internal").
     pub attributes: Vec<String>,
 }
 
@@ -72,10 +71,6 @@ pub enum IRStmt {
         name: String,
         ty: DataType,
         init: Option<IRExpr>,
-    },
-    TupleDestructure {
-        names: Vec<(String, DataType)>,
-        init: IRExpr,
     },
     Expression(IRExpr),
     Return(Option<IRExpr>),
@@ -145,7 +140,6 @@ pub enum IRExpr {
         index: Box<IRExpr>,
     },
     ArrayLiteral(Vec<IRExpr>),
-    TupleLiteral(Vec<IRExpr>),
     StructLiteral {
         name: String,
         fields: Vec<(String, IRExpr)>,
@@ -172,7 +166,6 @@ pub enum IRExpr {
 pub enum LitValue {
     Int(i64),
     Byte(u8),
-    Char(char),
     Float(f64),
     Bool(bool),
     Str(String),
@@ -234,7 +227,6 @@ impl IRBuilder {
                 impls: Vec::new(),
                 main_function: None,
                 globals: Vec::new(),
-                default_gc_enabled: true,
             },
             current_function: None,
             current_struct: None,
@@ -294,9 +286,6 @@ impl IRBuilder {
     }
 
     pub fn build(mut self, program: &Program) -> Result<GobolIR, Vec<String>> {
-        self.ir.default_gc_enabled =
-            Attribute::get_feature_setting(&program.attributes, "gc").unwrap_or(true);
-
         // 第一遍：收集结构体定义
         for stmt in program.get_statements() {
             if stmt.as_any().downcast_ref::<StructDefinition>().is_some() {
@@ -403,7 +392,7 @@ impl IRBuilder {
             ">" => Some("gt"),
             "<=" => Some("le"),
             ">=" => Some("ge"),
-            _ => None, // logical, bitwise, and shift operators stay as Binary
+            _ => None, // &&, ||, &, |, ^ stay as Binary
         }
     }
 
@@ -470,12 +459,7 @@ impl IRBuilder {
                 return elem;
             }
             if base_name == "tuple" {
-                return DataType::Tuple(
-                    gt.get_type_args()
-                        .iter()
-                        .map(|arg| self.ast_type_to_data_type(Some(&**arg)))
-                        .collect(),
-                );
+                return DataType::Array(Box::new(DataType::Unknown));
             }
             // 其他泛型类型当作结构体
             return DataType::Struct(base_name.to_string());
@@ -492,7 +476,6 @@ impl IRBuilder {
             "int" => DataType::Int,
             "float" => DataType::Float,
             "bool" => DataType::Bool,
-            "char" => DataType::Char,
             "str" => DataType::Str,
             "none" => DataType::None_,
             // byte and unit aliases
@@ -536,7 +519,7 @@ impl IRBuilder {
 
         let name = ty.get_name();
         // Only treat as generic param if lowercase AND not a built-in type
-        let is_builtin = matches!(name, "int" | "float" | "bool" | "str" | "none" | "tuple");
+        let is_builtin = matches!(name, "int" | "float" | "bool" | "str" | "none");
         if !is_builtin && name.chars().next().map_or(false, |c| c.is_lowercase()) {
             params.push(name.to_string());
         }
@@ -965,9 +948,6 @@ impl IRBuilder {
             IRExpr::ArrayLiteral(elems) => {
                 IRExpr::ArrayLiteral(elems.iter().map(|a| self.subst_expr(a, env)).collect())
             }
-            IRExpr::TupleLiteral(elems) => {
-                IRExpr::TupleLiteral(elems.iter().map(|a| self.subst_expr(a, env)).collect())
-            }
             IRExpr::StructLiteral { name, fields } => IRExpr::StructLiteral {
                 name: name.clone(),
                 fields: fields
@@ -1078,15 +1058,6 @@ impl IRBuilder {
                     })
                     .collect(),
             ),
-            IRExpr::TupleLiteral(elems) => IRExpr::TupleLiteral(
-                elems
-                    .iter()
-                    .map(|a| {
-                        let mut a = a.clone();
-                        self.expand_nested_macros(&mut a, depth, max_depth)
-                    })
-                    .collect(),
-            ),
             IRExpr::StructLiteral { name, fields } => IRExpr::StructLiteral {
                 name: name.clone(),
                 fields: fields
@@ -1154,11 +1125,6 @@ impl IRBuilder {
                         if let Some(val) = self.eval_ir_expr(init_expr, bindings) {
                             bindings.insert(name.clone(), val);
                         }
-                    }
-                }
-                IRStmt::TupleDestructure { init, .. } => {
-                    if let Some(val) = self.eval_ir_expr(init, bindings) {
-                        last_expr_val = Some(val);
                     }
                 }
                 IRStmt::If {
@@ -1267,11 +1233,6 @@ impl IRBuilder {
                 ">=" => Some(LitValue::Bool(a >= b)),
                 "&&" => Some(LitValue::Bool(a != 0 && b != 0)),
                 "||" => Some(LitValue::Bool(a != 0 || b != 0)),
-                "&" => Some(LitValue::Int(a & b)),
-                "|" => Some(LitValue::Int(a | b)),
-                "^" => Some(LitValue::Int(a ^ b)),
-                "<<" => Some(LitValue::Int(a.wrapping_shl((b as u32) & 63))),
-                ">>" => Some(LitValue::Int(a.wrapping_shr((b as u32) & 63))),
                 _ => None,
             },
             (LitValue::Float(a), LitValue::Float(b)) => match op {
@@ -1315,7 +1276,6 @@ impl IRBuilder {
             LitValue::Int(n) => match op {
                 "-" => Some(LitValue::Int(-n)),
                 "!" => Some(LitValue::Bool(n == 0)),
-                "~" => Some(LitValue::Int(!n)),
                 _ => None,
             },
             LitValue::Float(f) => match op {
@@ -1335,28 +1295,7 @@ impl IRBuilder {
     }
 
     fn collect_attr_names(attrs: &[Attribute]) -> Vec<String> {
-        let mut names = Vec::new();
-        for attr in attrs {
-            if matches!(attr.name.as_str(), "std" | "no_std" | "gc" | "no_gc") {
-                continue;
-            }
-            names.push(attr.name.clone());
-        }
-        let local_attrs: Vec<Attribute> = attrs
-            .iter()
-            .filter(|attr| !attr.inherited)
-            .cloned()
-            .collect();
-        for feature in ["std", "gc"] {
-            if let Some(enabled) = Attribute::get_feature_setting(&local_attrs, feature) {
-                names.push(format!(
-                    "{}={}",
-                    feature,
-                    if enabled { "true" } else { "false" }
-                ));
-            }
-        }
-        names
+        attrs.iter().map(|a| a.name.clone()).collect()
     }
 
     /// Best-effort type inference for an IR expression. Used to infer the
@@ -1369,7 +1308,6 @@ impl IRBuilder {
             IRExpr::Literal(LitValue::Float(_)) => DataType::Float,
             IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
             IRExpr::Literal(LitValue::Byte(_)) => DataType::Byte,
-            IRExpr::Literal(LitValue::Char(_)) => DataType::Char,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
             IRExpr::Variable(name) => {
@@ -1437,27 +1375,13 @@ impl IRBuilder {
             },
             IRExpr::Cast { target, .. } => target.clone(),
             IRExpr::ArrayIndex { array, .. } => match self.infer_expr_type(array) {
-                DataType::Str => DataType::Char,
+                DataType::Str => DataType::Str,
                 DataType::Array(element) => *element,
                 _ => DataType::Int,
             },
             IRExpr::Assignment { target, .. } => self.infer_expr_type(target),
             IRExpr::ArrayLiteral(_) => DataType::Array(Box::new(DataType::Unknown)),
-            IRExpr::TupleLiteral(elements) => DataType::Tuple(
-                elements
-                    .iter()
-                    .map(|element| self.infer_expr_type(element))
-                    .collect(),
-            ),
-            IRExpr::MemberAccess { object, member } => {
-                if let (DataType::Tuple(elements), Ok(index)) =
-                    (self.infer_expr_type(object), member.parse::<usize>())
-                {
-                    elements.get(index).cloned().unwrap_or(DataType::Unknown)
-                } else {
-                    DataType::Int
-                }
-            }
+            IRExpr::MemberAccess { .. } => DataType::Int,
             IRExpr::FuncRef(name) => {
                 // Look up the referenced function's return type.
                 for f in &self.ir.functions {
@@ -1855,7 +1779,7 @@ impl AstVisitor for IRBuilder {
         self.var_types.clear();
 
         // 解析参数
-        let params: Vec<IRParam> = node
+        let mut params: Vec<IRParam> = node
             .get_parameters()
             .map(|ps| {
                 ps.iter()
@@ -1876,6 +1800,20 @@ impl AstVisitor for IRBuilder {
                     .collect()
             })
             .unwrap_or_default();
+
+        // For methods without explicit self parameter
+        // prepend self as the first parameter
+        if is_method && !params.iter().any(|p| p.name == "self") {
+            if let Some(ref sname) = self.current_struct {
+                params.insert(
+                    0,
+                    IRParam {
+                        name: "self".to_string(),
+                        ty: DataType::Struct(sname.clone()),
+                    },
+                );
+            }
+        }
 
         // 解析返回类型
         let return_type = if is_main {
@@ -1950,39 +1888,6 @@ impl AstVisitor for IRBuilder {
     }
 
     fn visit_declaration(&mut self, node: &Declaration) {
-        if node.is_tuple_pattern() {
-            if !self.in_function {
-                self.error("Tuple destructuring is only supported inside functions");
-                return;
-            }
-            let Some(initializer) = node.get_initializer() else {
-                return;
-            };
-            initializer.accept(self);
-            let init = self.pop_expr();
-            let tuple_type = match self.infer_expr_type(&init) {
-                DataType::Tuple(elements) => elements,
-                _ => {
-                    self.error("Tuple destructuring requires a tuple initializer");
-                    return;
-                }
-            };
-            if tuple_type.len() != node.get_names().len() {
-                self.error(&format!(
-                    "Tuple destructuring expects {} values, got {}",
-                    node.get_names().len(),
-                    tuple_type.len()
-                ));
-                return;
-            }
-            let names: Vec<_> = node.get_names().iter().cloned().zip(tuple_type).collect();
-            for (name, ty) in &names {
-                self.var_types.insert(name.clone(), ty.clone());
-            }
-            self.current_block
-                .push(IRStmt::TupleDestructure { names, init });
-            return;
-        }
         let name = node.get_name().to_string();
         let orig_type = node.get_type();
         let ty = self.ast_type_to_data_type(orig_type);
@@ -2254,6 +2159,36 @@ impl AstVisitor for IRBuilder {
             return;
         }
 
+        // Inside a method body, bare field names (e.g. `_start`) are implicit
+        // `self._start` accesses. Resolve them to MemberAccess so the backend
+        // loads from the struct pointer instead of treating them as undefined
+        // local variables (which would silently return 0).
+        // BUT: don't override if there's already a local variable (parameter) with this name.
+        if let Some(ref sname) = self.current_struct {
+            if self.var_types.contains_key(&name) {
+                // There's a local variable/parameter with this name — use it
+                self.push_expr(IRExpr::Variable(name));
+                return;
+            }
+            // Try looking up the struct by its name. The current_struct may
+            // include generic parameters (e.g. "Vec<T>"), but the structs map
+            // stores them without generics (e.g. "Vec"). Try both forms.
+            let lookup_name = if let Some(angle_pos) = sname.find('<') {
+                &sname[..angle_pos]
+            } else {
+                sname.as_str()
+            };
+            if let Some(ir_struct) = self.structs.get(lookup_name) {
+                if ir_struct.fields.iter().any(|f| f.name == name) {
+                    self.push_expr(IRExpr::MemberAccess {
+                        object: Box::new(IRExpr::Variable("self".to_string())),
+                        member: name,
+                    });
+                    return;
+                }
+            }
+        }
+
         self.push_expr(IRExpr::Variable(name));
     }
 
@@ -2298,10 +2233,6 @@ impl AstVisitor for IRBuilder {
         self.push_expr(IRExpr::Literal(LitValue::Str(node.get_value().to_string())));
     }
 
-    fn visit_character_literal(&mut self, node: &CharacterLiteral) {
-        self.push_expr(IRExpr::Literal(LitValue::Char(node.get_value())));
-    }
-
     fn visit_boolean_literal(&mut self, node: &BooleanLiteral) {
         self.push_expr(IRExpr::Literal(LitValue::Bool(node.get_value())));
     }
@@ -2314,10 +2245,7 @@ impl AstVisitor for IRBuilder {
         let op = node.get_operator().to_string();
 
         // 处理赋值
-        if matches!(
-            op.as_str(),
-            "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
-        ) {
+        if op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=" {
             let right = node.get_right().unwrap();
             right.accept(self);
             let right_val = self.pop_expr();
@@ -2331,7 +2259,7 @@ impl AstVisitor for IRBuilder {
             let value = if op == "=" {
                 right_val
             } else {
-                let real_op = op.strip_suffix('=').unwrap_or(&op);
+                let real_op = &op[..1]; // "+=" → "+", "-=" → "-", etc.
                 left.accept(self); // push left again as the value operand
                 let left_val = self.pop_expr();
                 // Convert to method call via trait
@@ -2621,20 +2549,11 @@ impl AstVisitor for IRBuilder {
             elem.accept(self);
             elements.push(self.pop_expr());
         }
-        self.push_expr(if node.is_tuple() {
-            IRExpr::TupleLiteral(elements)
-        } else {
-            IRExpr::ArrayLiteral(elements)
-        });
+        self.push_expr(IRExpr::ArrayLiteral(elements));
     }
 
     fn visit_struct_literal(&mut self, node: &StructLiteral) {
-        let name = node
-            .get_type_name()
-            .split('<')
-            .next()
-            .unwrap_or(node.get_type_name())
-            .to_string();
+        let name = node.get_type_name().to_string();
         let mut fields = Vec::new();
 
         for field in node.get_fields() {
@@ -3370,22 +3289,6 @@ impl Monomorphizer {
                         }
                     }
                 }
-                IRStmt::TupleDestructure { names, init } => {
-                    self.rewrite_expr(init, generic_by_name, returns_by_name);
-                    if let DataType::Tuple(elements) =
-                        self.infer_concrete_type(init, returns_by_name)
-                    {
-                        for ((name, ty), inferred) in names.iter_mut().zip(elements) {
-                            if *ty == DataType::Unknown
-                                || (matches!(ty, DataType::Struct(_))
-                                    && !matches!(inferred, DataType::Struct(_)))
-                            {
-                                *ty = inferred.clone();
-                            }
-                            self.var_types.insert(name.clone(), inferred);
-                        }
-                    }
-                }
                 IRStmt::Expression(e) => {
                     self.rewrite_expr(e, generic_by_name, returns_by_name);
                 }
@@ -3542,11 +3445,6 @@ impl Monomorphizer {
                 self.rewrite_expr(index, generic_by_name, returns_by_name);
             }
             IRExpr::ArrayLiteral(items) => {
-                for it in items.iter_mut() {
-                    self.rewrite_expr(it, generic_by_name, returns_by_name);
-                }
-            }
-            IRExpr::TupleLiteral(items) => {
                 for it in items.iter_mut() {
                     self.rewrite_expr(it, generic_by_name, returns_by_name);
                 }
@@ -3781,7 +3679,6 @@ impl Monomorphizer {
             IRExpr::Literal(LitValue::Int(_)) => DataType::Int,
             IRExpr::Literal(LitValue::Float(_)) => DataType::Float,
             IRExpr::Literal(LitValue::Bool(_)) => DataType::Bool,
-            IRExpr::Literal(LitValue::Char(_)) => DataType::Char,
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
             IRExpr::Variable(name) => match self
@@ -3867,12 +3764,6 @@ impl Monomorphizer {
                     .unwrap_or(DataType::Unknown);
                 DataType::Array(Box::new(elem))
             }
-            IRExpr::TupleLiteral(items) => DataType::Tuple(
-                items
-                    .iter()
-                    .map(|item| self.infer_concrete_type(item, returns_by_name))
-                    .collect(),
-            ),
             IRExpr::Assignment { value, .. } => self.infer_concrete_type(value, returns_by_name),
             _ => DataType::Unknown,
         }
@@ -3921,12 +3812,6 @@ impl Monomorphizer {
             DataType::Array(inner) => {
                 DataType::Array(Box::new(self.substitute_type(inner, type_map)))
             }
-            DataType::Tuple(elements) => DataType::Tuple(
-                elements
-                    .iter()
-                    .map(|element| self.substitute_type(element, type_map))
-                    .collect(),
-            ),
             _ => dt.clone(),
         }
     }
@@ -3941,12 +3826,6 @@ impl Monomorphizer {
                     if let Some(init) = init {
                         self.substitute_in_expr(init, type_map);
                     }
-                }
-                IRStmt::TupleDestructure { names, init } => {
-                    for (_, ty) in names {
-                        *ty = self.substitute_type(ty, type_map);
-                    }
-                    self.substitute_in_expr(init, type_map);
                 }
                 IRStmt::Expression(e) => self.substitute_in_expr(e, type_map),
                 IRStmt::Return(Some(e)) => self.substitute_in_expr(e, type_map),
@@ -4040,11 +3919,6 @@ impl Monomorphizer {
                 self.substitute_in_expr(index, type_map);
             }
             IRExpr::ArrayLiteral(items) => {
-                for it in items.iter_mut() {
-                    self.substitute_in_expr(it, type_map);
-                }
-            }
-            IRExpr::TupleLiteral(items) => {
                 for it in items.iter_mut() {
                     self.substitute_in_expr(it, type_map);
                 }

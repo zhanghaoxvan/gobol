@@ -10,7 +10,7 @@
 //
 // The signatures below mirror std/runtime.h; the actual C implementations
 // live in std/runtime.c / std/runtime/*.c and are linked into every program.
-#![library_features(hidden = true)]
+#[library_features(hidden = true)]
 
 #[header("std/runtime.h")]
 extern "C" {
@@ -20,6 +20,10 @@ extern "C" {
     func gobol_eprint(s: int);
     func gobol_eprintln(s: int);
     func gobol_read(): str;
+
+    // ---- Process arguments (std/runtime/entry.h) ----
+    func gobol_args_count(): int;
+    func gobol_args_get(index: int): str;
 
     // ---- String (std/runtime/str.h) ----
     func gobol_str_int(n: int): str;
@@ -61,11 +65,6 @@ extern "C" {
     func gobol_math_sin(x: float): float;
     func gobol_math_cos(x: float): float;
     func gobol_math_pow(base: float, exp: float): float;
-
-    // ---- Time (std/runtime/time.h) ----
-    func gobol_time_monotonic_ms(): int;
-    func gobol_time_unix_ms(): int;
-    func gobol_time_sleep_ms(milliseconds: int): int;
 
     // ---- File-system (std/runtime/fs.h) ----
     func gobol_fs_open(path: str, mode: str): int;

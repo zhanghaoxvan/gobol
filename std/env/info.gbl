@@ -6,7 +6,7 @@
 // The struct is a pure OOP-style façade over the C runtime; each call
 // re-queries the OS so callers observe up-to-date values.
 
-#![library_features(hidden = true)]
+#[library_features(hidden = true)]
 
 #[header("std/runtime.h")]
 extern "C" {
@@ -24,7 +24,7 @@ impl Env {
     /// Return the shared `Env` singleton.
     /// This always returns the same struct instance; because `Env` carries
     /// no mutable state (methods query the OS), a single instance suffices.
-    static func current(): Env {
+    func current(): Env {
         Env { _singleton_marker: 0 }
     }
 

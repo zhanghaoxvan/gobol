@@ -15,7 +15,7 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// How a net struct-intrinsic should be lowered: either building a
 /// `Result<_, str>` value in code, exposing a raw loaded payload value, or
@@ -56,9 +56,8 @@ enum OkPayload {
 pub struct TypeResolver {
     /// struct name -> definition
     structs: HashMap<String, IRStruct>,
-    /// Struct-level GC settings.
-    struct_gc_settings: HashMap<String, bool>,
-    default_gc_enabled: bool,
+    /// Struct names that opt out of GC via #[no_gc].
+    no_gc_structs: HashSet<String>,
     /// IR function name -> return type (user functions + runtime imports)
     func_return_types: HashMap<String, DataType>,
     /// variable name -> type (per-function, reset between functions)
@@ -69,8 +68,7 @@ impl TypeResolver {
     pub fn new() -> Self {
         let mut r = TypeResolver {
             structs: HashMap::new(),
-            struct_gc_settings: HashMap::new(),
-            default_gc_enabled: true,
+            no_gc_structs: HashSet::new(),
             func_return_types: HashMap::new(),
             var_types: HashMap::new(),
         };
@@ -82,34 +80,11 @@ impl TypeResolver {
 
     pub fn register_structs(&mut self, structs: &[IRStruct]) {
         for s in structs {
-            if let Some(enabled) = Self::feature_setting(&s.attributes, "gc") {
-                self.struct_gc_settings.insert(s.name.clone(), enabled);
+            if s.attributes.contains(&"no_gc".to_string()) {
+                self.no_gc_structs.insert(s.name.clone());
             }
             self.structs.insert(s.name.clone(), s.clone());
         }
-    }
-
-    fn feature_setting(attrs: &[String], feature: &str) -> Option<bool> {
-        let legacy = match feature {
-            "gc" => "no_gc",
-            "std" => "no_std",
-            _ => return None,
-        };
-        attrs.iter().fold(None, |setting, attr| {
-            if attr == feature {
-                Some(true)
-            } else if attr == legacy {
-                Some(false)
-            } else if let Some(value) = attr.strip_prefix(&format!("{}=", feature)) {
-                Some(value != "false")
-            } else {
-                setting
-            }
-        })
-    }
-
-    pub fn set_default_gc_enabled(&mut self, enabled: bool) {
-        self.default_gc_enabled = enabled;
     }
 
     pub fn register_function(&mut self, name: &str, return_type: DataType) {
@@ -124,6 +99,8 @@ impl TypeResolver {
             ("gobol_eprint", DataType::None_),
             ("gobol_eprintln", DataType::None_),
             ("gobol_read", DataType::Str),
+            ("gobol_args_count", DataType::Int),
+            ("gobol_args_get", DataType::Str),
             ("gobol_str_int", DataType::Str),
             ("gobol_str_float", DataType::Str),
             ("gobol_str_bool", DataType::Str),
@@ -191,8 +168,8 @@ impl TypeResolver {
         self.structs.contains_key(name)
     }
 
-    pub fn gc_enabled(&self, name: &str) -> Option<bool> {
-        self.struct_gc_settings.get(name).copied()
+    pub fn is_no_gc(&self, name: &str) -> bool {
+        self.no_gc_structs.contains(name)
     }
 
     // ---- layout ----
@@ -206,11 +183,9 @@ impl TypeResolver {
             DataType::Float => 8,
             DataType::Bool => 1,
             DataType::Byte => 1,
-            DataType::Char => 4,
             DataType::Int | DataType::Str | DataType::Unknown | DataType::Struct(_) => 8,
             DataType::Nullable(inner) => self.type_size(inner),
             DataType::Array(_) => 8, // array pointer
-            DataType::Tuple(_) => 8, // tuple storage pointer
             DataType::Reference(_) => 8,
             DataType::Pointer(_) => 8,
         }
@@ -303,7 +278,7 @@ impl TypeResolver {
             (DataType::Unknown, "add") => Some(DataType::None_),
             // String methods
             (DataType::Str, "len") => Some(DataType::Int),
-            (DataType::Str, "get") => Some(DataType::Char),
+            (DataType::Str, "get") => Some(DataType::Int),
             (DataType::Str, "contains") => Some(DataType::Bool),
             (DataType::Str, "trim") => Some(DataType::Str),
             (DataType::Str, "replace") => Some(DataType::Str),
@@ -321,19 +296,12 @@ impl TypeResolver {
             IRExpr::Literal(LitValue::Str(_)) => DataType::Str,
             IRExpr::Literal(LitValue::None) => DataType::None_,
             IRExpr::Literal(LitValue::Byte(_)) => DataType::Byte,
-            IRExpr::Literal(LitValue::Char(_)) => DataType::Char,
             IRExpr::Variable(name) => self.var_type(name),
             IRExpr::StructLiteral { name, .. } => DataType::Struct(name.clone()),
             IRExpr::ArrayLiteral(elems) => {
                 let _ = elems.first().map(|e| self.infer_type(e));
                 DataType::Unknown
             }
-            IRExpr::TupleLiteral(elements) => DataType::Tuple(
-                elements
-                    .iter()
-                    .map(|element| self.infer_type(element))
-                    .collect(),
-            ),
             IRExpr::MethodCall { object, method, .. } => {
                 let obj_ty = self.infer_type(object);
                 // Struct constructor: Type::new(...)
@@ -402,18 +370,13 @@ impl TypeResolver {
             }
             IRExpr::Cast { target, .. } => target.clone(),
             IRExpr::MemberAccess { object, member } => {
-                if let Ok(index) = member.parse::<usize>() {
-                    if let DataType::Tuple(elements) = self.infer_type(object) {
-                        return elements.get(index).cloned().unwrap_or(DataType::Unknown);
-                    }
-                }
                 if let DataType::Struct(sname) = self.infer_type(object) {
                     return self.field_type(&sname, member);
                 }
                 DataType::Int
             }
             IRExpr::ArrayIndex { array, .. } => match self.infer_type(array) {
-                DataType::Str => DataType::Char,
+                DataType::Str => DataType::Str,
                 DataType::Array(element) => *element,
                 _ => DataType::Int,
             },
@@ -495,7 +458,6 @@ impl VariadicStub {
             DataType::Bool => "int",
             DataType::None_ => "void",
             DataType::Byte => "unsigned char",
-            DataType::Char => "unsigned int",
             DataType::Int
             | DataType::Str
             | DataType::Unknown
@@ -503,8 +465,7 @@ impl VariadicStub {
             | DataType::Nullable(_)
             | DataType::Pointer(_)
             | DataType::Reference(_)
-            | DataType::Array(_)
-            | DataType::Tuple(_) => "long",
+            | DataType::Array(_) => "long",
         }
     }
 
@@ -550,8 +511,8 @@ pub struct CraneliftBackend {
     module: ObjectModule,
     fn_ctx: FunctionBuilderContext,
     /// (IR function name, arity) -> symbol name.
-    /// Arity is the number of IR-level parameters (including the explicit
-    /// receiver parameter for instance methods). Including arity in the key allows overloaded methods
+    /// Arity is the number of IR-level parameters (including implicit `self`
+    /// for methods). Including arity in the key allows overloaded methods
     /// like `Range::new(start, end)` and `Range::new(start, end, step)` to
     /// coexist with distinct symbol names.
     func_symbols: HashMap<(String, usize), String>,
@@ -568,6 +529,8 @@ pub struct CraneliftBackend {
     /// Each global owns a shared 8-byte data slot so all functions see the
     /// same storage (fixed `var` mutation across function calls).
     global_vars: HashMap<String, (cranelift_module::DataId, DataType, Option<IRExpr>)>,
+    /// struct name -> set of constructor method names (e.g. "new")
+    constructors: HashMap<String, bool>,
     /// centralised type inference / layout / return-type lookup
     type_resolver: TypeResolver,
 
@@ -599,12 +562,13 @@ pub struct CraneliftBackend {
 impl CraneliftBackend {
     /// Compile the IR to JIT machine code. After this, `get_function_ptr` works.
     pub fn compile_ir(&mut self, ir: &GobolIR) -> Result<(), String> {
-        // Collect struct definitions.
-        self.type_resolver
-            .set_default_gc_enabled(ir.default_gc_enabled);
+        // Collect struct definitions and constructor names.
         self.type_resolver.register_structs(&ir.structs);
         for imp in &ir.impls {
             for m in &imp.methods {
+                if m.name == "new" || m.name.ends_with("::new") {
+                    self.constructors.insert(imp.struct_name.clone(), true);
+                }
                 // Register method return types in the TypeResolver.
                 self.type_resolver
                     .register_function(&m.name, m.return_type.clone());
@@ -717,9 +681,19 @@ impl CraneliftBackend {
         self.declare_import("gobol_eprintln", sig);
 
         // char* read()
+        let sig = self.module.make_signature();
+        self.declare_import("gobol_read", sig);
+
+        // i64 gobol_args_count()
         let mut sig = self.module.make_signature();
         sig.returns.push(AbiParam::new(types::I64));
-        self.declare_import("gobol_read", sig);
+        self.declare_import("gobol_args_count", sig);
+
+        // char* gobol_args_get(i64)
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        self.declare_import("gobol_args_get", sig);
 
         // char* gobol_str_int(i64)
         let mut sig = self.module.make_signature();
@@ -1436,12 +1410,10 @@ impl CraneliftBackend {
     }
 
     /// True when allocations in the current function should bypass the GC.
+    /// This is the case when either the struct itself is `no_gc` or the
+    /// enclosing function (possibly via a file-level `#![no_gc]`) is `no_gc`.
     fn alloc_uses_no_gc(&self, struct_name: &str) -> bool {
-        let default = self.type_resolver.default_gc_enabled;
-        let function_gc = TypeResolver::feature_setting(&self.current_func_attributes, "gc");
-        let struct_gc = self.type_resolver.gc_enabled(struct_name);
-        let enabled = function_gc.or(struct_gc).unwrap_or(default);
-        !enabled
+        self.type_resolver.is_no_gc(struct_name) || self.current_func_has_attr("no_gc")
     }
 
     fn emit_default_return(&mut self, bcx: &mut FunctionBuilder) {
@@ -1488,17 +1460,6 @@ impl CraneliftBackend {
 
     fn translate_stmt(&mut self, bcx: &mut FunctionBuilder, stmt: &IRStmt) -> Result<(), String> {
         match stmt {
-            IRStmt::TupleDestructure { names, init } => {
-                let tuple = self.translate_expr(bcx, init)?;
-                for (index, (name, ty)) in names.iter().enumerate() {
-                    let index_value = bcx.ins().iconst(types::I64, index as i64);
-                    let word = self.call_runtime(bcx, "gobol_array_get", &[tuple, index_value]);
-                    let value = self.tuple_word_to_value(bcx, word, ty);
-                    let clif_ty = self.data_type_to_clif(ty)?;
-                    let variable = self.declare_variable(bcx, name, clif_ty, ty);
-                    bcx.def_var(variable, value);
-                }
-            }
             IRStmt::Declaration { name, ty, init } => {
                 let resolved = if *ty == DataType::None_ || *ty == DataType::Unknown {
                     let inferred = init
@@ -1891,7 +1852,7 @@ impl CraneliftBackend {
     ) -> Result<(), String> {
         let str_ptr = self.intern_string(bcx, s);
         let ch_name = &vars[0];
-        let ch_var = self.declare_variable(bcx, ch_name, types::I32, &DataType::Char);
+        let ch_var = self.declare_variable(bcx, ch_name, types::I64, &DataType::Str);
         let idx_var = self.declare_variable(
             bcx,
             &format!("__idx_{}", ch_name),
@@ -1899,8 +1860,8 @@ impl CraneliftBackend {
             &DataType::Int,
         );
         let zero = bcx.ins().iconst(types::I64, 0);
-        let empty_char = bcx.ins().iconst(types::I32, 0);
-        bcx.def_var(ch_var, empty_char);
+        let empty_str = self.intern_string(bcx, "");
+        bcx.def_var(ch_var, empty_str);
         bcx.def_var(idx_var, zero);
 
         let cond_b = bcx.create_block();
@@ -1924,7 +1885,7 @@ impl CraneliftBackend {
         self.diverged = false;
         let i = bcx.use_var(idx_var);
         let ch_code = self.call_runtime(bcx, "gobol_str_get", &[str_ptr, i]);
-        let ch = bcx.ins().ireduce(types::I32, ch_code);
+        let ch = self.call_runtime(bcx, "gobol_str_char", &[ch_code]);
         bcx.def_var(ch_var, ch);
         self.loop_stack.push((end_b, incr_b));
         self.translate_block(bcx, body)?;
@@ -1957,21 +1918,6 @@ impl CraneliftBackend {
         // Member assignment: obj.field = value
         if let IRExpr::MemberAccess { object, member } = target {
             let obj_ty = self.type_resolver.infer_type(object);
-            if let (DataType::Tuple(elements), Ok(index)) = (&obj_ty, member.parse::<usize>()) {
-                let Some(element_type) = elements.get(index) else {
-                    return Err(format!(
-                        "tuple index {} is out of bounds for tuple of size {}",
-                        index,
-                        elements.len()
-                    ));
-                };
-                let tuple = self.translate_expr(bcx, object)?;
-                let index_value = bcx.ins().iconst(types::I64, index as i64);
-                let value = self.translate_expr(bcx, value)?;
-                let word = self.tuple_value_to_word(bcx, value, element_type);
-                self.call_runtime(bcx, "gobol_array_set", &[tuple, index_value, word]);
-                return Ok(());
-            }
             if let DataType::Struct(sname) = &obj_ty {
                 let obj_val = self.translate_expr(bcx, object)?;
                 let val = self.translate_expr(bcx, value)?;
@@ -2143,7 +2089,7 @@ impl CraneliftBackend {
                     let string = self.translate_expr(bcx, array)?;
                     let index = self.translate_expr(bcx, index)?;
                     let codepoint = self.call_runtime(bcx, "gobol_str_get", &[string, index]);
-                    return Ok(bcx.ins().ireduce(types::I32, codepoint));
+                    return Ok(self.call_runtime(bcx, "gobol_str_char", &[codepoint]));
                 }
 
                 // Check if this is a nested array access (e.g., arr[2][2])
@@ -2172,16 +2118,6 @@ impl CraneliftBackend {
                 }
                 Ok(arr)
             }
-            IRExpr::TupleLiteral(elements) => {
-                let tuple = self.call_runtime(bcx, "gobol_array_new", &[]);
-                for element in elements {
-                    let value = self.translate_expr(bcx, element)?;
-                    let ty = self.type_resolver.infer_type(element);
-                    let word = self.tuple_value_to_word(bcx, value, &ty);
-                    self.call_runtime(bcx, "gobol_array_add", &[tuple, word]);
-                }
-                Ok(tuple)
-            }
             IRExpr::StructLiteral { name, fields } => {
                 self.translate_struct_literal(bcx, name, fields)
             }
@@ -2204,7 +2140,6 @@ impl CraneliftBackend {
             LitValue::Float(f) => bcx.ins().f64const(*f),
             LitValue::Bool(b) => bcx.ins().iconst(types::I8, *b as i64),
             LitValue::Byte(n) => bcx.ins().iconst(types::I8, *n as i64),
-            LitValue::Char(c) => bcx.ins().iconst(types::I32, *c as u32 as i64),
             LitValue::Str(s) => self.intern_string(bcx, s),
             LitValue::None => bcx.ins().iconst(types::I64, 0),
         }
@@ -2267,8 +2202,6 @@ impl CraneliftBackend {
             "&" => bcx.ins().band(l, r),
             "|" => bcx.ins().bor(l, r),
             "^" => bcx.ins().bxor(l, r),
-            "<<" => bcx.ins().ishl(l, r),
-            ">>" => bcx.ins().sshr(l, r),
             _ => {
                 let _ = format!("unsupported operator: {}", op);
                 bcx.ins().iconst(types::I64, 0)
@@ -2390,7 +2323,6 @@ impl CraneliftBackend {
                 let one = bcx.ins().iconst(types::I8, 1);
                 bcx.ins().bxor(b, one)
             }
-            "~" => bcx.ins().bnot(v),
             "*" => {
                 let DataType::Pointer(inner) = ty else {
                     return Err(format!("cannot dereference non-pointer type '{}'", ty));
@@ -2421,8 +2353,8 @@ impl CraneliftBackend {
         }
 
         // Struct static method via :: notation: StructName::method(args)
-        // Instance methods declare `self` explicitly; associated functions
-        // are called with only their declared arguments.
+        // The IR builder prepends `self` for methods (constructors, enum
+        // variants, etc.), so we must allocate and prepend self.
         if let Some((struct_name, _method)) = func.split_once("::") {
             if self.type_resolver.has_struct(struct_name) {
                 // Check that the method expects self (arity = args + 1)
@@ -2699,16 +2631,12 @@ impl CraneliftBackend {
         let obj_ty = self.type_resolver.infer_type(object);
 
         // Struct constructor / static methods: Type::new(...) or Type::method(...)
-        // Must be BEFORE the qualified function check so constructors with an
-        // explicit `self` parameter can receive an allocated instance.
+        // Must be BEFORE the qualified function check so we can allocate self
         if let IRExpr::Variable(name) = object {
             if self.type_resolver.has_struct(name) {
                 let full = format!("{}::{}", name, method);
-                if method == "new"
-                    && self
-                        .func_symbols
-                        .contains_key(&(full.clone(), args.len() + 1))
-                {
+                // For constructors (new), allocate self and pass it as the first arg
+                if method == "new" {
                     let size = self.type_resolver.struct_size(name);
                     let size_val = bcx.ins().iconst(types::I64, size);
                     let alloc_fn = if self.alloc_uses_no_gc(name) {
@@ -2861,15 +2789,6 @@ impl CraneliftBackend {
                 "len" => {
                     return Ok(self.call_runtime(bcx, "gobol_str_len", &[s]));
                 }
-                "get" => {
-                    let index = self
-                        .translate_args(bcx, args)?
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| "str.get requires an index argument".to_string())?;
-                    let codepoint = self.call_runtime(bcx, "gobol_str_get", &[s, index]);
-                    return Ok(bcx.ins().ireduce(types::I32, codepoint));
-                }
                 "contains" => {
                     let mut vals = self.translate_args(bcx, args)?;
                     let mut all = vec![s];
@@ -2958,7 +2877,7 @@ impl CraneliftBackend {
             let obj_val = self.translate_expr(bcx, object)?;
             let mut vals = vec![obj_val];
             vals.append(&mut self.translate_args(bcx, args)?);
-            // Instance method: arity = vals.len() (including receiver parameter)
+            // Instance method: arity = vals.len() (includes implicit self)
             if let Some(sym) = self.func_symbols.get(&(full.clone(), vals.len())) {
                 if let Some(fid) = self.func_ids.get(sym) {
                     let fref = self.module.declare_func_in_func(*fid, &mut bcx.func);
@@ -3230,19 +3149,6 @@ impl CraneliftBackend {
         member: &str,
     ) -> Result<ir::Value, String> {
         let obj_ty = self.type_resolver.infer_type(object);
-        if let (DataType::Tuple(elements), Ok(index)) = (&obj_ty, member.parse::<usize>()) {
-            let Some(element_type) = elements.get(index) else {
-                return Err(format!(
-                    "tuple index {} is out of bounds for tuple of size {}",
-                    index,
-                    elements.len()
-                ));
-            };
-            let tuple = self.translate_expr(bcx, object)?;
-            let index_value = bcx.ins().iconst(types::I64, index as i64);
-            let word = self.call_runtime(bcx, "gobol_array_get", &[tuple, index_value]);
-            return Ok(self.tuple_word_to_value(bcx, word, element_type));
-        }
         if member == "_tag" || member.starts_with('_') && member[1..].parse::<i64>().is_ok() {
             let obj_val = self.translate_expr(bcx, object)?;
             let offset = if member == "_tag" {
@@ -3268,42 +3174,30 @@ impl CraneliftBackend {
         Ok(self.translate_expr(bcx, object)?)
     }
 
-    fn tuple_value_to_word(
-        &self,
-        bcx: &mut FunctionBuilder,
-        value: ir::Value,
-        ty: &DataType,
-    ) -> ir::Value {
-        match ty {
-            DataType::Float => bcx.ins().bitcast(types::I64, MemFlagsData::new(), value),
-            DataType::Bool | DataType::Byte => bcx.ins().uextend(types::I64, value),
-            DataType::Char => bcx.ins().uextend(types::I64, value),
-            _ => value,
-        }
-    }
-
-    fn tuple_word_to_value(
-        &self,
-        bcx: &mut FunctionBuilder,
-        word: ir::Value,
-        ty: &DataType,
-    ) -> ir::Value {
-        match ty {
-            DataType::Float => bcx.ins().bitcast(types::F64, MemFlagsData::new(), word),
-            DataType::Bool | DataType::Byte => bcx.ins().ireduce(types::I8, word),
-            DataType::Char => bcx.ins().ireduce(types::I32, word),
-            _ => word,
-        }
-    }
-
     fn translate_struct_literal(
         &mut self,
         bcx: &mut FunctionBuilder,
         name: &str,
         fields: &[(String, IRExpr)],
     ) -> Result<ir::Value, String> {
-        // Struct literals initialize named fields directly and never invoke
-        // a user-defined `new` method.
+        // Prefer calling the user-defined constructor `StructName::new`.
+        if self.constructors.get(name).copied().unwrap_or(false) {
+            let args: Vec<IRExpr> = fields.iter().map(|(_, e)| e.clone()).collect();
+            let full = format!("{}::new", name);
+            // Allocate self and prepend to constructor args
+            let size = self.type_resolver.struct_size(name);
+            let size_val = bcx.ins().iconst(types::I64, size);
+            let alloc_fn = if self.alloc_uses_no_gc(name) {
+                "gobol_alloc"
+            } else {
+                "gobol_gc_alloc"
+            };
+            let self_ptr = self.call_runtime(bcx, alloc_fn, &[size_val]);
+            let mut all_args = vec![self_ptr];
+            all_args.append(&mut self.translate_args(bcx, &args)?);
+            return self.translate_call_with_args(bcx, &full, &all_args);
+        }
+        // Otherwise allocate and store fields directly.
         let size = self.type_resolver.struct_size(name);
         let size_val = bcx.ins().iconst(types::I64, size);
         let alloc_fn = if self.alloc_uses_no_gc(name) {
@@ -3347,17 +3241,11 @@ impl CraneliftBackend {
             }
         }
         Ok(match (&src, target) {
-            (DataType::Char, DataType::Int) => bcx.ins().uextend(types::I64, v),
-            (DataType::Int, DataType::Char) => bcx.ins().ireduce(types::I32, v),
             (DataType::Int, DataType::Float) => bcx.ins().fcvt_from_sint(types::F64, v),
             (DataType::Float, DataType::Int) => bcx.ins().fcvt_to_sint(types::I64, v),
             (DataType::Int, DataType::Str) => self.call_runtime(bcx, "gobol_str_int", &[v]),
             (DataType::Float, DataType::Str) => self.call_runtime(bcx, "gobol_str_float", &[v]),
             (DataType::Bool, DataType::Str) => self.call_runtime(bcx, "gobol_str_bool", &[v]),
-            (DataType::Char, DataType::Str) => {
-                let codepoint = bcx.ins().uextend(types::I64, v);
-                self.call_runtime(bcx, "gobol_str_char", &[codepoint])
-            }
             (DataType::Str, DataType::Int) => self.translate_str_to_int(bcx, v),
             _ => v,
         })
@@ -3763,10 +3651,6 @@ impl CraneliftBackend {
             DataType::Int => self.call_runtime(bcx, "gobol_str_int", &[v]),
             DataType::Float => self.call_runtime(bcx, "gobol_str_float", &[v]),
             DataType::Bool => self.call_runtime(bcx, "gobol_str_bool", &[v]),
-            DataType::Char => {
-                let codepoint = bcx.ins().uextend(types::I64, v);
-                self.call_runtime(bcx, "gobol_str_char", &[codepoint])
-            }
             _ => {
                 // Best-effort: treat as int.
                 self.call_runtime(bcx, "gobol_str_int", &[v])
@@ -3798,8 +3682,6 @@ impl CraneliftBackend {
             (DataType::Int, DataType::Byte) => bcx.ins().ireduce(types::I8, v),
             (DataType::Byte, DataType::Bool) => v,
             (DataType::Bool, DataType::Byte) => v,
-            (DataType::Char, DataType::Int) => bcx.ins().uextend(types::I64, v),
-            (DataType::Int, DataType::Char) => bcx.ins().ireduce(types::I32, v),
             (DataType::Int, DataType::Float) => bcx.ins().fcvt_from_sint(types::F64, v),
             (DataType::Float, DataType::Int) => bcx.ins().fcvt_to_sint(types::I64, v),
             (DataType::Bool, DataType::Int) => bcx.ins().uextend(types::I64, v),
@@ -3828,7 +3710,6 @@ impl CraneliftBackend {
             DataType::Float => bcx.ins().f64const(0.0),
             DataType::Bool => bcx.ins().iconst(types::I8, 0),
             DataType::Byte => bcx.ins().iconst(types::I8, 0),
-            DataType::Char => bcx.ins().iconst(types::I32, 0),
             DataType::Unknown => {
                 // array: allocate an empty one
                 let fid = self.func_ids["gobol_array_new"];
@@ -3838,12 +3719,6 @@ impl CraneliftBackend {
             }
             DataType::Array(_) => {
                 // array: allocate an empty one (size info lost, caller should set init)
-                let fid = self.func_ids["gobol_array_new"];
-                let fref = self.module.declare_func_in_func(fid, &mut bcx.func);
-                let call = bcx.ins().call(fref, &[]);
-                bcx.inst_results(call)[0]
-            }
-            DataType::Tuple(_) => {
                 let fid = self.func_ids["gobol_array_new"];
                 let fref = self.module.declare_func_in_func(fid, &mut bcx.func);
                 let call = bcx.ins().call(fref, &[]);
@@ -3895,13 +3770,11 @@ impl CraneliftBackend {
             DataType::Float => types::F64,
             DataType::Str => types::I64,
             DataType::Byte => types::I8,
-            DataType::Char => types::I32,
             DataType::None_ => types::INVALID,
             DataType::Unknown => types::I64,   // array pointer
             DataType::Struct(_) => types::I64, // struct pointer
             DataType::Nullable(inner) => self.data_type_to_clif(inner)?,
             DataType::Array(_) => types::I64, // array pointer
-            DataType::Tuple(_) => types::I64, // tuple pointer
             DataType::Pointer(_) => types::I64,
             DataType::Reference(_) => types::I64,
         })
@@ -3985,6 +3858,7 @@ impl CraneliftBackend {
             func_ids: HashMap::new(),
             string_data: HashMap::new(),
             global_vars: HashMap::new(),
+            constructors: HashMap::new(),
             type_resolver: TypeResolver::new(),
             variadic_funcs: std::collections::HashSet::new(),
             variadic_stubs: Vec::new(),
@@ -4659,26 +4533,6 @@ mod link_tests {
     use super::*;
 
     #[test]
-    fn gc_settings_allow_node_overrides_of_file_default() {
-        let mut backend = CraneliftBackend::new();
-        backend.type_resolver.set_default_gc_enabled(false);
-        backend.type_resolver.register_structs(&[IRStruct {
-            name: "Managed".to_string(),
-            generic_params: Vec::new(),
-            fields: Vec::new(),
-            attributes: vec!["gc=true".to_string()],
-        }]);
-
-        assert!(!backend.alloc_uses_no_gc("Managed"));
-
-        backend.set_current_func_attributes(&["gc=false".to_string()]);
-        assert!(backend.alloc_uses_no_gc("Managed"));
-
-        backend.set_current_func_attributes(&["gc=true".to_string()]);
-        assert!(!backend.alloc_uses_no_gc("Managed"));
-    }
-
-    #[test]
     fn renders_link_kinds_per_target() {
         let static_lib = LinkSpec {
             name: "curl".to_string(),
@@ -4745,7 +4599,6 @@ mod link_tests {
             impls: Vec::new(),
             main_function: None,
             globals: Vec::new(),
-            default_gc_enabled: true,
         };
         let mut backend = CraneliftBackend::new();
         backend.entry_point = Some("_start".to_string());
@@ -4969,6 +4822,8 @@ fn builtin_runtime(name: &str) -> Option<&'static str> {
         "eprint" | "_eprint" | "gobol_eprint" => Some("gobol_eprint"),
         "eprintln" | "_eprintln" | "gobol_eprintln" => Some("gobol_eprintln"),
         "read" | "_read" | "gobol_read" => Some("gobol_read"),
+        "gobol_args_count" => Some("gobol_args_count"),
+        "gobol_args_get" => Some("gobol_args_get"),
         // math intrinsics
         "sin" => Some("gobol_math_sin"),
         "cos" => Some("gobol_math_cos"),

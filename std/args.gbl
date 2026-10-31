@@ -1,0 +1,11 @@
+#![library_features(hidden = true)]
+
+/// Return the number of process arguments, including the executable path.
+func argc(): int {
+    builtins::gobol_args_count()
+}
+
+/// Return the argument at `index`; out-of-range indices return an empty string.
+func argv(index: int): str {
+    builtins::gobol_args_get(index)
+}

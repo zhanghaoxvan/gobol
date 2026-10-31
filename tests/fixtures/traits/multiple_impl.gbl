@@ -6,7 +6,8 @@ struct Multi {
 
 impl Multi {
     func new(value: int): Multi {
-        Multi { value: value }
+        self.value = value;
+        self
     }
 }
 

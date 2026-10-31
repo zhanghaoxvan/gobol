@@ -5,7 +5,9 @@ struct Rectangle {
 
 impl Rectangle {
     func new(w: int, h: int): Rectangle {
-        Rectangle { width: w, height: h }
+        self.width = w;
+        self.height = h;
+        self
     }
 
     func area(self): int {

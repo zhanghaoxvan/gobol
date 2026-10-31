@@ -14,7 +14,6 @@
 #include "runtime/mem.c"
 #include "runtime/array.c"
 #include "runtime/math.c"
-#include "runtime/time.c"
 #include "runtime/fs.c"
 #include "runtime/net.c"
 #include "runtime/thread.c"

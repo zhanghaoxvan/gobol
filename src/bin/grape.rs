@@ -78,8 +78,8 @@ pub struct GrapeToml {
     pub project: Project,
     #[serde(default)]
     pub dependencies: HashMap<String, DependencySpec>,
-    /// Optional `[build]` section: target triple, entry point, std, gc,
-    /// link script, opt level. Absent for plain hosted apps.
+    /// Optional `[build]` section: target triple, entry point, no_std,
+    /// no_gc, link script, opt level. Absent for plain hosted apps.
     #[serde(default)]
     pub build: Option<gobol::config::BuildConfig>,
     /// Optional `[optimize]` section: per-profile Cranelift opt levels.

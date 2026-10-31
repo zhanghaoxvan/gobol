@@ -4,7 +4,7 @@
 // like var v: int[] => var v: new vec<int>()
 // or var v1: int[32] => var v1: new vec<int>()
 // it calls this library
-#![library_features(hidden = true)]
+#[library_features(hidden = true)]
 
 import ref;
 import iterator;
@@ -13,14 +13,14 @@ struct Vec<T> {
     _data: T[],
     _len: int,
     _cap: int
-}
+};
 
 impl<T> New<T> for Vec<T> {
     func new(): Vec<T> {
-        Vec<T> {
+        Vec {
             _data: new T[0],
             _len: 0,
-            _cap: 0
+            _cap: 0,
         }
     }
 
@@ -33,10 +33,10 @@ impl<T> New<T> for Vec<T> {
     }
     
     func new(capacity: int): Vec<T> {
-        Vec<T> {
+        Vec {
             _data: new T[capacity],
             _len: 0,
-            _cap: capacity
+            _cap: capacity,
         }
     }
 }
@@ -65,7 +65,8 @@ impl<T> Vec<T> {
         if index < 0 || index >= self._len {
             panic("index out of bounds"); 
         }
-        self._data[index] = value;
+        var addr = builtins::gobol_array_elem_addr(self._data, index);
+        builtins::gobol_mem_store(addr, value);
     }
     
     func push(self, value: T) {
@@ -76,15 +77,16 @@ impl<T> Vec<T> {
             self._data = new T[4];
             self._cap = 4;
         }
-        self._data[self._len] = value;
-        self._len += 1;
+        var addr = builtins::gobol_array_elem_addr(self._data, self._len);
+        builtins::gobol_mem_store(addr, value);
+        self._len = self._len + 1;
     }
     
     func pop(self): T {
         if self._len == 0 {
             panic("pop from empty vec"); 
         }
-        self._len -= 1;
+        self._len = self._len - 1;
         var value: T = self._data[self._len];
         value
     }
@@ -127,13 +129,13 @@ impl<T> Vec<T> {
         self._data = new_data;
         self._cap = new_cap;
     }
-}
+};
 
 struct VecIterator<T> {
     _data: T[],
     _len: int,
     _index: int
-}
+};
 
 impl<T> New<T> for VecIterator<T> {
     func new(data: T[], len: int): VecIterator<T> {
@@ -148,7 +150,7 @@ impl<T> Iterator<T> for VecIterator<T> {
             return Option::None;
         }
         var value: T = self._data[self._index];
-        self._index += 1;
+        self._index = self._index + 1;
         Option::Some(value)
     }
-}
+};

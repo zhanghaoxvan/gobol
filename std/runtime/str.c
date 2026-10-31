@@ -41,110 +41,21 @@ long long gobol_str_eq(const char *a, const char *b) {
     return strcmp(a, b) == 0 ? 1 : 0;
 }
 
-static unsigned long gobol_utf8_decode(
-    const unsigned char *s, size_t remaining, size_t *width
-) {
-    unsigned char first = s[0];
-    *width = 1;
-
-    if (first < 0x80) {
-        return first;
-    }
-
-    size_t count;
-    unsigned long codepoint;
-    if (first >= 0xC2 && first <= 0xDF) {
-        count = 2;
-        codepoint = first & 0x1F;
-    } else if (first >= 0xE0 && first <= 0xEF) {
-        count = 3;
-        codepoint = first & 0x0F;
-    } else if (first >= 0xF0 && first <= 0xF4) {
-        count = 4;
-        codepoint = first & 0x07;
-    } else {
-        return 0xFFFD;
-    }
-
-    if (remaining < count) {
-        return 0xFFFD;
-    }
-    for (size_t i = 1; i < count; i++) {
-        if ((s[i] & 0xC0) != 0x80) {
-            return 0xFFFD;
-        }
-        codepoint = (codepoint << 6) | (s[i] & 0x3F);
-    }
-
-    if ((count == 3 && codepoint < 0x800) ||
-        (count == 4 && codepoint < 0x10000) ||
-        (codepoint >= 0xD800 && codepoint <= 0xDFFF) ||
-        codepoint > 0x10FFFF) {
-        return 0xFFFD;
-    }
-
-    *width = count;
-    return codepoint;
-}
-
 long long gobol_str_len(const char *s) {
-    if (!s) return 0;
-
-    size_t bytes = strlen(s);
-    size_t offset = 0;
-    long long count = 0;
-    while (offset < bytes) {
-        size_t width;
-        gobol_utf8_decode((const unsigned char *)s + offset, bytes - offset, &width);
-        offset += width;
-        count++;
-    }
-    return count;
+    return s ? (long long)strlen(s) : 0;
 }
 
 long long gobol_str_get(const char *s, long long i) {
-    if (!s || i < 0) return 0;
-
-    size_t bytes = strlen(s);
-    size_t offset = 0;
-    long long index = 0;
-    while (offset < bytes) {
-        size_t width;
-        unsigned long codepoint =
-            gobol_utf8_decode((const unsigned char *)s + offset, bytes - offset, &width);
-        if (index == i) return (long long)codepoint;
-        offset += width;
-        index++;
-    }
-    return 0;
+    if (!s) return 0;
+    long long len = (long long)strlen(s);
+    if (i < 0 || i >= len) return 0;
+    return (long long)(unsigned char)s[i];
 }
 
 char *gobol_str_char(long long code) {
-    if (code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
-        code = 0xFFFD;
-
-    char buf[5];
-    size_t len;
-    if (code <= 0x7F) {
-        buf[0] = (char)code;
-        len = 1;
-    } else if (code <= 0x7FF) {
-        buf[0] = (char)(0xC0 | (code >> 6));
-        buf[1] = (char)(0x80 | (code & 0x3F));
-        len = 2;
-    } else if (code <= 0xFFFF) {
-        buf[0] = (char)(0xE0 | (code >> 12));
-        buf[1] = (char)(0x80 | ((code >> 6) & 0x3F));
-        buf[2] = (char)(0x80 | (code & 0x3F));
-        len = 3;
-    } else {
-        buf[0] = (char)(0xF0 | (code >> 18));
-        buf[1] = (char)(0x80 | ((code >> 12) & 0x3F));
-        buf[2] = (char)(0x80 | ((code >> 6) & 0x3F));
-        buf[3] = (char)(0x80 | (code & 0x3F));
-        len = 4;
-    }
-    buf[len] = '\0';
+    char buf[2];
+    buf[0] = (char)(unsigned char)code;
+    buf[1] = '\0';
     return gobol_strdup(buf);
 }
 

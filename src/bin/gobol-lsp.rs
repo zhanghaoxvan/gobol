@@ -287,10 +287,6 @@ impl DocState {
         let sym_line = sym.line;
         let sym_col = sym.col;
 
-        if target_line == sym_line && target_col >= sym_col && target_col < sym_col + sym.len {
-            return true;
-        }
-
         // 1. Parameters are visible anywhere after the function signature's
         //    opening brace; i.e. anywhere inside their function body. We treat
         //    them as visible if the cursor is after the parameter declaration.
@@ -372,18 +368,10 @@ impl DocState {
     }
 
     fn find_definition_at(&self, name: &str, line: u32, character: u32) -> Option<&SymbolEntry> {
-        self.symbols
-            .iter()
-            .find(|s| {
-                s.name == name
-                    && matches!(s.kind, SymKind::Variable | SymKind::Parameter)
-                    && self.local_visible_at(s, line, character)
-            })
-            .or_else(|| {
-                self.symbols.iter().find(|s| {
-                    s.name == name && !matches!(s.kind, SymKind::Variable | SymKind::Parameter)
-                })
-            })
+        self.symbols.iter().filter(|s| s.name == name).find(|s| {
+            !matches!(s.kind, SymKind::Variable | SymKind::Parameter)
+                || self.local_visible_at(s, line, character)
+        })
     }
 
     /// Find the brace depth where the cursor currently sits, and the local
@@ -499,57 +487,62 @@ fn is_capitalized(s: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Return each interpolation's opening brace, expression start/end, and
-/// closing brace byte offsets. Doubled braces are literal escapes.
-fn format_interpolation_ranges(value: &str) -> Vec<(usize, usize, usize, usize)> {
+/// Extract `{name}` interpolation identifiers from a format-string literal
+/// value (e.g. `"@{value: {x}}"` → `[(9, "x")]`). Respects `{{`/`}}` escapes
+/// so brace pairs used as escaping do not produce dummy interpolation vars.
+/// Byte offsets are relative to the start of `value`.
+fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
     let bytes = value.as_bytes();
-    let mut ranges = Vec::new();
     let mut i = 0;
-    while i < bytes.len() {
-        if (bytes[i] == b'{' || bytes[i] == b'}') && bytes.get(i + 1) == Some(&bytes[i]) {
-            i += 2;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            i += 2; // escaped {{ — skip
             continue;
         }
-        if bytes[i] != b'{' {
-            i += 1;
+        if bytes[i] == b'}' && bytes[i + 1] == b'}' {
+            i += 2; // escaped }} — skip
             continue;
         }
-
-        let open = i;
-        let start = i + 1;
-        let mut depth = 1usize;
-        let mut j = start;
-        let mut quote = None;
-        let mut escaped = false;
-        while j < bytes.len() {
-            let byte = bytes[j];
-            if let Some(delimiter) = quote {
-                if escaped {
-                    escaped = false;
-                } else if byte == b'\\' {
-                    escaped = true;
-                } else if byte == delimiter {
-                    quote = None;
-                }
-            } else if byte == b'"' || byte == b'\'' {
-                quote = Some(byte);
-            } else if byte == b'{' {
-                depth += 1;
-            } else if byte == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    ranges.push((open, start, j, j));
-                    i = j + 1;
-                    break;
-                }
+        if bytes[i] == b'{' {
+            // find matching close brace
+            let start = i + 1;
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b'}' {
+                j += 1;
             }
-            j += 1;
+            if j < bytes.len() {
+                let inner = &value[start..j];
+                let name = inner.trim();
+                // Only simple identifier interpolation (no format spec like `{x:.2}`).
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':')
+                {
+                    // Take the segment before any `.`/`:` suffix to get the binding.
+                    let ident = name
+                        .split(|c| c == '.' || c == ':')
+                        .next()
+                        .unwrap_or(name)
+                        .trim();
+                    if !ident.is_empty()
+                        && ident
+                            .chars()
+                            .next()
+                            .map(|c| c.is_alphabetic() || c == '_')
+                            .unwrap_or(false)
+                    {
+                        out.push((start, ident.to_string()));
+                    }
+                }
+                i = j + 1;
+                continue;
+            }
         }
-        if depth != 0 {
-            i = start;
-        }
+        i += 1;
     }
-    ranges
+    out
 }
 
 /// Split the *literal* text of a string/format-string value into non-escape
@@ -566,11 +559,6 @@ fn format_interpolation_ranges(value: &str) -> Vec<(usize, usize, usize, usize)>
 fn string_literal_segments(value: &str, skip_braces: bool) -> Vec<(usize, usize)> {
     let bytes = value.as_bytes();
     let n = bytes.len();
-    let interpolation_ranges = if skip_braces {
-        format_interpolation_ranges(value)
-    } else {
-        Vec::new()
-    };
     let mut segs: Vec<(usize, usize)> = Vec::new();
     let mut seg_start = 0usize;
     let mut i = 0usize;
@@ -613,15 +601,14 @@ fn string_literal_segments(value: &str, skip_braces: bool) -> Vec<(usize, usize)
             i += len;
         } else {
             // `{` interpolation block (or escaped `{{`).
-            i = if i + 1 < n && bytes[i + 1] == b'{' {
-                i + 2 // `{{` literal brace pair — skip both
-            } else if let Some((_, _, _, close)) = interpolation_ranges
-                .iter()
-                .find(|(open, _, _, _)| *open == i)
-            {
-                close + 1
+            i += if i + 1 < n && bytes[i + 1] == b'{' {
+                2 // `{{` literal brace pair — skip both
             } else {
-                n
+                let mut j = i + 1;
+                while j < n && bytes[j] != b'}' {
+                    j += 1;
+                }
+                if j < n { j - i + 1 } else { n - i }
             };
         }
         seg_start = i;
@@ -670,34 +657,12 @@ fn classify_ident(
     symbols: &[SymbolEntry],
     ns_set: &std::collections::HashSet<(i32, i32)>,
 ) -> (u32, u32) {
-    classify_ident_with_scope(tokens, i, symbols, ns_set, tokens, i, true)
-}
-
-fn classify_ident_with_scope(
-    tokens: &[Token],
-    i: usize,
-    symbols: &[SymbolEntry],
-    ns_set: &std::collections::HashSet<(i32, i32)>,
-    scope_tokens: &[Token],
-    scope_index: usize,
-    allow_declaration: bool,
-) -> (u32, u32) {
     let t = &tokens[i];
     if t.value == "lambda" {
         return (type_index(SemanticTokenType::KEYWORD), 0);
     }
     // 1. Position is a declaration (from the symbol index) — use its kind.
-    if allow_declaration {
-        if let Some(sym) = find_symbol_at(symbols, t.line, t.col) {
-            return symbol_semantic(&sym.kind);
-        }
-    }
-    // Prefer a visible local binding over a same-named global function/method.
-    if let Some(sym) = symbols.iter().find(|sym| {
-        sym.name == t.value
-            && matches!(sym.kind, SymKind::Variable | SymKind::Parameter)
-            && local_symbol_visible_at(scope_tokens, sym, scope_index)
-    }) {
+    if let Some(sym) = find_symbol_at(symbols, t.line, t.col) {
         return symbol_semantic(&sym.kind);
     }
     // 2. Module name in an import statement.
@@ -794,16 +759,18 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 continue; // for-loop advances `i`
             }
-            // Format string `@"...{expr}..."`: color literal text as a string,
-            // and classify the interpolation contents like ordinary code.
+            // Format string `@"...{var}..."`: colour literal (non-escape) text
+            // as a string, and emit a `variable`/`type` token for each
+            // interpolation identifier so `{var}` is typed as its binding.
             TokenType::FormatString => {
                 let line = (t.line as u32).saturating_sub(1);
                 let start = t.col.max(0) as u32;
                 // String content begins after `@` and `"`.
                 let content_base = start + 2;
 
-                // Collect all sub-tokens for this literal and emit in source
-                // order so delta encoding never has to go backwards.
+                // Collect all sub-tokens for this literal (string segments and
+                // interpolation ids) and emit them in ascending column order so
+                // the delta encoding never has to go backwards.
                 let mut parts: Vec<(u32, u32, u32, u32)> = Vec::new(); // (col,len,type,mods)
                 for (off, len) in string_literal_segments(&t.value, true) {
                     parts.push((
@@ -813,66 +780,29 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                         0,
                     ));
                 }
-                let no_namespaces = std::collections::HashSet::new();
-                for (open, expr_start, expr_end, close) in format_interpolation_ranges(&t.value) {
-                    let operator = type_index(SemanticTokenType::OPERATOR);
-                    parts.push((content_base + open as u32, 1, operator, 0));
-                    parts.push((content_base + close as u32, 1, operator, 0));
-
-                    let expression = &t.value[expr_start..expr_end];
-                    let mut lexer = Lexer::new(expression);
-                    let mut expression_tokens = Vec::new();
-                    loop {
-                        let token = lexer.get_next_token();
-                        if token.r#type == TokenType::EndOfFile {
-                            break;
+                for (off, ident) in format_interpolation_spans(&t.value) {
+                    let var_col = content_base + off as u32;
+                    let (ity, imods) = if ident
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_uppercase())
+                        .unwrap_or(false)
+                    {
+                        (type_index(SemanticTokenType::TYPE), 0)
+                    } else {
+                        // Prefer declared variable type when known via symbol table.
+                        let ty = symbols
+                            .iter()
+                            .find(|s| s.name == ident)
+                            .map(|s| s.type_info.is_some())
+                            .unwrap_or(false);
+                        if ty {
+                            (type_index(SemanticTokenType::TYPE), 0)
+                        } else {
+                            (type_index(SemanticTokenType::VARIABLE), 0)
                         }
-                        expression_tokens.push(token);
-                    }
-                    for (expr_i, expr_token) in expression_tokens.iter().enumerate() {
-                        if matches!(
-                            expr_token.r#type,
-                            TokenType::EndOfLine | TokenType::Character | TokenType::Unknown
-                        ) {
-                            continue;
-                        }
-                        let (token_type, modifiers) = match expr_token.r#type {
-                            TokenType::Keyword => match expr_token.value.as_str() {
-                                "int" | "float" | "str" | "bool" | "void" | "char" | "unit" => {
-                                    (type_index(SemanticTokenType::TYPE), 0)
-                                }
-                                "func"
-                                    if expression_tokens
-                                        .get(expr_i + 1)
-                                        .map(|next| next.value == "(")
-                                        .unwrap_or(false) =>
-                                {
-                                    (type_index(SemanticTokenType::TYPE), 0)
-                                }
-                                _ => (type_index(SemanticTokenType::KEYWORD), 0),
-                            },
-                            TokenType::Number => (type_index(SemanticTokenType::NUMBER), 0),
-                            TokenType::String => (type_index(SemanticTokenType::STRING), 0),
-                            TokenType::Operator if expr_token.value == ":" => continue,
-                            TokenType::Operator => (operator, 0),
-                            TokenType::Identifier => classify_ident_with_scope(
-                                &expression_tokens,
-                                expr_i,
-                                symbols,
-                                &no_namespaces,
-                                tokens,
-                                i,
-                                false,
-                            ),
-                            _ => continue,
-                        };
-                        parts.push((
-                            content_base + expr_start as u32 + expr_token.col.max(0) as u32,
-                            expr_token.value.len() as u32,
-                            token_type,
-                            modifiers,
-                        ));
-                    }
+                    };
+                    parts.push((var_col, ident.len() as u32, ity, imods));
                 }
                 parts.sort_by_key(|p| p.0);
                 for (col, len, ty, md) in parts {
@@ -889,9 +819,7 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 continue; // for-loop advances `i`
             }
-            TokenType::Operator if t.value == ":" => continue,
             TokenType::Operator => (type_index(SemanticTokenType::OPERATOR), 0),
-            TokenType::Character => continue,
             TokenType::Identifier => classify_ident(tokens, i, symbols, &ns_set),
             TokenType::Unknown | TokenType::EndOfLine | TokenType::EndOfFile => continue,
         };
@@ -920,106 +848,6 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
     }
 
     out
-}
-
-fn local_symbol_visible_at(tokens: &[Token], symbol: &SymbolEntry, token_index: usize) -> bool {
-    let Some(symbol_index) = tokens
-        .iter()
-        .position(|token| token.line == symbol.line && token.col == symbol.col)
-    else {
-        return false;
-    };
-    if symbol_index >= token_index {
-        return false;
-    }
-
-    let local_scope = if symbol.kind == SymKind::Parameter {
-        let function_index = (0..symbol_index).rev().find(|&index| {
-            tokens[index].r#type == TokenType::Keyword
-                && tokens[index].value == "func"
-                && function_parameter_contains(tokens, index, symbol_index)
-        });
-        let Some(function_index) = function_index else {
-            return false;
-        };
-        let Some(body_index) = function_body_start(tokens, function_index) else {
-            return false;
-        };
-        brace_scope_path(tokens, body_index)
-    } else {
-        brace_scope_path(tokens, symbol_index)
-    };
-    let cursor_scope = brace_scope_path(tokens, token_index);
-
-    local_scope.len() <= cursor_scope.len()
-        && local_scope
-            .iter()
-            .zip(cursor_scope.iter())
-            .all(|(local, cursor)| local == cursor)
-}
-
-fn function_parameter_contains(
-    tokens: &[Token],
-    function_index: usize,
-    parameter_index: usize,
-) -> bool {
-    let Some(open_paren) =
-        (function_index + 1..tokens.len()).find(|&index| tokens[index].value == "(")
-    else {
-        return false;
-    };
-    let mut depth = 0i32;
-    for index in open_paren..tokens.len() {
-        match tokens[index].value.as_str() {
-            "(" => depth += 1,
-            ")" => {
-                depth -= 1;
-                if depth == 0 {
-                    return open_paren < parameter_index && parameter_index < index;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-fn function_body_start(tokens: &[Token], function_index: usize) -> Option<usize> {
-    let open_paren =
-        (function_index + 1..tokens.len()).find(|&index| tokens[index].value == "(")?;
-    let mut depth = 0i32;
-    let mut close_paren = None;
-    for index in open_paren..tokens.len() {
-        match tokens[index].value.as_str() {
-            "(" => depth += 1,
-            ")" => {
-                depth -= 1;
-                if depth == 0 {
-                    close_paren = Some(index);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let close_paren = close_paren?;
-    let body_or_end = (close_paren + 1..tokens.len())
-        .find(|&index| matches!(tokens[index].value.as_str(), "{" | ";"))?;
-    (tokens[body_or_end].value == "{").then_some(body_or_end)
-}
-
-fn brace_scope_path(tokens: &[Token], through_index: usize) -> Vec<usize> {
-    let mut path = Vec::new();
-    for (index, token) in tokens.iter().enumerate().take(through_index + 1) {
-        match token.value.as_str() {
-            "{" => path.push(index),
-            "}" => {
-                path.pop();
-            }
-            _ => {}
-        }
-    }
-    path
 }
 
 // ==================== Symbol Index Builder ====================
@@ -1282,7 +1110,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                         false
                     };
                     if let Some(name_tok) = tokens.get(j + 1) {
-                        if name_tok.r#type == TokenType::Identifier || name_tok.value == "new" {
+                        if name_tok.r#type == TokenType::Identifier {
                             let type_info = find_return_type(tokens, j);
                             let kind = if is_static {
                                 SymKind::StaticFunc
@@ -1506,9 +1334,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                                 if let Some(nt) = tokens.get(k + 1) {
                                     if nt.value == "func" {
                                         if let Some(name_tok) = tokens.get(k + 2) {
-                                            if name_tok.r#type == TokenType::Identifier
-                                                || name_tok.value == "new"
-                                            {
+                                            if name_tok.r#type == TokenType::Identifier {
                                                 let type_info = find_return_type(tokens, k + 1);
                                                 symbols.push(SymbolEntry {
                                                     name: name_tok.value.clone(),
@@ -1530,9 +1356,7 @@ fn build_symbol_index(tokens: &[Token], source: &str) -> Vec<SymbolEntry> {
                             // normal func method
                             if t.r#type == TokenType::Keyword && t.value == "func" {
                                 if let Some(name_tok) = tokens.get(k + 1) {
-                                    if name_tok.r#type == TokenType::Identifier
-                                        || name_tok.value == "new"
-                                    {
+                                    if name_tok.r#type == TokenType::Identifier {
                                         let type_info = find_return_type(tokens, k);
                                         symbols.push(SymbolEntry {
                                             name: name_tok.value.clone(),
@@ -2259,77 +2083,6 @@ fn brace_folding_ranges(tokens: &[Token]) -> Vec<FoldingRange> {
     ranges
 }
 
-fn imported_module_paths(tokens: &[Token]) -> Vec<(String, Option<String>)> {
-    let mut imports = Vec::new();
-    let mut i = 0;
-    while i < tokens.len() {
-        if tokens[i].r#type != TokenType::Keyword {
-            i += 1;
-            continue;
-        }
-
-        let is_from = tokens[i].value == "from";
-        if !is_from && tokens[i].value != "import" {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 1;
-        let mut parts = Vec::new();
-        while let Some(token) = tokens.get(j) {
-            if token.r#type != TokenType::Identifier && token.r#type != TokenType::Keyword {
-                break;
-            }
-            parts.push(token.value.clone());
-            j += 1;
-            if tokens
-                .get(j)
-                .map(|separator| separator.value == "::" || separator.value == ".")
-                .unwrap_or(false)
-            {
-                j += 1;
-            } else {
-                break;
-            }
-        }
-        if parts.is_empty() {
-            i += 1;
-            continue;
-        }
-
-        if is_from {
-            if tokens.get(j).map(|token| token.value.as_str()) == Some("import") {
-                imports.push((parts.join("::"), None));
-            }
-            i = j.saturating_add(1);
-        } else {
-            let alias = if tokens.get(j).map(|token| token.value.as_str()) == Some("as") {
-                tokens.get(j + 1).map(|token| token.value.clone())
-            } else {
-                None
-            };
-            imports.push((parts.join("::"), alias));
-            i = j;
-        }
-    }
-    imports
-}
-
-fn resolve_import_qualifier(tokens: &[Token], qualifier: &str) -> String {
-    imported_module_paths(tokens)
-        .into_iter()
-        .find_map(|(module, alias)| {
-            if alias.as_deref() == Some(qualifier)
-                || module == qualifier
-                || module.rsplit("::").next() == Some(qualifier)
-            {
-                Some(module)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| qualifier.to_string())
-}
-
 /// Best-effort inference of a simple expression's type, starting at
 /// `start_idx` of `tokens`. Returns a string type or `None`.
 ///
@@ -2339,52 +2092,6 @@ fn resolve_import_qualifier(tokens: &[Token], qualifier: &str) -> String {
 /// resolve to their declared return type — the bare function name is never
 /// used as a type.
 fn infer_expr_type(
-    tokens: &[Token],
-    idx: usize,
-    state: &DocState,
-    lsp: Option<&GobolLsp>,
-    uri: Option<&str>,
-) -> Option<String> {
-    if let Some(cast_type) = infer_cast_type(tokens, idx) {
-        return Some(cast_type);
-    }
-    infer_expr_type_without_cast(tokens, idx, state, lsp, uri)
-}
-
-fn infer_cast_type(tokens: &[Token], start_idx: usize) -> Option<String> {
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut brace_depth = 0usize;
-    for (index, token) in tokens.iter().enumerate().skip(start_idx) {
-        match token.value.as_str() {
-            "as" if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                return tokens.get(index + 1).map(|ty| ty.value.clone());
-            }
-            "(" => paren_depth += 1,
-            ")" if paren_depth > 0 => paren_depth -= 1,
-            ")" if paren_depth == 0 => return None,
-            "[" => bracket_depth += 1,
-            "]" if bracket_depth > 0 => bracket_depth -= 1,
-            "{" => brace_depth += 1,
-            "}" if brace_depth > 0 => brace_depth -= 1,
-            "}" if brace_depth == 0 => return None,
-            ";" | "," if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                return None;
-            }
-            _ => {}
-        }
-        if token.r#type == TokenType::EndOfLine
-            && paren_depth == 0
-            && bracket_depth == 0
-            && brace_depth == 0
-        {
-            return None;
-        }
-    }
-    None
-}
-
-fn infer_expr_type_without_cast(
     tokens: &[Token],
     mut idx: usize,
     state: &DocState,
@@ -2440,7 +2147,6 @@ fn infer_expr_type_without_cast(
             let module = t.value.clone();
             let member = tokens.get(idx + 2).map(|n| n.value.clone());
             let is_call = tokens.get(idx + 3).map(|n| n.value.as_str()) == Some("(");
-            let imported_module = resolve_import_qualifier(tokens, &module);
             if let Some(ref m) = member {
                 let rt = ret_type(m);
                 if rt.is_some() {
@@ -2448,16 +2154,18 @@ fn infer_expr_type_without_cast(
                 }
                 if is_call {
                     if let (Some(lsp), Some(uri)) = (lsp, uri) {
-                        if let Some(sig) = lsp.imported_signature(uri, &imported_module, m) {
-                            return sig.return_type.or(Some("unknown".to_string()));
-                        }
                         if let Some(sig) = lsp.imported_method_signature(uri, &module, m) {
                             return sig.return_type.or(Some("unknown".to_string()));
                         }
                     }
-                    if lsp.is_some() {
-                        return Some("unknown".to_string());
+                }
+                if is_call {
+                    if let (Some(lsp), Some(uri)) = (lsp, uri) {
+                        if let Some(sig) = lsp.imported_signature(uri, &module, m) {
+                            return sig.return_type.or(Some("unknown".to_string()));
+                        }
                     }
+                    return Some("unknown".to_string());
                 }
             }
             return None;
@@ -2872,18 +2580,6 @@ fn resolve_module_file(
         }
     }
     None
-}
-
-fn imported_signature_from_path(
-    file_path: &str,
-    module: &str,
-    workspace_roots: &[PathBuf],
-    name: &str,
-) -> Option<FuncSignature> {
-    let module_path = resolve_module_file(file_path, module, workspace_roots)?;
-    let source = std::fs::read_to_string(module_path).ok()?;
-    let tokens = lex_source(&source);
-    collect_signatures(&tokens, &source).remove(name)
 }
 
 // ==================== Analysis ====================
@@ -4119,7 +3815,18 @@ impl GobolLsp {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
-        imported_signature_from_path(&file_path, module, &roots, name)
+        let mod_path = resolve_module_file(&file_path, module, &roots)?;
+        let source = std::fs::read_to_string(mod_path).ok()?;
+        let mut lexer = Lexer::new(&source);
+        let mut toks = Vec::new();
+        loop {
+            let t = lexer.get_next_token();
+            if t.r#type == TokenType::EndOfFile {
+                break;
+            }
+            toks.push(t);
+        }
+        collect_signatures(&toks, &source).remove(name)
     }
 
     fn imported_method_signature(
@@ -4169,9 +3876,11 @@ impl GobolLsp {
             .ok()
             .and_then(|documents| documents.get(uri).cloned())
             .map(|state| {
-                imported_module_paths(&state.tokens)
-                    .into_iter()
-                    .map(|(module, _)| module)
+                state
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.kind == SymKind::Import)
+                    .map(|symbol| symbol.name.clone())
                     .collect()
             })
             .unwrap_or_default()
@@ -4355,9 +4064,11 @@ impl GobolLsp {
         // Imported modules: use imported_module_names but we need sync — clone
         // isn't async here; reuse imported_module_names_async via block_on not
         // available. Instead scan symbols for Import names directly.
-        for (module, _) in imported_module_paths(&state.tokens) {
-            if let Some(sig) = self.imported_signature(uri, &module, name) {
-                return Some(sig);
+        for sym in &state.symbols {
+            if sym.kind == SymKind::Import {
+                if let Some(sig) = self.imported_signature(uri, &sym.name, name) {
+                    return Some(sig);
+                }
             }
         }
         None
@@ -4711,9 +4422,11 @@ impl GobolLsp {
             state_guard
                 .get(uri)
                 .map(|state| {
-                    imported_module_paths(&state.tokens)
-                        .into_iter()
-                        .map(|(module, _)| module)
+                    state
+                        .symbols
+                        .iter()
+                        .filter(|s| s.kind == SymKind::Import)
+                        .map(|s| s.name.clone())
                         .collect()
                 })
                 .unwrap_or_default()
@@ -5168,91 +4881,6 @@ fib(10) == 55
     }
 
     #[test]
-    fn semantic_tokens_keep_type_colon_as_punctuation_and_highlight_type_keyword() {
-        let source = "var item: Alias;\ntype Alias;\n";
-        let tokens = lex(source);
-        let symbols = build_symbol_index(&tokens, source);
-        let decoded = decode(&build_semantic_tokens(&tokens, &symbols));
-
-        assert!(
-            !decoded.contains(&(0, 8, "operator".to_string())),
-            "type annotation colon should be left to TextMate punctuation scope: {decoded:?}"
-        );
-        assert!(
-            decoded.contains(&(1, 0, "keyword".to_string())),
-            "`type` should be semantically highlighted as a keyword: {decoded:?}"
-        );
-        assert!(
-            decoded.contains(&(1, 5, "type".to_string())),
-            "type alias name should be highlighted as a type: {decoded:?}"
-        );
-    }
-
-    #[test]
-    fn local_parameter_reference_wins_over_same_named_function() {
-        let source = "func value(): int { 1 }\n\
-impl<T> New<T> for Option<T> {\n\
-    func new(value: T): Option<T> {\n\
-        Option::Some(value)\n\
-    }\n\
-}\n";
-        let tokens = lex(source);
-        let symbols = build_symbol_index(&tokens, source);
-        let usage = tokens
-            .iter()
-            .find(|token| token.line == 4 && token.value == "value")
-            .expect("parameter use in Some(value)");
-        let decoded = decode(&build_semantic_tokens(&tokens, &symbols));
-
-        assert!(
-            decoded.contains(&(3, usage.col as u32, "parameter".to_string())),
-            "local `value` should be a parameter, not a same-named function: {decoded:?}"
-        );
-    }
-
-    #[test]
-    fn hover_prefers_parameter_declaration_over_same_named_method() {
-        let source = "impl<T> Option<T> {\n\
-    func value(self): T { _0 }\n\
-    func new(value: T): Option<T> {\n\
-        Option::Some(value)\n\
-    }\n\
-}\n";
-        let tokens = lex(source);
-        let symbols = build_symbol_index(&tokens, source);
-        let parameter = symbols
-            .iter()
-            .find(|sym| sym.name == "value" && sym.kind == SymKind::Parameter)
-            .expect("new's value parameter");
-        let parameter_line = (parameter.line - 1) as u32;
-        let parameter_col = parameter.col as u32;
-        let reference = tokens
-            .iter()
-            .find(|token| token.line == 4 && token.value == "value")
-            .expect("value parameter reference");
-        let reference_line = (reference.line - 1) as u32;
-        let reference_col = reference.col as u32;
-        let state = DocState {
-            source: source.into(),
-            tokens,
-            symbols,
-            errors: vec![],
-            signatures: Default::default(),
-            func_types: Default::default(),
-        };
-
-        let declaration = state
-            .find_definition_at("value", parameter_line, parameter_col)
-            .expect("hover on parameter declaration");
-        assert_eq!(declaration.kind, SymKind::Parameter);
-
-        let reference = state
-            .find_definition_at("value", reference_line, reference_col)
-            .expect("hover on parameter reference");
-        assert_eq!(reference.kind, SymKind::Parameter);
-    }
-
-    #[test]
     fn test_semantic_tokens_type_qualifier_and_variable() {
         let source = "var v = io::MAX;\nimport io;\n";
         let tokens = lex(source);
@@ -5302,28 +4930,6 @@ var tests: [(str, func(): bool)] = [(\"timeout\", test_connect_timeout)];\n";
 mod unit_new {
     use super::*;
 
-    fn decode(data: &[SemanticToken]) -> Vec<(u32, u32, String)> {
-        let mut line = 0;
-        let mut col = 0;
-        data.iter()
-            .map(|token| {
-                line += token.delta_line;
-                if token.delta_line == 0 {
-                    col += token.delta_start;
-                } else {
-                    col = token.delta_start;
-                }
-                (
-                    line,
-                    col,
-                    SEMANTIC_TYPES[token.token_type as usize]
-                        .as_str()
-                        .to_string(),
-                )
-            })
-            .collect()
-    }
-
     fn lex(s: &str) -> Vec<Token> {
         let mut l = Lexer::new(s);
         let mut v = Vec::new();
@@ -5339,18 +4945,16 @@ mod unit_new {
 
     #[test]
     fn format_interpolation_parses_bindings() {
-        assert_eq!(
-            format_interpolation_ranges("value: {x}"),
-            vec![(7, 8, 9, 9)]
-        );
-        assert_eq!(
-            format_interpolation_ranges("{{literal}} and {y}"),
-            vec![(16, 17, 18, 18)]
-        );
-        assert_eq!(
-            format_interpolation_ranges("{n:04} and {p.x}"),
-            vec![(0, 1, 5, 5), (11, 12, 15, 15)]
-        );
+        let v = format_interpolation_spans("value: {x}");
+        assert_eq!(v, vec![(8, "x".to_string())]);
+        // escaped braces are not bindings
+        let v2 = format_interpolation_spans("{{literal}} and {y}");
+        assert_eq!(v2, vec![(17, "y".to_string())]);
+        // format spec suffix still resolves to the binding name
+        let v3 = format_interpolation_spans("{n:04} and {p.x}");
+        assert_eq!(v3.len(), 2);
+        assert_eq!(v3[0], (1, "n".to_string()));
+        assert_eq!(v3[1], (12, "p".to_string()));
     }
 
     #[test]
@@ -5422,74 +5026,45 @@ mod unit_new {
 
     #[test]
     fn semantic_format_string_marks_interpolation_variable() {
-        // Both declared and undeclared lowercase interpolation names are
-        // variables; a declared variable's type does not change its token kind.
+        // `@"hello {name}"` with a local var `name` → interpolation is TYPE
+        // (declared variable) vs a plain undeclared `zzz` → VARIABLE.
         let source = "var name: str = \"\";\nvar s: str = @\"hi {name} {zzz}\";\n";
         let tokens = lex(source);
         let symbols = build_symbol_index(&tokens, source);
         let data = build_semantic_tokens(&tokens, &symbols);
 
-        let mut line_number = 0;
-        let mut column = 0;
-        let decoded: Vec<_> = data
-            .iter()
-            .map(|token| {
-                line_number += token.delta_line;
-                if token.delta_line == 0 {
-                    column += token.delta_start;
-                } else {
-                    column = token.delta_start;
-                }
-                (
-                    line_number,
-                    column,
-                    SEMANTIC_TYPES[token.token_type as usize]
-                        .as_str()
-                        .to_string(),
-                )
-            })
-            .collect();
-        let line = source.lines().nth(1).unwrap();
-        let name_col = line.find("{name}").unwrap() as u32 + 1;
-        let zzz_col = line.find("{zzz}").unwrap() as u32 + 1;
-
-        assert!(
-            decoded.contains(&(1, name_col, "variable".to_string())),
-            "declared interpolation should be a variable, not its declared type: {decoded:?}"
-        );
-        assert!(
-            decoded.contains(&(1, zzz_col, "variable".to_string())),
-            "undeclared interpolation should remain a variable: {decoded:?}"
-        );
-    }
-
-    #[test]
-    fn semantic_format_string_highlights_braces_and_expression_tokens() {
-        let source = "func render(name: str): str {\n\
-    return @\"{name + 42}\"\n\
-}\n";
-        let tokens = lex(source);
-        let symbols = build_symbol_index(&tokens, source);
-        let decoded = decode(&build_semantic_tokens(&tokens, &symbols));
-        let line = source.lines().nth(1).unwrap();
-        let open_col = line.find('{').unwrap() as u32;
-        let name_col = line.find("name").unwrap() as u32;
-        let plus_col = line.find('+').unwrap() as u32;
-        let number_col = line.find("42").unwrap() as u32;
-        let close_col = line.find('}').unwrap() as u32;
-
-        for (col, expected_type) in [
-            (open_col, "operator"),
-            (name_col, "parameter"),
-            (plus_col, "operator"),
-            (number_col, "number"),
-            (close_col, "operator"),
-        ] {
-            assert!(
-                decoded.contains(&(1, col, expected_type.to_string())),
-                "expected `{expected_type}` token at column {col}: {decoded:?}"
-            );
+        // Decode to (line, col, typename).
+        let mut line = 0;
+        let mut col = 0;
+        let mut out = Vec::new();
+        for st in data {
+            line += st.delta_line;
+            if st.delta_line == 0 {
+                col += st.delta_start;
+            } else {
+                col = st.delta_start;
+            }
+            out.push((
+                line,
+                col,
+                SEMANTIC_TYPES[st.token_type as usize].as_str().to_string(),
+            ));
         }
+        // line2: `var s: str = @"hi {name} {zzz}";`
+        // name at content base col=?? content_base = @ col + 2. Find `name` token (TYPE).
+        // Both name(declared) and zzz(undeclared) should appear; assert presence + types.
+        let declared = out.iter().any(|(l, _c, t)| *l == 1 && t == "type");
+        assert!(
+            declared,
+            "expected a `type` token on interpolation of a declared var; got {:?}",
+            out
+        );
+        let has_var = out.iter().any(|(l, _, t)| *l == 1 && t == "variable");
+        assert!(
+            has_var,
+            "expected a `variable` token for undeclared interpolation; got {:?}",
+            out
+        );
     }
 
     #[test]
@@ -5787,47 +5362,6 @@ mod e2e_doc {
     }
 
     #[test]
-    fn semantic_array_diagnostic_points_at_indexed_use() {
-        let source = "func main() {\n    var s = 1;\n    s[0];\n}\n";
-        let doc = analyze_document("file:///tmp/array-error.gbl", source, &[]);
-        let (line, col, message) = doc
-            .errors
-            .iter()
-            .find(|(_, _, message)| message.contains("is not an array"))
-            .expect("array diagnostic");
-
-        assert_eq!((*line, *col), (3, 4));
-        let diagnostic = error_to_diagnostic(source, &doc.tokens, *line, *col, message);
-        assert_eq!(diagnostic.range.start, Position::new(2, 4));
-        assert_eq!(diagnostic.range.end, Position::new(2, 5));
-    }
-
-    #[test]
-    fn undeclared_function_diagnostic_points_at_call() {
-        let source = "func main() {\n    missing();\n    missing();\n}\n";
-        let doc = analyze_document("file:///tmp/function-error.gbl", source, &[]);
-        let diagnostics: Vec<_> = doc
-            .errors
-            .iter()
-            .filter(|(_, _, message)| message.contains("Undeclared function"))
-            .collect();
-        assert_eq!(diagnostics.len(), 2, "expected both missing-call errors");
-
-        for ((line, col, message), expected_line) in diagnostics.iter().zip([2, 3]) {
-            assert_eq!((*line, *col), (expected_line, 4));
-            let diagnostic = error_to_diagnostic(source, &doc.tokens, *line, *col, message);
-            assert_eq!(
-                diagnostic.range.start,
-                Position::new((expected_line - 1) as u32, 4)
-            );
-            assert_eq!(
-                diagnostic.range.end,
-                Position::new((expected_line - 1) as u32, 11)
-            );
-        }
-    }
-
-    #[test]
     fn char_type_is_semantically_highlighted_as_type() {
         let source = "func f(value: char): char { value }\n";
         let tokens = lex_source(source);
@@ -5903,41 +5437,6 @@ mod e2e_doc {
             infer_expr_type(&unk, 0, &doc, None, None).as_deref(),
             Some("unknown")
         );
-    }
-
-    #[test]
-    fn infer_explicit_cast_type_before_expression_return_type() {
-        let source = "func read(): str { \"input\" }\n";
-        let doc = analyze_document("file:///tmp/cast.gbl", source, &[]);
-        let cast_call = lexall("io::read() as int;");
-
-        assert_eq!(
-            infer_expr_type(&cast_call, 0, &doc, None, None).as_deref(),
-            Some("int")
-        );
-    }
-
-    #[test]
-    fn aliased_nested_import_resolves_function_return_type() {
-        let imports = lexall("import std::math as m;\n");
-        assert_eq!(
-            imported_module_paths(&imports),
-            vec![("std::math".to_string(), Some("m".to_string()))]
-        );
-        assert_eq!(
-            resolve_import_qualifier(&imports, "m"),
-            "std::math".to_string()
-        );
-
-        let main_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("modules")
-            .join("main.gbl");
-        let signature =
-            imported_signature_from_path(&main_file.to_string_lossy(), "std::math", &[], "add")
-                .expect("std::math::add signature");
-        assert_eq!(signature.return_type.as_deref(), Some("int"));
     }
 
     #[test]

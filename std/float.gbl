@@ -1,2 +1,51 @@
-// Compatibility module: the builtin float and its intrinsic operations live in core.
-import core::float;
+import ops;
+import cmp;
+
+// Float type — bound to native f64
+#[builtin("float64")]
+struct float {}
+
+// Trait implementations for float using intrinsic runtime functions.
+// Float supports the arithmetic traits (Add/Sub/Mul/Div) and the
+// comparison traits (Eq/Cmp), but not Rem (no float modulo).
+// Intrinsic methods have no body — the implementation is supplied by
+// the backend (#[intrinsic] → native Cranelift instruction).
+
+impl ops::Add for float {
+    #[intrinsic("f64_add")]
+    func add(self, other: float): float;
+}
+
+impl ops::Sub for float {
+    #[intrinsic("f64_sub")]
+    func sub(self, other: float): float;
+}
+
+impl ops::Mul for float {
+    #[intrinsic("f64_mul")]
+    func mul(self, other: float): float;
+}
+
+impl ops::Div for float {
+    #[intrinsic("f64_div")]
+    func div(self, other: float): float;
+}
+
+impl cmp::Eq for float {
+    #[intrinsic("f64_eq")]
+    func eq(self, other: float): bool;
+}
+
+impl cmp::Cmp for float {
+    #[intrinsic("f64_lt")]
+    func lt(self, other: float): bool;
+
+    #[intrinsic("f64_le")]
+    func le(self, other: float): bool;
+
+    #[intrinsic("f64_gt")]
+    func gt(self, other: float): bool;
+
+    #[intrinsic("f64_ge")]
+    func ge(self, other: float): bool;
+}

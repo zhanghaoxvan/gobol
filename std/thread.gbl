@@ -14,7 +14,7 @@ import result;
 // `gobol_thread_join`, `gobol_chan_*`) are declared once in
 // std/builtins.gbl, which every Gobol program auto-imports.
 
-#![library_features(hidden = true)]
+#[library_features(hidden = true)]
 
 struct Thread {
     _id: int
@@ -48,7 +48,7 @@ struct Channel<T> {
 
 impl<T> Channel<T> {
     func new(): Channel<T> {
-        Channel<T> { _handle: builtins::gobol_chan_create() }
+        Channel { _handle: builtins::gobol_chan_create() }
     }
 
     // Send a value into the channel. Returns 0 on success, -1 on failure.

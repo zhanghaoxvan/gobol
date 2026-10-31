@@ -1,4 +1,4 @@
-#![library_features(hidden = true)]
+#[library_features(hidden = true)]
 
 import iterator::Iterator;
 
@@ -16,11 +16,19 @@ struct RangeIterator {
 
 impl New for Range {
     func new(start: int, end: int): Range {
-        Range { _start: start, _end: end, _step: 1 }
+        Range {
+            _start: start,
+            _end: end,
+            _step: 1,
+        }
     }
 
     func new(start: int, end: int, step: int): Range {
-        Range { _start: start, _end: end, _step: step }
+        Range {
+            _start: start,
+            _end: end,
+            _step: step,
+        }
     }
 }
 
@@ -69,19 +77,23 @@ impl Range {
 
 impl New for RangeIterator {
     func new(current: int, end: int, step: int): RangeIterator {
-        RangeIterator { _current: current, _end: end, _step: step }
+        RangeIterator {
+            _current: current,
+            _end: end,
+            _step: step,
+        }
     }
 }
 
 impl RangeIterator {
-    func next(self): Option<int> {
+    func next(self): (int, bool) {
         if self._step > 0 {
-            if self._current >= self._end { return Option::None; }
+            if self._current >= self._end { return (0, false); }
         } else {
-            if self._current <= self._end { return Option::None; }
+            if self._current <= self._end { return (0, false); }
         }
         var value: int = self._current;
-        self._current += self._step;
-        Option::Some(value);
+        self._current = self._current + self._step;
+        (value, true)
     }
 }

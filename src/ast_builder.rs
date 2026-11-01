@@ -2484,6 +2484,7 @@ impl AstBuilder {
         };
 
         self.advance(); // consume '{'
+        self.consume_end_of_line();
 
         let mut fields: Vec<StructFieldInit> = Vec::new();
 
@@ -2503,11 +2504,13 @@ impl AstBuilder {
 
             if self.match_value(",") {
                 self.advance();
+                self.consume_end_of_line();
             } else {
                 break;
             }
         }
 
+        self.consume_end_of_line();
         self.consume_value("}", "Expected '}' after struct literal");
 
         Some(Box::new(StructLiteral::new(type_name, fields)))

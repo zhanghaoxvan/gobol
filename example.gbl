@@ -1,6 +1,3 @@
-// import std;
-
-
 struct Point {
     x: int,
     y: int,
@@ -62,10 +59,7 @@ func main() {
     var items: Vec<int> = [10, 20, 30];
     io::print("Items: ");
     for i, v in items {
-        io::print(i);
-        io::print(":");
-        io::print(v);
-        io::print(" ");
+        io::print(@"{i}: {v}");
     }
     io::print("\n");
 

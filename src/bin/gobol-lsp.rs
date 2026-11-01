@@ -152,6 +152,7 @@ struct SymbolEntry {
 #[derive(Clone, Debug, Default)]
 struct FuncSignature {
     name: String,
+    is_static: bool,
     /// Parameter names in declaration order (e.g. `["x", "y"]`).
     param_names: Vec<String>,
     /// Declared types of each parameter, parallel to `param_names`.
@@ -487,11 +488,9 @@ fn is_capitalized(s: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Extract `{name}` interpolation identifiers from a format-string literal
-/// value (e.g. `"@{value: {x}}"` → `[(9, "x")]`). Respects `{{`/`}}` escapes
-/// so brace pairs used as escaping do not produce dummy interpolation vars.
-/// Byte offsets are relative to the start of `value`.
-fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
+/// Extract interpolation brace offsets from a format-string value. Respects
+/// `{{`/`}}` escapes and returns byte offsets relative to the start of `value`.
+fn format_interpolation_brace_spans(value: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let bytes = value.as_bytes();
     let mut i = 0;
@@ -505,37 +504,12 @@ fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
             continue;
         }
         if bytes[i] == b'{' {
-            // find matching close brace
-            let start = i + 1;
             let mut j = i + 1;
             while j < bytes.len() && bytes[j] != b'}' {
                 j += 1;
             }
             if j < bytes.len() {
-                let inner = &value[start..j];
-                let name = inner.trim();
-                // Only simple identifier interpolation (no format spec like `{x:.2}`).
-                if !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':')
-                {
-                    // Take the segment before any `.`/`:` suffix to get the binding.
-                    let ident = name
-                        .split(|c| c == '.' || c == ':')
-                        .next()
-                        .unwrap_or(name)
-                        .trim();
-                    if !ident.is_empty()
-                        && ident
-                            .chars()
-                            .next()
-                            .map(|c| c.is_alphabetic() || c == '_')
-                            .unwrap_or(false)
-                    {
-                        out.push((start, ident.to_string()));
-                    }
-                }
+                out.push((i, j));
                 i = j + 1;
                 continue;
             }
@@ -543,6 +517,42 @@ fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
         i += 1;
     }
     out
+}
+
+/// Extract `{name}` interpolation identifiers from a format-string literal
+/// value (e.g. `"@{value: {x}}"` → `[(9, "x")]`). Only simple identifier
+/// interpolations produce a binding token. Byte offsets are relative to `value`.
+fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
+    format_interpolation_brace_spans(value)
+        .into_iter()
+        .filter_map(|(open, close)| {
+            let inner = value[open + 1..close].trim();
+            // Only simple identifier interpolation (no format spec like `{x:.2}`).
+            if inner.is_empty()
+                || !inner
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':')
+            {
+                return None;
+            }
+            // Take the segment before any `.`/`:` suffix to get the binding.
+            let ident = inner
+                .split(|c| c == '.' || c == ':')
+                .next()
+                .unwrap_or(inner)
+                .trim();
+            if ident
+                .chars()
+                .next()
+                .map(|c| c.is_alphabetic() || c == '_')
+                .unwrap_or(false)
+            {
+                Some((open + 1, ident.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Split the *literal* text of a string/format-string value into non-escape
@@ -779,6 +789,16 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                         type_index(SemanticTokenType::STRING),
                         0,
                     ));
+                }
+                for (open, close) in format_interpolation_brace_spans(&t.value) {
+                    for off in [open, close] {
+                        parts.push((
+                            content_base + off as u32,
+                            1,
+                            type_index(SemanticTokenType::OPERATOR),
+                            0,
+                        ));
+                    }
                 }
                 for (off, ident) in format_interpolation_spans(&t.value) {
                     let var_col = content_base + off as u32;
@@ -1771,6 +1791,7 @@ fn collect_signatures(
 
         let mut sig = FuncSignature {
             name: name_tok.value.clone(),
+            is_static: cursor.value == "static",
             ..Default::default()
         };
         sig.doc = extract_doc_comment(source, tok.line);
@@ -1994,27 +2015,64 @@ fn count_top_commas(
     count
 }
 
-/// Build signature-help response with the given active parameter index.
-fn signature_help_for(sig: &FuncSignature, active_param: u32) -> SignatureHelp {
-    let label = {
-        let mut l = format!("{}(", sig.name);
-        l.push_str(&sig.param_labels.join(", "));
-        l.push(')');
-        if let Some(rt) = &sig.return_type {
-            l.push_str(&format!(": {}", rt));
+fn parameter_documentation(documentation: Option<&str>, parameter: &str) -> Option<String> {
+    let documentation = documentation?;
+    for line in documentation.lines() {
+        let line = line.trim().trim_start_matches(['-', '*', ' ']).trim();
+        let (name, description) = if let Some(rest) = line
+            .strip_prefix("@param ")
+            .or_else(|| line.strip_prefix("@arg "))
+        {
+            let Some((name, description)) = rest.split_once(char::is_whitespace) else {
+                continue;
+            };
+            (name.trim_end_matches(':'), description.trim())
+        } else if let Some((name, description)) = line.split_once(':') {
+            (name.trim_matches(['`', '*', ' ']), description.trim())
+        } else {
+            continue;
+        };
+        if name == parameter && !description.is_empty() {
+            return Some(description.to_string());
         }
-        l
-    };
+    }
+    None
+}
 
-    let parameters: Option<Vec<ParameterInformation>> = Some(
-        sig.param_labels
-            .iter()
-            .map(|pl| ParameterInformation {
-                label: ParameterLabel::Simple(pl.clone()),
-                documentation: None,
-            })
-            .collect(),
-    );
+/// Build signature help with a complete declaration and parameter-specific
+/// active ranges and documentation.
+fn signature_help_for(sig: &FuncSignature, active_param: u32) -> SignatureHelp {
+    let prefix = if sig.is_static { "static func" } else { "func" };
+    let mut label = format!("{} {}(", prefix, sig.name);
+    let mut parameters = Vec::with_capacity(sig.param_labels.len());
+    for (index, parameter) in sig.param_labels.iter().enumerate() {
+        if index > 0 {
+            label.push_str(", ");
+        }
+        let start = label.encode_utf16().count() as u32;
+        label.push_str(parameter);
+        let end = label.encode_utf16().count() as u32;
+        let parameter_name = sig.param_names.get(index).map(String::as_str).unwrap_or("");
+        parameters.push(ParameterInformation {
+            label: ParameterLabel::LabelOffsets([start, end]),
+            documentation: parameter_documentation(sig.doc.as_deref(), parameter_name).map(|doc| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: doc,
+                })
+            }),
+        });
+    }
+    label.push(')');
+    if let Some(rt) = &sig.return_type {
+        label.push_str(&format!(": {}", rt));
+    }
+
+    let active_parameter = if parameters.is_empty() {
+        None
+    } else {
+        Some(active_param.min(parameters.len().saturating_sub(1) as u32))
+    };
 
     let info = SignatureInformation {
         label,
@@ -2024,15 +2082,217 @@ fn signature_help_for(sig: &FuncSignature, active_param: u32) -> SignatureHelp {
                 value: d.clone(),
             })
         }),
-        parameters,
-        active_parameter: Some(active_param),
+        parameters: Some(parameters),
+        active_parameter,
     };
 
     SignatureHelp {
         signatures: vec![info],
         active_signature: Some(0),
-        active_parameter: Some(active_param),
+        active_parameter,
     }
+}
+
+fn hover_declaration(
+    symbol: &SymbolEntry,
+    state: &DocState,
+    signature: Option<&FuncSignature>,
+    type_info: Option<&str>,
+) -> String {
+    match symbol.kind {
+        SymKind::Function | SymKind::Method | SymKind::ExternFn | SymKind::StaticFunc => {
+            let prefix = if symbol.kind == SymKind::StaticFunc {
+                "static func"
+            } else {
+                "func"
+            };
+            let params = signature
+                .map(|sig| sig.param_labels.join(", "))
+                .unwrap_or_default();
+            let return_type = signature
+                .and_then(|sig| sig.return_type.as_deref())
+                .or(symbol.type_info.as_deref());
+            match return_type {
+                Some(return_type) => {
+                    format!("{} {}({}): {}", prefix, symbol.name, params, return_type)
+                }
+                None => format!("{} {}({})", prefix, symbol.name, params),
+            }
+        }
+        SymKind::Struct => format!("struct {}", symbol.name),
+        SymKind::Enum => format!("enum {}", symbol.name),
+        SymKind::EnumVariant => format!(
+            "{}::{}",
+            symbol.parent.as_deref().unwrap_or("?"),
+            symbol.name
+        ),
+        SymKind::Trait => format!("trait {}", symbol.name),
+        SymKind::TypeAlias => match symbol.type_info.as_deref() {
+            Some(ty) => format!("type {} = {}", symbol.name, ty),
+            None => format!("type {}", symbol.name),
+        },
+        SymKind::Variable => {
+            let binding = state
+                .tokens
+                .iter()
+                .position(|token| token.line == symbol.line && token.col == symbol.col)
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| state.tokens.get(index))
+                .filter(|token| matches!(token.value.as_str(), "val" | "var"))
+                .map(|token| token.value.as_str())
+                .unwrap_or("var");
+            match type_info {
+                Some(ty) => format!("{} {}: {}", binding, symbol.name, ty),
+                None => format!("{} {}", binding, symbol.name),
+            }
+        }
+        SymKind::Parameter => match type_info {
+            Some(ty) => format!("{}: {}", symbol.name, ty),
+            None => symbol.name.clone(),
+        },
+        SymKind::Import => format!("import {}", symbol.name),
+    }
+}
+
+fn hover_type_info(symbol: &SymbolEntry, state: &DocState) -> Option<String> {
+    if let Some(type_info) = &symbol.type_info {
+        return Some(type_info.clone());
+    }
+    if symbol.kind != SymKind::Variable {
+        return None;
+    }
+
+    let declaration_idx = state
+        .tokens
+        .iter()
+        .position(|token| token.line == symbol.line && token.col == symbol.col)?;
+    let declaration_line = state.tokens[declaration_idx].line;
+    let equals_idx = (declaration_idx + 1..state.tokens.len()).find(|&index| {
+        let token = &state.tokens[index];
+        token.line != declaration_line || matches!(token.value.as_str(), "=" | ";")
+    })?;
+    if state.tokens[equals_idx].value != "=" {
+        return None;
+    }
+    let expression_idx = equals_idx + 1;
+    let expression_end = (expression_idx..state.tokens.len())
+        .find(|&index| {
+            let token = &state.tokens[index];
+            token.line != declaration_line || token.value == ";"
+        })
+        .unwrap_or(state.tokens.len());
+
+    if let Some(as_idx) =
+        (expression_idx..expression_end).find(|&index| state.tokens[index].value == "as")
+    {
+        let cast_type = state.tokens[as_idx + 1..expression_end]
+            .iter()
+            .map(|token| token.value.as_str())
+            .collect::<String>();
+        if !cast_type.is_empty() {
+            return Some(cast_type);
+        }
+    }
+
+    infer_expr_type(&state.tokens, expression_idx, state, None, None)
+}
+
+fn imported_hover_declaration(
+    kind: &str,
+    name: &str,
+    signature: Option<&FuncSignature>,
+    type_info: Option<&str>,
+) -> String {
+    match kind {
+        "function" | "method" | "extern fn" | "static function" => {
+            let prefix = if kind == "static function" {
+                "static func"
+            } else {
+                "func"
+            };
+            let params = signature
+                .map(|sig| sig.param_labels.join(", "))
+                .unwrap_or_default();
+            match signature
+                .and_then(|sig| sig.return_type.as_deref())
+                .or(type_info)
+            {
+                Some(return_type) => {
+                    format!("{} {}({}): {}", prefix, name, params, return_type)
+                }
+                None => format!("{} {}({})", prefix, name, params),
+            }
+        }
+        "struct" => format!("struct {}", name),
+        "enum" => format!("enum {}", name),
+        "enum variant" => match type_info {
+            Some(parent) => format!("{}::{}", parent, name),
+            None => name.to_string(),
+        },
+        "trait" => format!("trait {}", name),
+        "type alias" => match type_info {
+            Some(ty) => format!("type {} = {}", name, ty),
+            None => format!("type {}", name),
+        },
+        "variable" => match type_info {
+            Some(ty) => format!("var {}: {}", name, ty),
+            None => format!("var {}", name),
+        },
+        "parameter" => match type_info {
+            Some(ty) => format!("{}: {}", name, ty),
+            None => name.to_string(),
+        },
+        "module" => format!("import {}", name),
+        _ => name.to_string(),
+    }
+}
+
+fn render_hover_markdown(
+    kind: &str,
+    declaration: &str,
+    context: Option<&str>,
+    signature: Option<&FuncSignature>,
+    type_info: Option<&str>,
+    documentation: Option<&str>,
+    deprecated: Option<&str>,
+) -> String {
+    let mut sections = Vec::new();
+    sections.push(format!("**{}**", kind));
+    if let Some(context) = context.filter(|context| !context.is_empty()) {
+        sections.push(context.to_string());
+    }
+    sections.push(format!("```gobol\n{}\n```", declaration));
+
+    if let Some(signature) = signature {
+        if !signature.param_labels.is_empty() {
+            let parameters = signature
+                .param_labels
+                .iter()
+                .map(|parameter| format!("- {}", parameter))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(format!("**Parameters**\n\n{}", parameters));
+        }
+        if let Some(return_type) = signature.return_type.as_deref().or(type_info) {
+            sections.push(format!("**Returns:** {}", return_type));
+        }
+    } else if let Some(type_info) = type_info.filter(|ty| !ty.is_empty() && *ty != "-") {
+        sections.push(format!("**Type:** {}", type_info));
+    }
+
+    if let Some(message) = deprecated {
+        let message = if message.trim().is_empty() {
+            "This symbol is deprecated.".to_string()
+        } else {
+            format!("This symbol is deprecated. {}", message.trim())
+        };
+        sections.push(format!("> **Deprecated** — {}", message));
+    }
+    if let Some(documentation) = documentation.filter(|doc| !doc.trim().is_empty()) {
+        sections.push(documentation.trim().to_string());
+    }
+
+    sections.join("\n\n")
 }
 
 /// Compute folding ranges from matching `{`/`}` pairs (multi-line only).
@@ -2985,81 +3245,57 @@ impl LanguageServer for GobolLsp {
             state.find_definition_at(&token.value, pos.position.line, pos.position.character)
         {
             sym_not_found = false;
-            let kind_label = sym.kind.label();
-            let type_str = sym.type_info.clone().unwrap_or_else(|| "-".to_string());
-            let parent_str = sym
-                .parent
-                .as_ref()
-                .map(|p| format!(" (on `{}`)", p))
-                .unwrap_or_default();
-
-            let signature = match sym.kind {
-                SymKind::Function | SymKind::Method | SymKind::ExternFn | SymKind::StaticFunc => {
-                    if let Some(ty) = sym.type_info.as_ref() {
-                        format!("func {}(): {}", sym.name, ty)
-                    } else {
-                        format!("func {}()", sym.name)
-                    }
+            let signature = state.signatures.get(&sym.name);
+            let type_info = hover_type_info(sym, state);
+            let declaration = hover_declaration(sym, state, signature, type_info.as_deref());
+            let context = sym.parent.as_deref().map(|parent| {
+                if sym.kind == SymKind::EnumVariant {
+                    format!("Variant of {}", parent)
+                } else {
+                    format!("Member of {}", parent)
                 }
-                SymKind::Struct => format!("struct {}", sym.name),
-                SymKind::Enum => format!("enum {}", sym.name),
-                SymKind::EnumVariant => {
-                    format!(
-                        "{}::{} (variant of {})",
-                        sym.parent.as_deref().unwrap_or("?"),
-                        sym.name,
-                        sym.parent.as_deref().unwrap_or("?")
-                    )
-                }
-                SymKind::Trait => format!("trait {}", sym.name),
-                SymKind::TypeAlias => {
-                    if let Some(ty) = sym.type_info.as_ref() {
-                        format!("type {} = {}", sym.name, ty)
-                    } else {
-                        format!("type {}", sym.name)
-                    }
-                }
-                SymKind::Variable | SymKind::Parameter => {
-                    if let Some(ty) = sym.type_info.as_ref() {
-                        format!("{}: {}", sym.name, ty)
-                    } else {
-                        sym.name.clone()
-                    }
-                }
-                SymKind::Import => format!("import {}", sym.name),
-            };
-
-            hover_text = format!(
-                "**{}** `{}`{}\n\n```gobol\n{}\n```\n\nType: `{}`",
-                kind_label, sym.name, parent_str, signature, type_str
+            });
+            hover_text = render_hover_markdown(
+                sym.kind.label(),
+                &declaration,
+                context.as_deref(),
+                signature,
+                type_info.as_deref(),
+                sym.doc_comment.as_deref(),
+                sym.deprecated_msg.as_deref(),
             );
 
             // A `from module import Type` entry is initially indexed as a
             // local function-like symbol. Replace that placeholder with
             // the real imported declaration so types get the correct
-            // hover kind, definition, and documentation.
+            // hover kind, signature, and documentation.
             if let Some(module) = sym.parent.as_ref().and_then(|p| state.module_imported(p)) {
                 if let Some((_n, _m, imported_kind, imported_ty, _u, _l, _c, doc)) =
                     self.resolve_imported_symbol(&uri, &token.value).await
                 {
-                    let imported_type = imported_ty.unwrap_or_else(|| "-".to_string());
-                    hover_text = format!(
-                        "**{}** imported from `{}`\n\n```gobol\n{} {}\n```\n\nType: `{}`",
-                        imported_kind, module, imported_kind, token.value, imported_type
+                    let imported_signature = self.imported_signature(&uri, &module, &token.value);
+                    let declaration = imported_hover_declaration(
+                        &imported_kind,
+                        &token.value,
+                        imported_signature.as_ref(),
+                        imported_ty.as_deref(),
                     );
-                    if let Some(doc) = doc {
-                        if !doc.trim().is_empty() {
-                            hover_text.push_str(&format!("\n\n---\n\n{}", doc));
-                        }
-                    }
+                    hover_text = render_hover_markdown(
+                        &imported_kind,
+                        &declaration,
+                        Some(&format!("Imported from {}", module)),
+                        imported_signature.as_ref(),
+                        imported_ty.as_deref(),
+                        doc.as_deref(),
+                        sym.deprecated_msg.as_deref(),
+                    );
                 }
-            } else if let Some(doc) = &sym.doc_comment {
-                hover_text.push_str(&format!("\n\n---\n\n{}", doc));
             }
         }
 
         if hover_text.is_empty() {
-            hover_text = format!("`{}`", token.value);
+            hover_text =
+                render_hover_markdown("Identifier", &token.value, None, None, None, None, None);
         }
 
         // Cross-file fallback: the token may be a function/type defined in a
@@ -3072,20 +3308,26 @@ impl LanguageServer for GobolLsp {
             if let Some((_name, module, kind_label, ty, _file_uri, _line, _col, doc_comment)) =
                 resolved
             {
-                let type_part = ty.clone().unwrap_or_else(|| "-".to_string());
-                let detail = match ty {
-                    Some(_) => format!("{}::{}", module, token.value),
-                    None => format!("{}::{} ({})", module, token.value, kind_label),
-                };
-                hover_text = format!(
-                    "**{}** imported from `{}`\n\n```gobol\n{}\n```\n\nType: `{}`",
-                    kind_label, detail, detail, type_part
+                let signature = self.imported_signature(&uri_q, &module, &token.value);
+                let declaration = imported_hover_declaration(
+                    &kind_label,
+                    &token.value,
+                    signature.as_ref(),
+                    ty.as_deref(),
                 );
-                if let Some(doc) = doc_comment {
-                    if !doc.trim().is_empty() {
-                        hover_text.push_str(&format!("\n\n---\n\n{}", doc));
-                    }
-                }
+                hover_text = render_hover_markdown(
+                    &kind_label,
+                    &declaration,
+                    Some(&format!("Imported from {}", module)),
+                    signature.as_ref(),
+                    if ty.as_deref() == Some("-") {
+                        None
+                    } else {
+                        ty.as_deref()
+                    },
+                    doc_comment.as_deref(),
+                    None,
+                );
             }
         }
 
@@ -3100,15 +3342,24 @@ impl LanguageServer for GobolLsp {
                 .resolve_qualified_symbol(&uri, &qualifier, &token.value)
                 .await
             {
-                hover_text = format!(
-                    "**{}** imported from `{}`\n\nType: `{}`",
-                    kind,
-                    module,
-                    ty.unwrap_or_else(|| "-".to_string())
+                let signature = self
+                    .imported_signature(&uri, &qualifier, &token.value)
+                    .or_else(|| self.imported_method_signature(&uri, &qualifier, &token.value));
+                let declaration = imported_hover_declaration(
+                    &kind,
+                    &token.value,
+                    signature.as_ref(),
+                    ty.as_deref(),
                 );
-                if let Some(doc) = doc {
-                    hover_text.push_str(&format!("\n\n---\n\n{}", doc));
-                }
+                hover_text = render_hover_markdown(
+                    &kind,
+                    &declaration,
+                    Some(&format!("Imported from {}", module)),
+                    signature.as_ref(),
+                    ty.as_deref(),
+                    doc.as_deref(),
+                    None,
+                );
             }
         }
 
@@ -4652,6 +4903,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hover_markdown_shows_highlighted_signature_and_details() {
+        let signature = FuncSignature {
+            name: "greet".to_string(),
+            is_static: false,
+            param_names: vec!["name".to_string()],
+            param_types: vec![Some("str".to_string())],
+            param_labels: vec!["name: str".to_string()],
+            return_type: Some("str".to_string()),
+            doc: Some("Greets the supplied person.".to_string()),
+        };
+        let hover = render_hover_markdown(
+            "function",
+            "func greet(name: str): str",
+            Some("Imported from greeting"),
+            Some(&signature),
+            None,
+            signature.doc.as_deref(),
+            Some("use hello instead"),
+        );
+
+        assert!(hover.contains("```gobol\nfunc greet(name: str): str\n```"));
+        assert!(hover.contains("**Parameters**\n\n- name: str"));
+        assert!(hover.contains("**Returns:** str"));
+        assert!(hover.contains("Imported from greeting"));
+        assert!(hover.contains("**Deprecated**"));
+        assert!(hover.contains("Greets the supplied person."));
+        assert!(!hover.contains("`greet`"));
+    }
+
+    #[test]
+    fn hover_declaration_uses_declared_variable_kind_and_type() {
+        let source = "val answer: int = 42;";
+        let state = analyze_document("file:///hover.gbl", source, &[]);
+        let symbol = state
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "answer")
+            .expect("variable should be indexed");
+
+        assert_eq!(
+            hover_declaration(symbol, &state, None, Some("int")),
+            "val answer: int"
+        );
+    }
+
+    #[test]
+    fn hover_infers_variable_type_from_initializer_and_cast() {
+        let source =
+            "func main() {\n    var message = \"hello\";\n    var count = io::read() as int;\n}";
+        let state = analyze_document("file:///hover.gbl", source, &[]);
+        for (name, expected_type) in [("message", "str"), ("count", "int")] {
+            let symbol = state
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .expect("variable should be indexed");
+            let type_info = hover_type_info(symbol, &state);
+            assert_eq!(type_info.as_deref(), Some(expected_type));
+            assert_eq!(
+                hover_declaration(symbol, &state, None, type_info.as_deref()),
+                format!("var {}: {}", name, expected_type)
+            );
+        }
+    }
+
+    #[test]
     fn test_extract_doc_comment_line_comments() {
         let source = "// First line\n// Second line\nfunc foo() {}\n";
         // func is on line 3 (1-based)
@@ -4913,6 +5230,18 @@ var tests: [(str, func(): bool)] = [(\"timeout\", test_connect_timeout)];\n";
     }
 
     #[test]
+    fn test_format_string_braces_are_operators() {
+        let source = "var s = @\"{value}\";\n";
+        let tokens = lex(source);
+        let symbols = build_symbol_index(&tokens, source);
+        let decoded = decode(&build_semantic_tokens(&tokens, &symbols));
+
+        assert!(decoded.contains(&(0, 10, "operator".to_string())));
+        assert!(decoded.contains(&(0, 16, "operator".to_string())));
+        assert!(decoded.contains(&(0, 11, "variable".to_string())));
+    }
+
+    #[test]
     fn test_semantic_tokens_delta_encoding_is_absolute_consistent() {
         // Manually verify the first token encodes its own absolute position.
         let source = "import abc;\n";
@@ -5108,16 +5437,88 @@ mod unit_new {
     fn signature_help_response_shape() {
         let sig = FuncSignature {
             name: "f".into(),
+            is_static: false,
             param_names: vec!["a".into(), "b".into()],
             param_types: vec![Some("int".into()), Some("str".into())],
             param_labels: vec!["a: int".into(), "b: str".into()],
             return_type: Some("bool".into()),
-            doc: Some("doc".into()),
+            doc: Some(
+                "Compares two values.\n\n@param a The left value.\n@param b: The right value."
+                    .into(),
+            ),
         };
         let h = signature_help_for(&sig, 1);
-        assert_eq!(h.signatures[0].label, "f(a: int, b: str): bool");
+        assert_eq!(h.signatures[0].label, "func f(a: int, b: str): bool");
         assert_eq!(h.active_parameter, Some(1));
-        assert_eq!(h.signatures[0].parameters.as_ref().unwrap().len(), 2);
+        let parameters = h.signatures[0].parameters.as_ref().unwrap();
+        assert_eq!(parameters.len(), 2);
+        assert_eq!(
+            parameters[0].label,
+            ParameterLabel::LabelOffsets([
+                "func f(".encode_utf16().count() as u32,
+                "func f(a: int".encode_utf16().count() as u32,
+            ])
+        );
+        assert_eq!(
+            parameters[0].documentation,
+            Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "The left value.".into(),
+            }))
+        );
+        assert_eq!(
+            parameters[1].documentation,
+            Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "The right value.".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn signature_help_clamps_active_parameter_and_preserves_static_kind() {
+        let sig = FuncSignature {
+            name: "create".into(),
+            is_static: true,
+            param_names: vec!["name".into()],
+            param_types: vec![Some("str".into())],
+            param_labels: vec!["name: str".into()],
+            return_type: Some("Item".into()),
+            ..Default::default()
+        };
+        let help = signature_help_for(&sig, 4);
+        assert_eq!(
+            help.signatures[0].label,
+            "static func create(name: str): Item"
+        );
+        assert_eq!(help.active_parameter, Some(0));
+
+        let no_params = FuncSignature {
+            name: "noop".into(),
+            ..Default::default()
+        };
+        assert_eq!(signature_help_for(&no_params, 0).active_parameter, None);
+    }
+
+    #[test]
+    fn signature_help_parameter_offsets_use_utf16_positions() {
+        let sig = FuncSignature {
+            name: "查找".into(),
+            param_names: vec!["关键字".into()],
+            param_types: vec![Some("字符串".into())],
+            param_labels: vec!["关键字: 字符串".into()],
+            return_type: Some("整数".into()),
+            ..Default::default()
+        };
+        let help = signature_help_for(&sig, 0);
+        assert_eq!(help.signatures[0].label, "func 查找(关键字: 字符串): 整数");
+        assert_eq!(
+            help.signatures[0].parameters.as_ref().unwrap()[0].label,
+            ParameterLabel::LabelOffsets([
+                "func 查找(".encode_utf16().count() as u32,
+                "func 查找(关键字: 字符串".encode_utf16().count() as u32,
+            ])
+        );
     }
 
     #[test]
@@ -5405,7 +5806,7 @@ mod e2e_doc {
         // signature_help shape
         let sig = &doc.signatures["add"];
         let h = signature_help_for(sig, active);
-        assert_eq!(h.signatures[0].label, "add(a: int, b: int): int");
+        assert_eq!(h.signatures[0].label, "func add(a: int, b: int): int");
         assert_eq!(h.active_parameter, Some(1));
         // inlay type hints for `var x = 10` style
         let var_src = "func f() {\n    var x = 10;\n}\n";

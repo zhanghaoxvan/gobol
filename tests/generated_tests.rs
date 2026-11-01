@@ -380,6 +380,32 @@ fn test_structs_constructor() {
     result.assert_success();
 }
 
+#[test]
+fn test_multiline_struct_literal_tail_expression() {
+    let result = run_inline_test(
+        r#"struct Point {
+    x: int,
+    y: int,
+};
+
+impl New for Point {
+    func new(x: int, y: int): Point {
+        Point {
+            x: x,
+            y: y
+        }
+    }
+}
+
+func main() {
+    var point = Point(4, 7);
+    io::println(point.x + point.y);
+}"#,
+    );
+    result.assert_success();
+    assert!(result.stdout.lines().any(|line| line == "11"));
+}
+
 /// 用例：structs/point.gbl | 预期正常运行
 #[test]
 fn test_structs_point() {

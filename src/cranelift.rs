@@ -555,6 +555,8 @@ pub struct CraneliftBackend {
     /// decisions such as `naked` (no implicit epilogue) and `no_gc`
     /// (use a non-GC allocator for heap allocations).
     current_func_attributes: Vec<String>,
+    /// Struct whose `new` method is currently being compiled, if any.
+    current_constructor: Option<String>,
     /// Custom linker entry symbol, emitted without the usual Gobol prefix.
     entry_point: Option<String>,
 }
@@ -1237,6 +1239,11 @@ impl CraneliftBackend {
         }
         self.reset_function_state(ir_func.return_type.clone());
         self.set_current_func_attributes(&ir_func.attributes);
+        self.current_constructor = ir_func
+            .name
+            .rsplit_once("::")
+            .filter(|(_, method)| *method == "new")
+            .map(|(struct_name, _)| struct_name.to_string());
         // Resolve the exact symbol used during the declare pass. Overloaded
         // methods with the same (name, arity) were disambiguated with a
         // numeric suffix, so we must look up via the occurrence index.
@@ -1396,6 +1403,7 @@ impl CraneliftBackend {
         self.return_type = return_type;
         self.diverged = false;
         self.current_func_attributes.clear();
+        self.current_constructor = None;
     }
 
     /// Record the attributes of the function about to be compiled so codegen
@@ -3181,7 +3189,9 @@ impl CraneliftBackend {
         fields: &[(String, IRExpr)],
     ) -> Result<ir::Value, String> {
         // Prefer calling the user-defined constructor `StructName::new`.
-        if self.constructors.get(name).copied().unwrap_or(false) {
+        if self.current_constructor.as_deref() != Some(name)
+            && self.constructors.get(name).copied().unwrap_or(false)
+        {
             let args: Vec<IRExpr> = fields.iter().map(|(_, e)| e.clone()).collect();
             let full = format!("{}::new", name);
             // Allocate self and prepend to constructor args
@@ -3869,6 +3879,7 @@ impl CraneliftBackend {
             return_type: DataType::None_,
             diverged: false,
             current_func_attributes: Vec::new(),
+            current_constructor: None,
             entry_point: None,
         })
     }

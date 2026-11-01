@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{stdin, stdout};
 use tokio::sync::RwLock;
@@ -2154,7 +2155,12 @@ fn hover_declaration(
     }
 }
 
-fn hover_type_info(symbol: &SymbolEntry, state: &DocState) -> Option<String> {
+fn hover_type_info(
+    symbol: &SymbolEntry,
+    state: &DocState,
+    lsp: Option<&GobolLsp>,
+    uri: Option<&str>,
+) -> Option<String> {
     if let Some(type_info) = &symbol.type_info {
         return Some(type_info.clone());
     }
@@ -2194,7 +2200,7 @@ fn hover_type_info(symbol: &SymbolEntry, state: &DocState) -> Option<String> {
         }
     }
 
-    infer_expr_type(&state.tokens, expression_idx, state, None, None)
+    infer_expr_type(&state.tokens, expression_idx, state, lsp, uri)
 }
 
 fn imported_hover_declaration(
@@ -2901,6 +2907,63 @@ fn analyze_document(uri: &str, source: &str, workspace_roots: &[PathBuf]) -> Doc
     }
 }
 
+#[derive(Clone)]
+struct OpenDocument {
+    source: String,
+    version: i32,
+    revision: u64,
+}
+
+fn position_to_offset(source: &str, position: Position) -> Option<usize> {
+    let mut line_start = 0;
+    for _ in 0..position.line {
+        let newline = source.get(line_start..)?.find('\n')?;
+        line_start += newline + 1;
+    }
+
+    let line_end = source
+        .get(line_start..)?
+        .find('\n')
+        .map(|offset| line_start + offset)
+        .unwrap_or(source.len());
+    let line = source.get(line_start..line_end)?;
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let target_units = position.character;
+    let mut units = 0;
+    for (byte_offset, character) in line.char_indices() {
+        if units == target_units {
+            return Some(line_start + byte_offset);
+        }
+        units += character.len_utf16() as u32;
+        if units > target_units {
+            return None;
+        }
+    }
+    (units == target_units).then_some(line_start + line.len())
+}
+
+fn apply_content_changes(
+    source: &str,
+    changes: &[TextDocumentContentChangeEvent],
+) -> std::result::Result<String, String> {
+    let mut updated = source.to_string();
+    for change in changes {
+        let Some(range) = change.range else {
+            updated = change.text.clone();
+            continue;
+        };
+        let start = position_to_offset(&updated, range.start)
+            .ok_or_else(|| format!("Invalid change start position: {:?}", range.start))?;
+        let end = position_to_offset(&updated, range.end)
+            .ok_or_else(|| format!("Invalid change end position: {:?}", range.end))?;
+        if start > end {
+            return Err("Text change range starts after it ends".to_string());
+        }
+        updated.replace_range(start..end, &change.text);
+    }
+    Ok(updated)
+}
+
 fn uri_to_path(uri: &str) -> String {
     url::Url::parse(uri)
         .ok()
@@ -3088,6 +3151,7 @@ fn keyword_snippets() -> Vec<CompletionItem> {
 struct GobolLsp {
     client: Client,
     documents: Arc<RwLock<HashMap<String, DocState>>>,
+    open_documents: Arc<RwLock<HashMap<String, OpenDocument>>>,
     workspace_roots: Arc<std::sync::RwLock<Vec<PathBuf>>>,
 }
 
@@ -3113,7 +3177,7 @@ impl LanguageServer for GobolLsp {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
-                        change: Some(TextDocumentSyncKind::FULL),
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
                         save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                             include_text: Some(true),
                         })),
@@ -3189,28 +3253,66 @@ impl LanguageServer for GobolLsp {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
         let text = params.text_document.text;
-        self.reanalyze(&uri, &text).await;
+        let version = params.text_document.version;
+        let revision = 0;
+        self.open_documents.write().await.insert(
+            uri.clone(),
+            OpenDocument {
+                source: text.clone(),
+                version,
+                revision,
+            },
+        );
+        self.reanalyze(&uri, &text, revision).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
-        // With FULL sync, take the last change which carries full document text
-        if let Some(change) = params.content_changes.into_iter().last() {
-            self.reanalyze(&uri, &change.text).await;
+        let mut open_documents = self.open_documents.write().await;
+        let Some(document) = open_documents.get_mut(&uri) else {
+            return;
+        };
+        if params.text_document.version <= document.version {
+            return;
         }
+        let source = match apply_content_changes(&document.source, &params.content_changes) {
+            Ok(source) => source,
+            Err(error) => {
+                drop(open_documents);
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Failed to apply incremental edit for {uri}: {error}"),
+                    )
+                    .await;
+                return;
+            }
+        };
+        document.source = source.clone();
+        document.version = params.text_document.version;
+        document.revision += 1;
+        let revision = document.revision;
+        drop(open_documents);
+
+        self.schedule_reanalysis(uri, source, revision, Duration::from_millis(120));
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
         if let Some(text) = params.text {
-            self.reanalyze(&uri, &text).await;
-        } else {
-            let state = self.documents.read().await;
-            if let Some(doc_state) = state.get(&uri) {
-                let text = doc_state.source.clone();
-                drop(state);
-                self.reanalyze(&uri, &text).await;
+            let mut open_documents = self.open_documents.write().await;
+            if let Some(document) = open_documents.get_mut(&uri) {
+                if document.source != text {
+                    document.source = text.clone();
+                    document.revision += 1;
+                }
+                let revision = document.revision;
+                drop(open_documents);
+                self.reanalyze(&uri, &text, revision).await;
             }
+        } else if let Some(document) = self.open_documents.read().await.get(&uri).cloned() {
+            self.reanalyze(&uri, &document.source, document.revision)
+                .await;
         }
     }
 
@@ -3222,6 +3324,8 @@ impl LanguageServer for GobolLsp {
             .await;
         let mut documents = self.documents.write().await;
         documents.remove(&uri);
+        drop(documents);
+        self.open_documents.write().await.remove(&uri);
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -3246,7 +3350,7 @@ impl LanguageServer for GobolLsp {
         {
             sym_not_found = false;
             let signature = state.signatures.get(&sym.name);
-            let type_info = hover_type_info(sym, state);
+            let type_info = hover_type_info(sym, state, Some(self), Some(&uri));
             let declaration = hover_declaration(sym, state, signature, type_info.as_deref());
             let context = sym.parent.as_deref().map(|parent| {
                 if sym.kind == SymKind::EnumVariant {
@@ -4797,49 +4901,48 @@ impl GobolLsp {
         None
     }
 
-    /// Re-analyse a document: run the (relatively fast) semantic analysis and
-    /// replace the stored document state + republish diagnostics.
-    async fn reanalyze(&self, uri: &str, text: &str) {
+    async fn reanalyze(&self, uri: &str, text: &str, revision: u64) {
         let uri_owned = uri.to_string();
         let text_owned = text.to_string();
-        let roots = self
-            .workspace_roots
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        let uri_for_clone = uri_owned.clone();
-        let state = tokio::task::spawn_blocking(move || {
-            analyze_document(&uri_for_clone, &text_owned, &roots)
-        })
-        .await
-        .unwrap_or_else(|_| DocState {
-            source: String::new(),
-            tokens: Vec::new(),
-            symbols: Vec::new(),
-            errors: vec![(0, 0, "Internal error: analysis panicked".to_string())],
-            signatures: std::collections::HashMap::new(),
-            func_types: std::collections::HashMap::new(),
+        publish_analysis(
+            self.client.clone(),
+            self.documents.clone(),
+            self.open_documents.clone(),
+            self.workspace_roots.clone(),
+            uri_owned,
+            text_owned,
+            revision,
+        )
+        .await;
+    }
+
+    fn schedule_reanalysis(&self, uri: String, text: String, revision: u64, delay: Duration) {
+        let client = self.client.clone();
+        let documents = self.documents.clone();
+        let open_documents = self.open_documents.clone();
+        let workspace_roots = self.workspace_roots.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let is_current = open_documents
+                .read()
+                .await
+                .get(&uri)
+                .map(|document| document.revision == revision)
+                .unwrap_or(false);
+            if !is_current {
+                return;
+            }
+            publish_analysis(
+                client,
+                documents,
+                open_documents,
+                workspace_roots,
+                uri,
+                text,
+                revision,
+            )
+            .await;
         });
-
-        let diagnostics: Vec<Diagnostic> = state
-            .errors
-            .iter()
-            .map(|(line, col, msg)| {
-                error_to_diagnostic(&state.source, &state.tokens, *line, *col, msg)
-            })
-            .collect();
-
-        // Atomically replace the document state.
-        let mut documents = self.documents.write().await;
-        documents.insert(uri_owned.clone(), state);
-        drop(documents);
-
-        // Publish diagnostics without blocking the notification handler.
-        if let Ok(url) = url::Url::parse(uri) {
-            self.client
-                .publish_diagnostics(url, diagnostics, None)
-                .await;
-        }
     }
 
     /// Handle the custom `gobol/highlights` request (registered in `main`).
@@ -4880,6 +4983,74 @@ impl GobolLsp {
     }
 }
 
+async fn publish_analysis(
+    client: Client,
+    documents: Arc<RwLock<HashMap<String, DocState>>>,
+    open_documents: Arc<RwLock<HashMap<String, OpenDocument>>>,
+    workspace_roots: Arc<std::sync::RwLock<Vec<PathBuf>>>,
+    uri: String,
+    source: String,
+    revision: u64,
+) {
+    let roots = match workspace_roots
+        .read()
+        .map(|roots| roots.clone())
+        .map_err(|error| error.to_string())
+    {
+        Ok(roots) => roots,
+        Err(error) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Failed to read workspace roots during analysis: {error}"),
+                )
+                .await;
+            return;
+        }
+    };
+    let uri_for_analysis = uri.clone();
+    let source_for_analysis = source.clone();
+    let state = match tokio::task::spawn_blocking(move || {
+        analyze_document(&uri_for_analysis, &source_for_analysis, &roots)
+    })
+    .await
+    {
+        Ok(state) => state,
+        Err(error) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Document analysis task failed for {uri}: {error}"),
+                )
+                .await;
+            return;
+        }
+    };
+
+    let current_documents = open_documents.read().await;
+    if !current_documents
+        .get(&uri)
+        .map(|document| document.revision == revision && document.source == source)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let diagnostics = state
+        .errors
+        .iter()
+        .map(|(line, col, message)| {
+            error_to_diagnostic(&state.source, &state.tokens, *line, *col, message)
+        })
+        .collect();
+    documents.write().await.insert(uri.clone(), state);
+    drop(current_documents);
+
+    if let Ok(url) = url::Url::parse(&uri) {
+        client.publish_diagnostics(url, diagnostics, None).await;
+    }
+}
+
 // ==================== Main ====================
 
 fn main() {
@@ -4889,6 +5060,7 @@ fn main() {
     let (service, socket) = LspService::build(|client| GobolLsp {
         client,
         documents: Arc::new(RwLock::new(HashMap::new())),
+        open_documents: Arc::new(RwLock::new(HashMap::new())),
         workspace_roots: Arc::new(std::sync::RwLock::new(Vec::new())),
     })
     .custom_method("gobol/highlights", GobolLsp::highlights)
@@ -4959,7 +5131,7 @@ mod tests {
                 .iter()
                 .find(|symbol| symbol.name == name)
                 .expect("variable should be indexed");
-            let type_info = hover_type_info(symbol, &state);
+            let type_info = hover_type_info(symbol, &state, None, None);
             assert_eq!(type_info.as_deref(), Some(expected_type));
             assert_eq!(
                 hover_declaration(symbol, &state, None, type_info.as_deref()),
@@ -5239,6 +5411,73 @@ var tests: [(str, func(): bool)] = [(\"timeout\", test_connect_timeout)];\n";
         assert!(decoded.contains(&(0, 10, "operator".to_string())));
         assert!(decoded.contains(&(0, 16, "operator".to_string())));
         assert!(decoded.contains(&(0, 11, "variable".to_string())));
+    }
+
+    #[test]
+    fn incremental_changes_apply_ranges_in_utf16_and_sequence_order() {
+        let changes = vec![
+            TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 3,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 4,
+                    },
+                }),
+                range_length: Some(1),
+                text: "B".to_string(),
+            },
+            TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 1,
+                        character: 1,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 3,
+                    },
+                }),
+                range_length: Some(2),
+                text: "EC".to_string(),
+            },
+        ];
+        assert_eq!(
+            apply_content_changes("a😀b\nsecond", &changes).unwrap(),
+            "a😀B\nsECond"
+        );
+    }
+
+    #[test]
+    fn incremental_changes_support_full_replacement_events() {
+        let changes = vec![
+            TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "initial".to_string(),
+            },
+            TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 7,
+                    },
+                }),
+                range_length: Some(7),
+                text: "updated".to_string(),
+            },
+        ];
+        assert_eq!(
+            apply_content_changes("ignored", &changes).unwrap(),
+            "updated"
+        );
     }
 
     #[test]
@@ -5838,6 +6077,73 @@ mod e2e_doc {
             infer_expr_type(&unk, 0, &doc, None, None).as_deref(),
             Some("unknown")
         );
+    }
+
+    #[test]
+    fn hover_infers_return_type_from_imported_module_call() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "gobol_lsp_import_hover_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let lib_dir = project_dir.join("lib");
+        std::fs::create_dir_all(&lib_dir).expect("create temporary module directory");
+        let module_path = lib_dir.join("fib.gbl");
+        std::fs::write(
+            &module_path,
+            "func fib(n: int): int {\n    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }\n}\n",
+        )
+        .expect("write temporary module");
+
+        let source =
+            "import fib;\nfunc main() {\n    var n = 1;\n    val result = fib::fib(n);\n}\n";
+        let main_path = project_dir.join("main.gbl");
+        let uri = url::Url::from_file_path(&main_path).expect("convert main path to URI");
+        let state = analyze_document(uri.as_str(), source, &[project_dir.clone()]);
+        let result = state
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "result")
+            .expect("find result variable");
+        assert_eq!(
+            hover_type_info(result, &state, None, None).as_deref(),
+            Some("unknown")
+        );
+
+        let client_holder = Arc::new(std::sync::Mutex::new(None));
+        let holder = client_holder.clone();
+        let (_service, _socket) = LspService::build(move |client| {
+            *holder.lock().unwrap() = Some(client.clone());
+            GobolLsp {
+                client,
+                documents: Arc::new(RwLock::new(HashMap::new())),
+                open_documents: Arc::new(RwLock::new(HashMap::new())),
+                workspace_roots: Arc::new(std::sync::RwLock::new(Vec::new())),
+            }
+        })
+        .finish();
+        let client = client_holder
+            .lock()
+            .unwrap()
+            .take()
+            .expect("capture LSP client");
+        let lsp = GobolLsp {
+            client,
+            documents: Arc::new(RwLock::new(HashMap::new())),
+            open_documents: Arc::new(RwLock::new(HashMap::new())),
+            workspace_roots: Arc::new(std::sync::RwLock::new(vec![project_dir.clone()])),
+        };
+        assert_eq!(
+            hover_type_info(result, &state, Some(&lsp), Some(uri.as_str())).as_deref(),
+            Some("int")
+        );
+
+        std::fs::remove_file(module_path).expect("remove temporary module");
+        std::fs::remove_dir(lib_dir).expect("remove temporary module directory");
+        std::fs::remove_dir(project_dir).expect("remove temporary project directory");
     }
 
     #[test]

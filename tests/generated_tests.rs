@@ -74,6 +74,24 @@ func main() {
 }
 
 #[test]
+fn test_thread_join_preserves_64_bit_return_value() {
+    let result = run_inline_test(
+        r#"import thread;
+
+func worker(value: int): int {
+    value + 4294967296
+}
+
+func main() {
+    val worker_thread = Thread::spawn(worker, 7);
+    io::println(worker_thread.join());
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "4294967303");
+}
+
+#[test]
 fn test_print_file_contents_as_string() {
     let result = run_inline_test(
         r#"import fs;
@@ -192,6 +210,19 @@ fn test_string_to_int_cast() {
             "9223372036854775807"
         ]
     );
+}
+
+#[test]
+fn test_read_stdin_then_print_integer() {
+    let result = run_inline_test_with_stdin(
+        r#"func main() {
+    val n = io::read() as int;
+    io::println(n);
+}"#,
+        b"40\n",
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "40");
 }
 
 #[test]

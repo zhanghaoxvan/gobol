@@ -683,7 +683,8 @@ impl CraneliftBackend {
         self.declare_import("gobol_eprintln", sig);
 
         // char* read()
-        let sig = self.module.make_signature();
+        let mut sig = self.module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
         self.declare_import("gobol_read", sig);
 
         // i64 gobol_args_count()
@@ -4544,6 +4545,30 @@ mod link_tests {
     use super::*;
 
     #[test]
+    fn msvc_linker_is_resolved_beside_its_compiler() {
+        let root =
+            std::env::temp_dir().join(format!("gobol-msvc-linker-test-{}", std::process::id()));
+        let compiler_dir = root.join("VC").join("bin");
+        let decoy_dir = root.join("msys").join("usr").join("bin");
+        std::fs::create_dir_all(&compiler_dir).unwrap();
+        std::fs::create_dir_all(&decoy_dir).unwrap();
+        let compiler = compiler_dir.join("cl.exe");
+        let linker = compiler_dir.join("link.exe");
+        std::fs::write(&compiler, []).unwrap();
+        std::fs::write(&linker, []).unwrap();
+        std::fs::write(decoy_dir.join("link.exe"), []).unwrap();
+        let path = std::env::join_paths([decoy_dir]).unwrap();
+        let tool = crate::toolchain::CcTool {
+            compiler,
+            is_msvc: true,
+            env: vec![(std::ffi::OsString::from("PATH"), path)],
+        };
+
+        assert_eq!(msvc_linker_for_tool(&tool), Some(linker));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn renders_link_kinds_per_target() {
         let static_lib = LinkSpec {
             name: "curl".to_string(),
@@ -4730,12 +4755,27 @@ fn which_in_env(
     None
 }
 
+fn msvc_linker_for_tool(tool: &crate::toolchain::CcTool) -> Option<std::path::PathBuf> {
+    if !tool.is_msvc {
+        return None;
+    }
+
+    let compiler = if tool.compiler.is_file() {
+        tool.compiler.clone()
+    } else {
+        let compiler_name = tool.compiler.file_name()?.to_str()?;
+        which_in_env(compiler_name, &tool.env)?
+    };
+    let linker = compiler.with_file_name("link.exe");
+    linker.is_file().then_some(linker)
+}
+
 /// Detect the linker for a target triple string. Returns the linker path and
 /// the kind of link command to build.
 ///
 /// | Target                          | Linker        | Lookup              |
 /// |---------------------------------|---------------|---------------------|
-/// | `x86_64-pc-windows-msvc`        | `link.exe`    | sysroot/bin, PATH   |
+/// | `x86_64-pc-windows-msvc`        | `link.exe`    | beside cl.exe, lld  |
 /// | `x86_64-pc-windows-gnu`         | `gcc.exe`     | sysroot/bin, PATH   |
 /// | `x86_64-unknown-linux-gnu`      | `cc` / `gcc`  | system PATH         |
 /// | `aarch64-unknown-none`          | `ld` / cross | system PATH         |
@@ -4765,27 +4805,23 @@ fn detect_linker(target: &str) -> Result<(std::path::PathBuf, LinkerKind), Strin
     let bin_dir = sysroot.join("bin");
 
     if target_is_msvc(target) {
-        // Use the `cc` crate to discover the MSVC environment (the same
-        // discovery rustc uses), then resolve `link.exe` within that
-        // environment's PATH — this finds the VS linker even when the
-        // current shell hasn't run vcvarsall.bat. Fall back to the
-        // Rust-bundled `lld-link` and a bare PATH lookup.
+        // Prefer the linker beside the discovered MSVC compiler. A bare
+        // PATH search can select GNU's unrelated `link` utility (for
+        // example from an MSYS/Git installation), which also exposes a
+        // `link.exe` name on Windows.
         if let Ok(Some(tool)) = crate::toolchain::cc_discover(target) {
-            if let Some(p) = which_in_env("link.exe", &tool.env) {
+            if let Some(p) = msvc_linker_for_tool(&tool) {
                 return Ok((p, LinkerKind::MsvcLink));
             }
         }
-        // lld-link is the linker Rust itself ships for MSVC; accept it too.
+        // Fall back to the Rust toolchain's MSVC-compatible linker.
         let lld_link = bin_dir.join("lld-link.exe");
         if lld_link.exists() {
             return Ok((lld_link, LinkerKind::MsvcLink));
         }
-        if let Some(p) = which("link.exe") {
-            return Ok((p, LinkerKind::MsvcLink));
-        }
         return Err(format!(
-            "linker not found for MSVC target '{}': the `cc` crate could not\n\
-             locate the VS toolchain and no link.exe / lld-link.exe is on PATH.\n\
+            "linker not found for MSVC target '{}': no compatible link.exe was found\n\
+             beside the MSVC compiler and no lld-link.exe is available in the Rust sysroot.\n\
              Install Visual Studio with the 'Desktop development with C++' workload.",
             target
         ));

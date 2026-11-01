@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once};
 
@@ -90,6 +91,14 @@ pub fn run_gobol(file_path: &str, _verbose: bool) -> TestResult {
 }
 
 pub fn run_gobol_with_args(file_path: &str, args: &[&str]) -> TestResult {
+    run_gobol_with_args_and_stdin(file_path, args, None)
+}
+
+fn run_gobol_with_args_and_stdin(
+    file_path: &str,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> TestResult {
     init_test_env();
 
     let temp_dir = std::env::temp_dir();
@@ -119,10 +128,28 @@ pub fn run_gobol_with_args(file_path: &str, args: &[&str]) -> TestResult {
         };
     }
 
-    let run_output = Command::new(&temp_bin)
-        .args(args)
-        .output()
-        .expect("failed to run compiled binary");
+    let mut command = Command::new(&temp_bin);
+    command.args(args);
+    let run_output = if let Some(input) = stdin {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run compiled binary");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin was not piped")
+            .write_all(input)
+            .expect("failed to write to compiled binary stdin");
+        drop(child.stdin.take());
+        child
+            .wait_with_output()
+            .expect("failed to collect compiled binary output")
+    } else {
+        command.output().expect("failed to run compiled binary")
+    };
 
     let run_stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
     let run_stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
@@ -171,11 +198,24 @@ pub fn run_inline_test(content: &str) -> TestResult {
 
 #[allow(dead_code)]
 pub fn run_inline_test_with_args(content: &str, args: &[&str]) -> TestResult {
+    run_inline_test_with_args_and_stdin(content, args, None)
+}
+
+#[allow(dead_code)]
+pub fn run_inline_test_with_stdin(content: &str, stdin: &[u8]) -> TestResult {
+    run_inline_test_with_args_and_stdin(content, &[], Some(stdin))
+}
+
+fn run_inline_test_with_args_and_stdin(
+    content: &str,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> TestResult {
     let temp_dir = std::env::temp_dir();
     let uid = unique_id();
     let file_path = temp_dir.join(format!("gobol_inline_{}.gbl", uid));
     fs::write(&file_path, content).unwrap();
-    let res = run_gobol_with_args(file_path.to_str().unwrap(), args);
+    let res = run_gobol_with_args_and_stdin(file_path.to_str().unwrap(), args, stdin);
     let _ = fs::remove_file(file_path);
     res
 }

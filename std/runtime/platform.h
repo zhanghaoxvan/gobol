@@ -38,6 +38,7 @@
 typedef HANDLE gobol_thread_t;
 typedef CRITICAL_SECTION gobol_mutex_t;
 typedef CONDITION_VARIABLE gobol_cond_t;
+typedef DWORD (WINAPI *gobol_thread_start_fn)(LPVOID);
 
 #define gobol_ssize_t long long
 
@@ -59,6 +60,7 @@ typedef CONDITION_VARIABLE gobol_cond_t;
 typedef pthread_t gobol_thread_t;
 typedef pthread_mutex_t gobol_mutex_t;
 typedef pthread_cond_t gobol_cond_t;
+typedef void *(*gobol_thread_start_fn)(void *);
 
 #include <sys/types.h>
 #define gobol_ssize_t ssize_t
@@ -105,9 +107,13 @@ static inline gobol_ssize_t gobol_getline(char **lineptr, size_t *n, FILE *strea
 
 /* ---- Platform thread API ---- */
 
-static inline int gobol_thread_create(gobol_thread_t *t, void *(*fn)(void *), void *arg) {
+static inline int gobol_thread_create(
+    gobol_thread_t *t,
+    gobol_thread_start_fn fn,
+    void *arg
+) {
 #ifdef _WIN32
-    HANDLE h = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fn, arg, 0, NULL);
+    HANDLE h = CreateThread(NULL, 0, fn, arg, 0, NULL);
     if (!h) return -1;
     *t = h;
     return 0;
@@ -116,17 +122,13 @@ static inline int gobol_thread_create(gobol_thread_t *t, void *(*fn)(void *), vo
 #endif
 }
 
-static inline long long gobol_thread_join_val(gobol_thread_t t) {
+static inline int gobol_thread_wait_and_close(gobol_thread_t t) {
 #ifdef _WIN32
-    WaitForSingleObject(t, INFINITE);
-    DWORD ret;
-    GetExitCodeThread(t, &ret);
-    CloseHandle(t);
-    return (long long)(intptr_t)ret;
+    DWORD wait_result = WaitForSingleObject(t, INFINITE);
+    BOOL close_result = CloseHandle(t);
+    return wait_result == WAIT_OBJECT_0 && close_result ? 0 : -1;
 #else
-    void *ret = NULL;
-    pthread_join(t, &ret);
-    return (long long)(intptr_t)ret;
+    return pthread_join(t, NULL);
 #endif
 }
 

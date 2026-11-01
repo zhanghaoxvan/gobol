@@ -1335,21 +1335,26 @@ fn find_std_path() -> Option<PathBuf> {
 
         // 1. GOBOL_INSTALL_DIR env var
         if let Ok(dir) = std::env::var("GOBOL_INSTALL_DIR") {
-            let p = PathBuf::from(&dir);
+            let install_dir = PathBuf::from(&dir);
+            let p = install_dir.join("lib");
             if p.join("std").exists() {
                 v.push(p);
             }
-            let p = PathBuf::from(&dir).join("lib");
-            if p.join("std").exists() {
-                v.push(p);
+            if install_dir.join("std").exists() {
+                v.push(install_dir);
             }
         }
 
         // 2. Relative to the grape executable
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                // ~/.gobol/bin/ → ~/.gobol/  (std/ lives next to bin/)
                 if let Some(parent) = dir.parent() {
+                    // Installed libraries live in ~/.gobol/lib/std.
+                    let lib = parent.join("lib");
+                    if lib.join("std").exists() {
+                        v.push(lib);
+                    }
+                    // Keep the old ~/.gobol/std layout as a fallback.
                     if parent.join("std").exists() {
                         v.push(parent.to_path_buf());
                     }

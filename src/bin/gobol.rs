@@ -86,8 +86,11 @@ fn find_runtime_c(lib_paths: &[String]) -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidates = [
+                // Installed layout: ~/.gobol/bin/ → ~/.gobol/lib/std/
+                dir.join("..").join("lib").join("std").join("runtime.c"),
                 // Preferred: std/ next to workspace root (dev layout)
                 dir.join("..").join("..").join("std").join("runtime.c"),
+                // Legacy installed layout: ~/.gobol/bin/ → ~/.gobol/std/
                 dir.join("..").join("std").join("runtime.c"),
                 dir.join("std").join("runtime.c"),
                 // Installed layout: lib/runtime.c

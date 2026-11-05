@@ -382,6 +382,12 @@ impl AstBuilder {
         }
     }
 
+    fn consume_expression_continuation(&mut self) {
+        while self.is_end_of_line() {
+            self.advance();
+        }
+    }
+
     fn consume(&mut self, tp: TokenType, error_msg: &str) -> Token {
         if self.match_type(&tp) {
             let token = self.current_token().clone();
@@ -2122,6 +2128,7 @@ impl AstBuilder {
         {
             let op = self.current_token().value.clone();
             self.advance();
+            self.consume_expression_continuation();
             let value = self.parse_assignment();
             expr = Box::new(BinaryExpression::new(Some(expr), op, value));
         }
@@ -2135,6 +2142,7 @@ impl AstBuilder {
         while self.match_value("||") {
             let op = self.current_token().value.clone();
             self.advance();
+            self.consume_expression_continuation();
             let right = self.parse_logical_and()?;
             expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
         }
@@ -2148,6 +2156,7 @@ impl AstBuilder {
         while self.match_value("&&") {
             let op = self.current_token().value.clone();
             self.advance();
+            self.consume_expression_continuation();
             let right = self.parse_equality()?;
             expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
         }
@@ -2161,6 +2170,7 @@ impl AstBuilder {
         while self.match_value("==") || self.match_value("!=") {
             let op = self.current_token().value.clone();
             self.advance();
+            self.consume_expression_continuation();
             let right = self.parse_comparison()?;
             expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
         }
@@ -2178,6 +2188,7 @@ impl AstBuilder {
         {
             let op = self.current_token().value.clone();
             self.advance();
+            self.consume_expression_continuation();
             let right = self.parse_additive()?;
             expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
         }
@@ -2191,6 +2202,7 @@ impl AstBuilder {
         while self.match_value("+") || self.match_value("-") {
             let op = self.current_token().value.clone();
             self.advance();
+            self.consume_expression_continuation();
             let right = self.parse_multiplicative()?;
             expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
         }
@@ -2204,6 +2216,7 @@ impl AstBuilder {
         while self.match_value("*") || self.match_value("/") || self.match_value("%") {
             let op = self.current_token().value.clone();
             self.advance();
+            self.consume_expression_continuation();
             let right = self.parse_cast()?;
             expr = Box::new(BinaryExpression::new(Some(expr), op, Some(right)));
         }

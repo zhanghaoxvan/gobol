@@ -470,6 +470,7 @@ dependencies = [
  "dashmap 6.2.1",
  "git2",
  "serde",
+ "serde_json",
  "target-lexicon",
  "tokio",
  "toml",

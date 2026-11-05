@@ -26,6 +26,7 @@
 
 /* Provided by Gobol runtime (declaration matches gc.h / gc.c) */
 extern void *gobol_gc_alloc(long long size);
+extern void *gobol_malloc(long long size);
 extern void gobol_free(void *ptr);
 
 /* Error codes (must match net.h) */
@@ -397,7 +398,7 @@ unsigned char *gobol_tcp_recv_bytes(net_socket_t fd, long long max_len,
         return NULL;
     }
 
-    unsigned char *buf = (unsigned char *)gobol_gc_alloc((size_t)max_len + 1);
+    unsigned char *buf = (unsigned char *)gobol_malloc(max_len + 1);
     if (!buf) {
         set_error(err_msg, "Memory allocation failed");
         if (out_len) *out_len = 0;
@@ -427,10 +428,8 @@ unsigned char *gobol_tcp_recv_bytes(net_socket_t fd, long long max_len,
         }
 #endif
         if (n == 0) {
-            set_error(err_msg, "Connection closed by peer");
             if (out_len) *out_len = 0;
-            gobol_free(buf);
-            return NULL;
+            return buf;
         }
         if (out_len) *out_len = n;
         return buf;
@@ -463,7 +462,7 @@ unsigned char *gobol_tcp_recv_exact(net_socket_t fd, long long len,
         return NULL;
     }
 
-    unsigned char *buf = (unsigned char *)gobol_gc_alloc((size_t)len + 1);
+    unsigned char *buf = (unsigned char *)gobol_malloc(len + 1);
     if (!buf) {
         set_error(err_msg, "Memory allocation failed");
         if (out_len) *out_len = 0;

@@ -233,6 +233,7 @@ fn run_command(args: &[String]) -> Result<()> {
         "update" => cmd_update(&args[2..]),
         "list" => cmd_list(),
         "run" => cmd_run(&args[2..]),
+        "debug" => cmd_debug(&args[2..]),
         "clean" => cmd_clean(),
         "build" => cmd_build(&args[2..]),
         "help" | "--help" => {
@@ -261,6 +262,7 @@ fn print_help() {
     println!("  grape update [name]         Update dependencies (use --latest for newest tag)");
     println!("  grape list                  List all dependencies");
     println!("  grape run [--verbose]       Build and run the Gobol program");
+    println!("  grape debug [options]        Build and run with the debug profile");
     println!("  grape build [-o <file>] [--release]  Compile to native binary");
     println!("  grape clean                 Clean build artifacts and cached packages");
     println!("  grape version               Show the version");
@@ -575,6 +577,21 @@ fn cmd_list() -> Result<()> {
 fn cmd_run(args: &[String]) -> Result<()> {
     // run => compile + execute.
     build_project(args, false)
+}
+
+fn cmd_debug(args: &[String]) -> Result<()> {
+    let debug_args = with_debug_profile(args);
+    build_project(&debug_args, false)
+}
+
+fn with_debug_profile(args: &[String]) -> Vec<String> {
+    let mut debug_args = args.to_vec();
+    let insert_at = debug_args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(debug_args.len());
+    debug_args.insert(insert_at, "--debug".to_string());
+    debug_args
 }
 
 // ============ cmd_build — independent build command ============
@@ -1638,5 +1655,19 @@ mod tests {
         assert!(!compile_only);
         let is_verbose = args.iter().any(|a| a == "--verbose");
         assert!(is_verbose);
+    }
+
+    #[test]
+    fn test_debug_command_forces_debug_profile_before_program_args() {
+        let args = vec![
+            "--release".to_string(),
+            "--".to_string(),
+            "--debug".to_string(),
+        ];
+        let debug_args = with_debug_profile(&args);
+        let cli = parse_build_cli(&debug_args);
+
+        assert!(!cli.release);
+        assert_eq!(cli.program_args, vec!["--debug"]);
     }
 }

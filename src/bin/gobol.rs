@@ -8,10 +8,133 @@ use gobol::error::ErrorFormatter;
 use gobol::lexer::Lexer;
 use gobol::semantic_analyzer::{BuildMode, SemanticAnalyzer};
 use gobol::token;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
+
+const MODULE_IR_CACHE_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct ModuleIrCache {
+    version: u32,
+    fingerprint: u64,
+    imports: Vec<String>,
+    ir: gobol::ir::GobolIR,
+}
+
+fn stable_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn module_fingerprint(module_file: &str, source: &str, target: &str) -> u64 {
+    let mut input = Vec::with_capacity(module_file.len() + source.len() + target.len() + 6);
+    input.extend_from_slice(&MODULE_IR_CACHE_VERSION.to_le_bytes());
+    input.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
+    input.push(0);
+    input.extend_from_slice(module_file.as_bytes());
+    input.push(0);
+    input.extend_from_slice(target.as_bytes());
+    input.push(0);
+    input.extend_from_slice(source.as_bytes());
+    stable_hash(&input)
+}
+
+fn module_cache_path(cache_dir: &Path, module_file: &str) -> PathBuf {
+    let cache_key = stable_hash(module_file.as_bytes());
+    cache_dir.join(format!("{cache_key:016x}.json"))
+}
+
+fn read_module_ir_cache(cache_path: &Path, fingerprint: u64) -> Option<ModuleIrCache> {
+    match fs::read(cache_path) {
+        Ok(bytes) => match serde_json::from_slice::<ModuleIrCache>(&bytes) {
+            Ok(cache)
+                if cache.version == MODULE_IR_CACHE_VERSION && cache.fingerprint == fingerprint =>
+            {
+                Some(cache)
+            }
+            Ok(_) => None,
+            Err(error) => {
+                eprintln!(
+                    "warning: ignoring invalid module IR cache '{}': {}",
+                    cache_path.display(),
+                    error
+                );
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!(
+                "warning: cannot read module IR cache '{}': {}",
+                cache_path.display(),
+                error
+            );
+            None
+        }
+    }
+}
+
+fn write_module_ir_cache(
+    cache_dir: &Path,
+    cache_path: &Path,
+    module_file: &str,
+    cache: &ModuleIrCache,
+) {
+    let bytes = match serde_json::to_vec(cache) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!(
+                "warning: cannot serialize module IR cache for '{}': {}",
+                module_file, error
+            );
+            return;
+        }
+    };
+    let temp_path = cache_dir.join(format!(
+        "{:016x}.{}.tmp",
+        stable_hash(module_file.as_bytes()),
+        process::id()
+    ));
+    let result = fs::create_dir_all(cache_dir)
+        .and_then(|()| fs::write(&temp_path, bytes))
+        .and_then(|()| {
+            if cache_path.exists() {
+                fs::remove_file(cache_path)?;
+            }
+            fs::rename(&temp_path, cache_path)
+        });
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temp_path);
+        eprintln!(
+            "warning: cannot write module IR cache '{}': {}",
+            cache_path.display(),
+            error
+        );
+    }
+}
+
+fn module_import_names(program: &gobol::ast::Program) -> Vec<String> {
+    program
+        .get_statements()
+        .iter()
+        .filter_map(|stmt| {
+            if let Some(import) = stmt.as_any().downcast_ref::<gobol::ast::ImportStatement>() {
+                Some(import.get_module_name().to_string())
+            } else {
+                stmt.as_any()
+                    .downcast_ref::<gobol::ast::FromImportStatement>()
+                    .map(|import| import.get_module().to_string())
+            }
+        })
+        .collect()
+}
 
 fn resolve_module_file(
     path_parts: &[String],
@@ -144,6 +267,7 @@ fn print_help() {
     println!();
     println!("Options:");
     println!("  --debug                  Debug build (default)");
+    println!("  --no-incremental         Disable the per-module IR cache");
     println!("  --release                Release build (optimized)");
     println!(
         "  -O<n>                    Optimization level 0-2 (0=none, 1=speed, 2=speed_and_size)."
@@ -227,6 +351,7 @@ fn main() {
 
     let is_verbose = args.iter().any(|s| s == "--verbose" || s == "-v");
     let is_check_only = args.iter().any(|s| s == "--check");
+    let incremental_enabled = !args.iter().any(|arg| arg == "--no-incremental");
 
     let mut build_mode = BuildMode::Debug;
     let mut out_name: Option<String> = None;
@@ -291,7 +416,7 @@ fn main() {
             // -O0 / -O1 / -O2
             opt_level = digits.parse::<usize>().ok();
             i += 1;
-        } else if matches!(args[i].as_str(), "--verbose" | "-v") {
+        } else if matches!(args[i].as_str(), "--verbose" | "-v" | "--no-incremental") {
             i += 1;
         } else if args[i].starts_with("-") {
             i += 1;
@@ -511,18 +636,52 @@ fn main() {
         process::exit(0);
     }
 
-    let mut ir_builder = gobol::ir::IRBuilder::new();
-    ir_builder.set_current_file(filename.clone());
-    ir_builder.set_target(&target);
-    let mut ir = match ir_builder.build(&prog) {
-        Ok(ir) => ir,
-        Err(errors) => {
-            eprintln!("{}", "IR build failed:".red());
-            for msg in &errors {
-                eprintln!("{}", msg.red());
-            }
-            process::exit(1);
+    let module_cache_dir = PathBuf::from("target")
+        .join("gobol")
+        .join("incremental")
+        .join("ir-v1");
+    let root_fingerprint = module_fingerprint(&filename, &source, &target);
+    let root_cache_path = module_cache_path(&module_cache_dir, &filename);
+    let root_cache = incremental_enabled
+        .then(|| read_module_ir_cache(&root_cache_path, root_fingerprint))
+        .flatten();
+    let (mut ir, root_imports) = if let Some(cache) = root_cache {
+        if is_verbose {
+            println!("Incremental cache hit: {filename}");
         }
+        (cache.ir, cache.imports)
+    } else {
+        if is_verbose && incremental_enabled {
+            println!("Incremental cache miss: {filename}");
+        }
+        let mut ir_builder = gobol::ir::IRBuilder::new();
+        ir_builder.set_current_file(filename.clone());
+        ir_builder.set_target(&target);
+        let ir = match ir_builder.build(&prog) {
+            Ok(ir) => ir,
+            Err(errors) => {
+                eprintln!("{}", "IR build failed:".red());
+                for msg in &errors {
+                    eprintln!("{}", msg.red());
+                }
+                process::exit(1);
+            }
+        };
+        let imports = module_import_names(&prog);
+        if incremental_enabled {
+            write_module_ir_cache(
+                &module_cache_dir,
+                &root_cache_path,
+                &filename,
+                &ModuleIrCache {
+                    version: MODULE_IR_CACHE_VERSION,
+                    fingerprint: root_fingerprint,
+                    imports: imports.clone(),
+                    ir: ir.clone(),
+                },
+            );
+        }
+        (ir, imports)
     };
 
     fn resolve_module_file_relative(path_parts: &[String], parent_file: &str) -> Option<String> {
@@ -545,6 +704,9 @@ fn main() {
         lib_paths: &[String],
         error_fmt: &ErrorFormatter,
         target: &str,
+        cache_dir: &Path,
+        incremental_enabled: bool,
+        verbose: bool,
         ir: &mut gobol::ir::GobolIR,
         visited: &mut std::collections::HashSet<String>,
     ) {
@@ -555,22 +717,52 @@ fn main() {
             Ok(s) => s,
             Err(_) => return,
         };
-        let mod_lexer = gobol::lexer::Lexer::new(source);
-        let mut mod_builder = gobol::ast_builder::AstBuilder::new(mod_lexer);
-        mod_builder.set_error_formatter(error_fmt.clone());
-        let mod_prog = match mod_builder.build() {
-            Some(p) => p,
-            None => return,
-        };
-        if mod_builder.has_error() {
-            return;
-        }
-        let mut mod_ir_builder = gobol::ir::IRBuilder::new();
-        mod_ir_builder.set_current_file(module_file);
-        mod_ir_builder.set_target(target);
-        let mod_ir = match mod_ir_builder.build(&mod_prog) {
-            Ok(ir) => ir,
-            Err(_) => return,
+        let fingerprint = module_fingerprint(module_file, &source, target);
+        let cache_path = module_cache_path(cache_dir, module_file);
+        let cached = incremental_enabled
+            .then(|| read_module_ir_cache(&cache_path, fingerprint))
+            .flatten();
+        let (mod_ir, imports) = if let Some(cache) = cached {
+            if verbose {
+                println!("Incremental cache hit: {module_file}");
+            }
+            (cache.ir, cache.imports)
+        } else {
+            if verbose && incremental_enabled {
+                println!("Incremental cache miss: {module_file}");
+            }
+            let mod_lexer = gobol::lexer::Lexer::new(source.clone());
+            let mut mod_builder = gobol::ast_builder::AstBuilder::new(mod_lexer);
+            mod_builder.set_error_formatter(error_fmt.clone());
+            let mod_prog = match mod_builder.build() {
+                Some(p) => p,
+                None => return,
+            };
+            if mod_builder.has_error() {
+                return;
+            }
+            let mut mod_ir_builder = gobol::ir::IRBuilder::new();
+            mod_ir_builder.set_current_file(module_file);
+            mod_ir_builder.set_target(target);
+            let mod_ir = match mod_ir_builder.build(&mod_prog) {
+                Ok(ir) => ir,
+                Err(_) => return,
+            };
+            let imports = module_import_names(&mod_prog);
+            if incremental_enabled {
+                write_module_ir_cache(
+                    cache_dir,
+                    &cache_path,
+                    module_file,
+                    &ModuleIrCache {
+                        version: MODULE_IR_CACHE_VERSION,
+                        fingerprint,
+                        imports: imports.clone(),
+                        ir: mod_ir.clone(),
+                    },
+                );
+            }
+            (mod_ir, imports)
         };
 
         let short_name = module_name.rsplit("::").next().unwrap_or(module_name);
@@ -647,105 +839,65 @@ fn main() {
             }
         }
 
-        for stmt in mod_prog.get_statements() {
-            if let Some(import_stmt) = stmt.as_any().downcast_ref::<gobol::ast::ImportStatement>() {
-                let sub_name = import_stmt.get_module_name();
-                let sub_parts: Vec<String> = sub_name
-                    .split("::")
-                    .flat_map(|s| s.split('.'))
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if let Some(sub_file) = resolve_module_file_relative(&sub_parts, module_file) {
-                    load_module_into_ir(
-                        &sub_name, &sub_file, lib_paths, error_fmt, target, ir, visited,
-                    );
-                } else if let Some(sub_file) =
-                    resolve_module_file(&sub_parts, lib_paths, module_file)
-                {
-                    load_module_into_ir(
-                        &sub_name, &sub_file, lib_paths, error_fmt, target, ir, visited,
-                    );
-                }
-            } else if let Some(from_import) = stmt
-                .as_any()
-                .downcast_ref::<gobol::ast::FromImportStatement>()
-            {
-                // `from module import member, ...` — load the module into IR.
-                // The bare-name function entries are created automatically by
-                // load_module_into_ir, so from-import members are resolvable.
-                let sub_name = from_import.get_module();
-                let sub_parts: Vec<String> = sub_name
-                    .split("::")
-                    .flat_map(|s| s.split('.'))
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if let Some(sub_file) = resolve_module_file_relative(&sub_parts, module_file) {
-                    load_module_into_ir(
-                        sub_name, &sub_file, lib_paths, error_fmt, target, ir, visited,
-                    );
-                } else if let Some(sub_file) =
-                    resolve_module_file(&sub_parts, lib_paths, module_file)
-                {
-                    load_module_into_ir(
-                        sub_name, &sub_file, lib_paths, error_fmt, target, ir, visited,
-                    );
-                }
+        for sub_name in imports {
+            let sub_parts: Vec<String> = sub_name
+                .split("::")
+                .flat_map(|s| s.split('.'))
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if let Some(sub_file) = resolve_module_file_relative(&sub_parts, module_file) {
+                load_module_into_ir(
+                    &sub_name,
+                    &sub_file,
+                    lib_paths,
+                    error_fmt,
+                    target,
+                    cache_dir,
+                    incremental_enabled,
+                    verbose,
+                    ir,
+                    visited,
+                );
+            } else if let Some(sub_file) = resolve_module_file(&sub_parts, lib_paths, module_file) {
+                load_module_into_ir(
+                    &sub_name,
+                    &sub_file,
+                    lib_paths,
+                    error_fmt,
+                    target,
+                    cache_dir,
+                    incremental_enabled,
+                    verbose,
+                    ir,
+                    visited,
+                );
             }
         }
     }
 
     {
         let mut visited = std::collections::HashSet::new();
-        for stmt in prog.get_statements() {
-            if let Some(import_stmt) = stmt.as_any().downcast_ref::<gobol::ast::ImportStatement>() {
-                let module_name = import_stmt.get_module_name();
-                let path_parts: Vec<String> = module_name
-                    .split("::")
-                    .flat_map(|s| s.split('.'))
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if let Some(module_path) = resolve_module_file(&path_parts, &lib_paths, &filename) {
-                    load_module_into_ir(
-                        &module_name,
-                        &module_path,
-                        &lib_paths,
-                        &error_fmt,
-                        &target,
-                        &mut ir,
-                        &mut visited,
-                    );
-                } else {
-                    // Module resolution failure is non-fatal here; the
-                    // semantic analyzer already reported the error.
-                }
-            } else if let Some(from_import) = stmt
-                .as_any()
-                .downcast_ref::<gobol::ast::FromImportStatement>()
-            {
-                // `from module import member, ...` — load the module so its
-                // functions (including the requested members) are available
-                // in the IR for code generation.
-                let module_name = from_import.get_module();
-                let path_parts: Vec<String> = module_name
-                    .split("::")
-                    .flat_map(|s| s.split('.'))
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if let Some(module_path) = resolve_module_file(&path_parts, &lib_paths, &filename) {
-                    load_module_into_ir(
-                        module_name,
-                        &module_path,
-                        &lib_paths,
-                        &error_fmt,
-                        &target,
-                        &mut ir,
-                        &mut visited,
-                    );
-                }
+        for module_name in root_imports {
+            let path_parts: Vec<String> = module_name
+                .split("::")
+                .flat_map(|s| s.split('.'))
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if let Some(module_path) = resolve_module_file(&path_parts, &lib_paths, &filename) {
+                load_module_into_ir(
+                    &module_name,
+                    &module_path,
+                    &lib_paths,
+                    &error_fmt,
+                    &target,
+                    &module_cache_dir,
+                    incremental_enabled,
+                    is_verbose,
+                    &mut ir,
+                    &mut visited,
+                );
             }
         }
     }
@@ -852,5 +1004,53 @@ fn main() {
 
     if is_verbose {
         println!("AOT binary written to {}", out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MODULE_IR_CACHE_VERSION, ModuleIrCache, module_cache_path, module_fingerprint,
+        read_module_ir_cache, write_module_ir_cache,
+    };
+    use gobol::ir::GobolIR;
+    use std::{env, fs, process};
+
+    #[test]
+    fn module_ir_cache_persists_and_checks_fingerprints() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir =
+            env::temp_dir().join(format!("gobol-module-ir-cache-{}-{unique}", process::id()));
+        let cache_dir = temp_dir.join("cache");
+        let cache_path = module_cache_path(&cache_dir, "lib/math.gbl");
+        let fingerprint =
+            module_fingerprint("lib/math.gbl", "func f() {}", "x86_64-pc-windows-msvc");
+        let cache = ModuleIrCache {
+            version: MODULE_IR_CACHE_VERSION,
+            fingerprint,
+            imports: vec!["std::int".to_string()],
+            ir: GobolIR {
+                functions: Vec::new(),
+                structs: Vec::new(),
+                impls: Vec::new(),
+                main_function: None,
+                globals: Vec::new(),
+            },
+        };
+
+        write_module_ir_cache(&cache_dir, &cache_path, "lib/math.gbl", &cache);
+
+        let loaded = read_module_ir_cache(&cache_path, fingerprint)
+            .expect("written module IR cache should be readable");
+        assert_eq!(loaded.version, cache.version);
+        assert_eq!(loaded.imports, cache.imports);
+        assert!(
+            read_module_ir_cache(&cache_path, fingerprint.wrapping_add(1)).is_none(),
+            "cache should be rejected when the source fingerprint changes"
+        );
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 }

@@ -38,6 +38,8 @@ enum OkPayload {
     Struct,
     /// A string / byte buffer pointer.
     Str,
+    /// A byte buffer that must be converted to Gobol's array representation.
+    Bytes,
     /// An integer count (bytes written, etc.).
     Int,
     /// Unit (no payload) — `Result<(), str>`.
@@ -276,6 +278,9 @@ impl TypeResolver {
             (DataType::Unknown, "len") => Some(DataType::Int),
             (DataType::Unknown, "get") => Some(DataType::Int),
             (DataType::Unknown, "add") => Some(DataType::None_),
+            (DataType::Array(_), "len") => Some(DataType::Int),
+            (DataType::Array(element), "get") => Some((**element).clone()),
+            (DataType::Array(_), "add") => Some(DataType::None_),
             // String methods
             (DataType::Str, "len") => Some(DataType::Int),
             (DataType::Str, "get") => Some(DataType::Int),
@@ -302,8 +307,23 @@ impl TypeResolver {
                 let _ = elems.first().map(|e| self.infer_type(e));
                 DataType::Unknown
             }
-            IRExpr::MethodCall { object, method, .. } => {
+            IRExpr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 let obj_ty = self.infer_type(object);
+                if method == "take" {
+                    if let Some(payload_ty) = self.net_result_payload_type(object) {
+                        return payload_ty;
+                    }
+                }
+                if method == "add"
+                    && (self.contains_str(object) || args.iter().any(|arg| self.contains_str(arg)))
+                {
+                    return DataType::Str;
+                }
                 // Struct constructor: Type::new(...)
                 if method == "new" {
                     if let IRExpr::Variable(name) = object.as_ref() {
@@ -387,6 +407,29 @@ impl TypeResolver {
         }
     }
 
+    fn net_result_payload_type(&self, expr: &IRExpr) -> Option<DataType> {
+        match expr {
+            IRExpr::Call { func, .. } => {
+                match func.rsplit("::").take(2).collect::<Vec<_>>().as_slice() {
+                    ["connect", "TcpStream"] => Some(DataType::Struct("TcpStream".to_string())),
+                    ["bind", "TcpListener"] => Some(DataType::Struct("TcpListener".to_string())),
+                    _ => None,
+                }
+            }
+            IRExpr::MethodCall { method, .. } => match method.as_str() {
+                "recv_bytes" | "recv_exact" => Some(DataType::Array(Box::new(DataType::Byte))),
+                "send_str" | "send_bytes" => Some(DataType::Int),
+                "local_addr" | "remote_addr" => Some(DataType::Str),
+                "close" | "set_read_timeout" | "set_write_timeout" | "set_keepalive" => {
+                    Some(DataType::None_)
+                }
+                "accept" => Some(DataType::Struct("TcpStream".to_string())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn contains_str(&self, e: &IRExpr) -> bool {
         match e {
             IRExpr::Literal(LitValue::Str(_)) => true,
@@ -396,7 +439,17 @@ impl TypeResolver {
                 _ => false,
             },
             IRExpr::Cast { target, .. } => matches!(target, DataType::Str),
-            IRExpr::MethodCall { method, .. } => method.contains("str"),
+            IRExpr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
+                method.contains("str")
+                    || (method == "add"
+                        && (self.contains_str(object)
+                            || args.iter().any(|arg| self.contains_str(arg))))
+            }
             IRExpr::Call { func, .. } => {
                 matches!(self.func_return_types.get(func), Some(DataType::Str))
                     || func.contains("str")
@@ -1452,35 +1505,60 @@ impl CraneliftBackend {
         bcx: &mut FunctionBuilder,
         block: &IRBlock,
     ) -> Result<(), String> {
-        for stmt in &block.statements {
-            let current_terminated = bcx
-                .current_block()
-                .and_then(|block| bcx.func.layout.last_inst(block))
-                .map_or(false, |inst| {
-                    bcx.func.dfg.insts[inst].opcode().is_terminator()
-                });
-            if current_terminated {
-                break;
+        let saved_variables = self.variables.clone();
+        let saved_addressable_slots = self.addressable_slots.clone();
+        let saved_var_types = self.type_resolver.var_types.clone();
+        let result = (|| {
+            for stmt in &block.statements {
+                let current_terminated = bcx
+                    .current_block()
+                    .and_then(|block| bcx.func.layout.last_inst(block))
+                    .map_or(false, |inst| {
+                        bcx.func.dfg.insts[inst].opcode().is_terminator()
+                    });
+                if current_terminated {
+                    break;
+                }
+                self.translate_stmt(bcx, stmt)?;
             }
-            self.translate_stmt(bcx, stmt)?;
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.variables = saved_variables;
+        self.addressable_slots = saved_addressable_slots;
+        self.type_resolver.var_types = saved_var_types;
+        result
     }
 
     fn translate_stmt(&mut self, bcx: &mut FunctionBuilder, stmt: &IRStmt) -> Result<(), String> {
         match stmt {
             IRStmt::Declaration { name, ty, init } => {
-                let resolved = if *ty == DataType::None_ || *ty == DataType::Unknown {
-                    let inferred = init
-                        .as_ref()
-                        .map(|e| self.type_resolver.infer_type(e))
-                        .unwrap_or(DataType::Int);
+                let unresolved_generic = matches!(
+                    ty,
+                    DataType::Struct(struct_name)
+                        if !self.type_resolver.has_struct(struct_name)
+                );
+                let needs_inference =
+                    *ty == DataType::None_ || *ty == DataType::Unknown || unresolved_generic;
+                let inferred = init
+                    .as_ref()
+                    .map(|e| self.type_resolver.infer_type(e))
+                    .unwrap_or(DataType::Unknown);
+                let inferred_non_numeric = matches!(
+                    inferred,
+                    DataType::Str
+                        | DataType::Struct(_)
+                        | DataType::Array(_)
+                        | DataType::Reference(_)
+                        | DataType::Pointer(_)
+                );
+                let resolved = if (needs_inference
+                    || (*ty == DataType::Int && inferred_non_numeric))
+                    && !matches!(inferred, DataType::Unknown | DataType::None_)
+                {
+                    inferred
+                } else if *ty == DataType::None_ || *ty == DataType::Unknown {
                     // Avoid types::INVALID from DataType::None_
-                    if matches!(inferred, DataType::None_) {
-                        DataType::Int
-                    } else {
-                        inferred
-                    }
+                    DataType::Int
                 } else {
                     ty.clone()
                 };
@@ -1635,7 +1713,6 @@ impl CraneliftBackend {
         let c = self.to_bool(bcx, c, &self.type_resolver.infer_type(cond));
         bcx.ins().brif(c, body_b, &[], end_b, &[]);
         bcx.seal_block(body_b);
-        bcx.seal_block(end_b);
 
         bcx.switch_to_block(body_b);
         self.loop_stack.push((end_b, cond_b));
@@ -1646,6 +1723,7 @@ impl CraneliftBackend {
             bcx.ins().jump(cond_b, &[]);
         }
         bcx.seal_block(cond_b);
+        bcx.seal_block(end_b);
 
         bcx.switch_to_block(end_b);
         self.diverged = false;
@@ -1659,18 +1737,27 @@ impl CraneliftBackend {
         iterable: &IRExpr,
         body: &IRBlock,
     ) -> Result<(), String> {
-        // Range: range::new(start, end[, step])  or  Range::new(...)  or  start..end
-        if let IRExpr::Call { func, args, .. } = iterable {
-            if func == "range::new" || func == "Range::new" {
-                return self.translate_for_range(bcx, vars, args, body);
+        let saved_variables = self.variables.clone();
+        let saved_addressable_slots = self.addressable_slots.clone();
+        let saved_var_types = self.type_resolver.var_types.clone();
+        let result = (|| {
+            // Range: range::new(start, end[, step])  or  Range::new(...)  or  start..end
+            if let IRExpr::Call { func, args, .. } = iterable {
+                if func == "range::new" || func == "Range::new" {
+                    return self.translate_for_range(bcx, vars, args, body);
+                }
             }
-        }
-        // String literal iteration: for ch in "abc"
-        if let IRExpr::Literal(LitValue::Str(s)) = iterable {
-            return self.translate_for_string(bcx, vars, s, body);
-        }
-        // Array iteration
-        self.translate_for_array(bcx, vars, iterable, body)
+            // String literal iteration: for ch in "abc"
+            if let IRExpr::Literal(LitValue::Str(s)) = iterable {
+                return self.translate_for_string(bcx, vars, s, body);
+            }
+            // Array iteration
+            self.translate_for_array(bcx, vars, iterable, body)
+        })();
+        self.variables = saved_variables;
+        self.addressable_slots = saved_addressable_slots;
+        self.type_resolver.var_types = saved_var_types;
+        result
     }
 
     fn translate_for_range(
@@ -1740,7 +1827,6 @@ impl CraneliftBackend {
         let cmp = bcx.ins().icmp(cmp_op, cur, end);
         bcx.ins().brif(cmp, body_b, &[], end_b, &[]);
         bcx.seal_block(body_b);
-        bcx.seal_block(end_b);
 
         bcx.switch_to_block(body_b);
         self.loop_stack.push((end_b, incr_b));
@@ -1762,6 +1848,7 @@ impl CraneliftBackend {
         }
         bcx.ins().jump(cond_b, &[]);
         bcx.seal_block(cond_b);
+        bcx.seal_block(end_b);
 
         bcx.switch_to_block(end_b);
         self.diverged = false;
@@ -1817,7 +1904,6 @@ impl CraneliftBackend {
         let cmp = bcx.ins().icmp(IntCC::SignedLessThan, i, len);
         bcx.ins().brif(cmp, body_b, &[], end_b, &[]);
         bcx.seal_block(body_b);
-        bcx.seal_block(end_b);
 
         bcx.switch_to_block(body_b);
         self.diverged = false;
@@ -1846,6 +1932,7 @@ impl CraneliftBackend {
         }
         bcx.ins().jump(cond_b, &[]);
         bcx.seal_block(cond_b);
+        bcx.seal_block(end_b);
 
         bcx.switch_to_block(end_b);
         self.diverged = false;
@@ -1888,7 +1975,6 @@ impl CraneliftBackend {
         let cmp = bcx.ins().icmp(IntCC::SignedLessThan, i, len);
         bcx.ins().brif(cmp, body_b, &[], end_b, &[]);
         bcx.seal_block(body_b);
-        bcx.seal_block(end_b);
 
         bcx.switch_to_block(body_b);
         self.diverged = false;
@@ -1912,6 +1998,7 @@ impl CraneliftBackend {
         bcx.def_var(idx_var, next);
         bcx.ins().jump(cond_b, &[]);
         bcx.seal_block(cond_b);
+        bcx.seal_block(end_b);
 
         bcx.switch_to_block(end_b);
         self.diverged = false;
@@ -2364,7 +2451,8 @@ impl CraneliftBackend {
         // Struct static method via :: notation: StructName::method(args)
         // The IR builder prepends `self` for methods (constructors, enum
         // variants, etc.), so we must allocate and prepend self.
-        if let Some((struct_name, _method)) = func.split_once("::") {
+        if let Some((owner, _method)) = func.rsplit_once("::") {
+            let struct_name = owner.rsplit("::").next().unwrap_or(owner);
             if self.type_resolver.has_struct(struct_name) {
                 // Check that the method expects self (arity = args + 1)
                 let arity = args.len() + 1;
@@ -2586,7 +2674,8 @@ impl CraneliftBackend {
 
         // Struct intrinsic static methods (e.g., File::open, TcpStream::connect).
         // These have no body — intercept before user function lookup.
-        if let Some((struct_name, method)) = func.split_once("::") {
+        if let Some((owner, method)) = func.rsplit_once("::") {
+            let struct_name = owner.rsplit("::").next().unwrap_or(owner);
             if let Some(rt) = self.struct_intrinsic_runtime(struct_name, method) {
                 let fret = self.type_resolver.func_return_type(func);
                 if struct_name == "TcpStream" || struct_name == "TcpListener" {
@@ -2638,6 +2727,12 @@ impl CraneliftBackend {
         args: &[IRExpr],
     ) -> Result<ir::Value, String> {
         let obj_ty = self.type_resolver.infer_type(object);
+
+        if method == "take" && self.type_resolver.net_result_payload_type(object).is_some() {
+            let result = self.translate_expr(bcx, object)?;
+            let payload = self.field_addr(bcx, result, 8);
+            return Ok(self.call_runtime(bcx, "gobol_mem_load", &[payload]));
+        }
 
         // Struct constructor / static methods: Type::new(...) or Type::method(...)
         // Must be BEFORE the qualified function check so we can allocate self
@@ -2696,7 +2791,7 @@ impl CraneliftBackend {
             let payload = match method {
                 "local_addr" | "remote_addr" => OkPayload::Str,
                 "send_str" | "send_bytes" => OkPayload::Int,
-                "recv_bytes" | "recv_exact" => OkPayload::Str,
+                "recv_bytes" | "recv_exact" => OkPayload::Bytes,
                 _ => OkPayload::Unit,
             };
             return self.translate_net_intrinsic(
@@ -2706,6 +2801,17 @@ impl CraneliftBackend {
                 Some(obj_val),
                 &arg_vals,
             );
+        }
+
+        if method == "add"
+            && (self.contains_str(object) || args.iter().any(|arg| self.contains_str(arg)))
+        {
+            let mut values = Vec::with_capacity(args.len() + 1);
+            values.push(self.to_string_value(bcx, object)?);
+            for arg in args {
+                values.push(self.to_string_value(bcx, arg)?);
+            }
+            return Ok(self.call_runtime(bcx, "gobol_str_cat", &values));
         }
 
         // Intrinsic arithmetic methods on primitive types (int, float)
@@ -2745,12 +2851,18 @@ impl CraneliftBackend {
             let rt = self
                 .struct_intrinsic_runtime("TcpStream", method)
                 .ok_or_else(|| format!("unknown TcpStream intrinsic '{}'", method))?;
-            let kind = NetIntrinsicKind::Result_(OkPayload::Str);
+            let payload = match method {
+                "recv_bytes" | "recv_exact" => OkPayload::Bytes,
+                "local_addr" | "remote_addr" => OkPayload::Str,
+                "send_str" | "send_bytes" => OkPayload::Int,
+                _ => OkPayload::Unit,
+            };
+            let kind = NetIntrinsicKind::Result_(payload);
             return self.translate_net_intrinsic(bcx, rt, kind, Some(obj_val), &arg_vals);
         }
 
         // Array methods: arr.add(x), arr.len(), arr.get(i)
-        if matches!(obj_ty, DataType::Unknown) || self.is_array_var(object) {
+        if matches!(obj_ty, DataType::Unknown | DataType::Array(_)) || self.is_array_var(object) {
             match method {
                 "add" => {
                     let arr = self.translate_expr(bcx, object)?;
@@ -2944,15 +3056,23 @@ impl CraneliftBackend {
     /// to be constructed in code, vs. a plain value.
     fn net_intrinsic_kind(&self, method: &str, ret_ty: &DataType) -> Option<NetIntrinsicKind> {
         use NetIntrinsicKind::*;
+        let payload = match method {
+            "connect" | "bind" | "accept" => Some(OkPayload::Struct),
+            "local_addr" | "remote_addr" => Some(OkPayload::Str),
+            "recv_bytes" | "recv_exact" => Some(OkPayload::Bytes),
+            "send_str" | "send_bytes" => Some(OkPayload::Int),
+            "close" | "set_read_timeout" | "set_write_timeout" | "set_keepalive" => {
+                Some(OkPayload::Unit)
+            }
+            _ => None,
+        };
+        if let Some(payload) = payload {
+            return Some(Result_(payload));
+        }
+
         match ret_ty {
-            DataType::Struct(s) if s == "Result" => {
-                let ok = match method {
-                    "connect" | "bind" | "accept" => OkPayload::Struct,
-                    "local_addr" | "remote_addr" | "recv_bytes" | "recv_exact" => OkPayload::Str,
-                    "send_str" | "send_bytes" => OkPayload::Int,
-                    _ => OkPayload::Unit,
-                };
-                Some(Result_(ok))
+            DataType::Struct(s) if s.split('<').next() == Some("Result") => {
+                Some(Result_(OkPayload::Unit))
             }
             DataType::Struct(s) if s == "TcpStream" || s == "TcpListener" => {
                 Some(ValuePayload(OkPayload::Struct))
@@ -2998,6 +3118,14 @@ impl CraneliftBackend {
                 let slot = self.call_runtime(bcx, "gobol_gc_alloc", &[eight]);
                 let zero0 = bcx.ins().iconst(types::I64, 0);
                 self.call_runtime(bcx, "gobol_mem_store", &[slot, zero0]);
+                let out_len_slot = if matches!(rt, "gobol_tcp_recv_bytes" | "gobol_tcp_recv_exact")
+                {
+                    let length_slot = self.call_runtime(bcx, "gobol_gc_alloc", &[eight]);
+                    self.call_runtime(bcx, "gobol_mem_store", &[length_slot, zero0]);
+                    Some(length_slot)
+                } else {
+                    None
+                };
 
                 let mut vals: Vec<ir::Value> = Vec::new();
                 if let Some(s) = self_val {
@@ -3008,6 +3136,9 @@ impl CraneliftBackend {
                     vals.push(fd);
                 }
                 vals.extend_from_slice(arg_vals);
+                if let Some(length_slot) = out_len_slot {
+                    vals.push(length_slot);
+                }
                 vals.push(slot);
                 let raw = self.call_runtime(bcx, rt, &vals);
 
@@ -3042,6 +3173,14 @@ impl CraneliftBackend {
                         self.store_result_field(bcx, wrapper, 0, raw);
                         wrapper
                     }
+                    OkPayload::Bytes => {
+                        let length_slot = out_len_slot
+                            .ok_or_else(|| "missing byte count from TCP receive".to_string())?;
+                        let length = self.call_runtime(bcx, "gobol_mem_load", &[length_slot]);
+                        let array = self.byte_buffer_to_array(bcx, raw, length);
+                        self.call_runtime(bcx, "gobol_free", &[raw]);
+                        array
+                    }
                     _ => raw,
                 };
                 self.store_result_field(bcx, res, 8, ok_payload);
@@ -3062,6 +3201,77 @@ impl CraneliftBackend {
                 Ok(join_param)
             }
         }
+    }
+
+    fn byte_buffer_to_array(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        buffer: ir::Value,
+        length: ir::Value,
+    ) -> ir::Value {
+        let array = self.call_runtime(bcx, "gobol_array_new", &[]);
+        let cond_b = bcx.create_block();
+        let body_b = bcx.create_block();
+        let end_b = bcx.create_block();
+        let index = bcx.append_block_param(cond_b, types::I64);
+        let zero = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().jump(cond_b, &[BlockArg::Value(zero)]);
+
+        bcx.switch_to_block(cond_b);
+        let index_value = bcx.block_params(cond_b)[0];
+        let has_next = bcx.ins().icmp(IntCC::SignedLessThan, index_value, length);
+        bcx.ins().brif(has_next, body_b, &[], end_b, &[]);
+        bcx.seal_block(body_b);
+        bcx.seal_block(end_b);
+
+        bcx.switch_to_block(body_b);
+        let address = bcx.ins().iadd(buffer, index);
+        let byte = bcx
+            .ins()
+            .load(types::I8, MemFlagsData::trusted(), address, 0);
+        let byte = bcx.ins().uextend(types::I64, byte);
+        self.call_runtime(bcx, "gobol_array_add", &[array, byte]);
+        let next = bcx.ins().iadd_imm_s(index, 1);
+        bcx.ins().jump(cond_b, &[BlockArg::Value(next)]);
+        bcx.seal_block(cond_b);
+
+        bcx.switch_to_block(end_b);
+        array
+    }
+
+    fn byte_array_to_string(&mut self, bcx: &mut FunctionBuilder, array: ir::Value) -> ir::Value {
+        let length = self.call_runtime(bcx, "gobol_array_len", &[array]);
+        let terminator_space = bcx.ins().iadd_imm_s(length, 1);
+        let string = self.call_runtime(bcx, "gobol_gc_alloc", &[terminator_space]);
+        let cond_b = bcx.create_block();
+        let body_b = bcx.create_block();
+        let end_b = bcx.create_block();
+        let index = bcx.append_block_param(cond_b, types::I64);
+        let zero = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().jump(cond_b, &[BlockArg::Value(zero)]);
+
+        bcx.switch_to_block(cond_b);
+        let index_value = bcx.block_params(cond_b)[0];
+        let has_next = bcx.ins().icmp(IntCC::SignedLessThan, index_value, length);
+        bcx.ins().brif(has_next, body_b, &[], end_b, &[]);
+        bcx.seal_block(body_b);
+        bcx.seal_block(end_b);
+
+        bcx.switch_to_block(body_b);
+        let byte = self.call_runtime(bcx, "gobol_array_get", &[array, index]);
+        let byte = bcx.ins().ireduce(types::I8, byte);
+        let address = bcx.ins().iadd(string, index);
+        bcx.ins().store(MemFlagsData::trusted(), byte, address, 0);
+        let next = bcx.ins().iadd_imm_s(index, 1);
+        bcx.ins().jump(cond_b, &[BlockArg::Value(next)]);
+        bcx.seal_block(cond_b);
+
+        bcx.switch_to_block(end_b);
+        let terminator = bcx.ins().iconst(types::I8, 0);
+        let terminator_address = bcx.ins().iadd(string, length);
+        bcx.ins()
+            .store(MemFlagsData::trusted(), terminator, terminator_address, 0);
+        string
     }
 
     /// Store a value into a GC struct field at the given byte offset.
@@ -3241,6 +3451,10 @@ impl CraneliftBackend {
     ) -> Result<ir::Value, String> {
         let v = self.translate_expr(bcx, expr)?;
         let src = self.type_resolver.infer_type(expr);
+        if matches!((&src, target), (DataType::Array(inner), DataType::Str) if **inner == DataType::Byte)
+        {
+            return Ok(self.byte_array_to_string(bcx, v));
+        }
         // Cast struct -> str: call StructName_convert_str(self).
         if matches!(target, DataType::Str) {
             if let DataType::Struct(name) = &src {
@@ -3756,7 +3970,10 @@ impl CraneliftBackend {
 
     fn is_array_var(&self, expr: &IRExpr) -> bool {
         if let IRExpr::Variable(name) = expr {
-            matches!(self.type_resolver.var_type(name), DataType::Unknown)
+            matches!(
+                self.type_resolver.var_type(name),
+                DataType::Unknown | DataType::Array(_)
+            )
         } else {
             matches!(expr, IRExpr::ArrayLiteral(_))
         }
@@ -4543,6 +4760,34 @@ pub fn target_is_bare_metal(target: &str) -> bool {
 #[cfg(test)]
 mod link_tests {
     use super::*;
+
+    #[test]
+    fn network_result_take_preserves_byte_array_type() {
+        let resolver = TypeResolver::new();
+        let receive = IRExpr::MethodCall {
+            object: Box::new(IRExpr::Variable("socket".to_string())),
+            method: "recv_bytes".to_string(),
+            args: vec![],
+            generic_args: vec![],
+        };
+        let take = IRExpr::MethodCall {
+            object: Box::new(receive),
+            method: "take".to_string(),
+            args: vec![],
+            generic_args: vec![],
+        };
+        assert_eq!(
+            resolver.infer_type(&take),
+            DataType::Array(Box::new(DataType::Byte))
+        );
+        let len = IRExpr::MethodCall {
+            object: Box::new(take),
+            method: "len".to_string(),
+            args: vec![],
+            generic_args: vec![],
+        };
+        assert_eq!(resolver.infer_type(&len), DataType::Int);
+    }
 
     #[test]
     fn msvc_linker_is_resolved_beside_its_compiler() {

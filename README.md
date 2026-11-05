@@ -132,6 +132,9 @@ grape list
 # Run the project / 运行项目
 grape run
 
+# Build and run with the debug profile / 使用调试配置编译并运行
+grape debug
+
 # Compile to native binary / 编译为原生二进制
 grape run --compile
 
@@ -145,10 +148,16 @@ grape help
 Like Cargo, all compilation-local data lives under the project root `target/`:
 build artifacts (`target/{triple}/{debug|release}/`), intermediate object files
 (`.o`/`.obj`) and cached dependency packages (`target/grape/packages/`).
+Gobol also keeps a per-module IR cache under `target/gobol/incremental/`; it
+reuses unchanged entry and imported modules' IR while still rerunning semantic
+analysis, code generation, and linking. Pass `--no-incremental` to `gobol
+build` to disable this cache; `grape clean` removes it with `target/`.
 
 与 Cargo 类似，所有编译相关数据都集中在项目根目录的 `target/` 下：编译产物
 （`target/{triple}/{debug|release}/`）、中间目标文件（`.o`/`.obj`）以及依赖包缓存
-（`target/grape/packages/`）。
+（`target/grape/packages/`）。Gobol 还会在 `target/gobol/incremental/` 缓存入口模块和
+导入模块的 IR；未变化的模块会复用已缓存 IR，但语义分析、代码生成和链接仍会重新执行。
+可通过 `gobol build --no-incremental` 关闭缓存；`grape clean` 会随 `target/` 一起清除缓存。
 
 ---
 

@@ -30,11 +30,13 @@ impl TcpStream {
     #[intrinsic("tcp_send_bytes")]
     func send_bytes(self, buf: *byte, len: int): Result<int, str>;
 
-    /// Receive up to max_len bytes (may return fewer).
+    /// Receive up to max_len bytes (may return fewer). Returns an empty array
+    /// when the peer has closed the connection.
     #[intrinsic("tcp_recv_bytes")]
     func recv_bytes(self, max_len: int): Result<[byte], str>;
 
-    /// Receive exactly len bytes (blocks until all received or error/EOF).
+    /// Receive exactly len bytes (blocks until all received; returns an error
+    /// if the peer closes the connection before all bytes arrive).
     #[intrinsic("tcp_recv_exact")]
     func recv_exact(self, len: int): Result<[byte], str>;
 

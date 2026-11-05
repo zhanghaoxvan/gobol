@@ -1,11 +1,12 @@
 // ir.rs
 use crate::ast::*;
 use crate::environment::DataType;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 // ==================== IR 数据结构 ====================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GobolIR {
     pub functions: Vec<IRFunction>,
     pub structs: Vec<IRStruct>,
@@ -16,7 +17,7 @@ pub struct GobolIR {
     pub globals: Vec<(String, DataType, Option<IRExpr>)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IRFunction {
     pub name: String,
     pub generic_params: Vec<String>,
@@ -31,13 +32,13 @@ pub struct IRFunction {
     pub is_variadic: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IRParam {
     pub name: String,
     pub ty: DataType,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IRStruct {
     pub name: String,
     pub generic_params: Vec<String>,
@@ -46,13 +47,13 @@ pub struct IRStruct {
     pub attributes: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IRField {
     pub name: String,
     pub ty: DataType,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IRImpl {
     pub struct_name: String,
     pub generic_params: Vec<String>,
@@ -60,12 +61,12 @@ pub struct IRImpl {
     pub attributes: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IRBlock {
     pub statements: Vec<IRStmt>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IRStmt {
     Declaration {
         name: String,
@@ -107,7 +108,7 @@ pub enum IRStmt {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IRExpr {
     Literal(LitValue),
     Variable(String),
@@ -162,7 +163,7 @@ pub enum IRExpr {
     None,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LitValue {
     Int(i64),
     Byte(u8),
@@ -1326,7 +1327,12 @@ impl IRBuilder {
                 }
                 DataType::Int
             }
-            IRExpr::MethodCall { object, method, .. } => {
+            IRExpr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 // Struct constructor: Type::new(...)
                 if method == "new" {
                     if let IRExpr::Variable(name) = object.as_ref() {
@@ -1336,6 +1342,14 @@ impl IRBuilder {
                     }
                 }
                 let obj_ty = self.infer_expr_type(object);
+                if method == "add"
+                    && (matches!(obj_ty, DataType::Str)
+                        || args
+                            .iter()
+                            .any(|arg| matches!(self.infer_expr_type(arg), DataType::Str)))
+                {
+                    return DataType::Str;
+                }
                 if let DataType::Struct(sname) = &obj_ty {
                     let full = format!("{}::{}", sname, method);
                     for f in &self.ir.functions {
@@ -1882,9 +1896,11 @@ impl AstVisitor for IRBuilder {
     }
 
     fn visit_block(&mut self, node: &Block) {
+        let saved_var_types = self.var_types.clone();
         for stmt in node.get_statements() {
             stmt.accept(self);
         }
+        self.var_types = saved_var_types;
     }
 
     fn visit_declaration(&mut self, node: &Declaration) {
@@ -3264,6 +3280,7 @@ impl Monomorphizer {
         generic_by_name: &HashMap<String, IRFunction>,
         returns_by_name: &mut HashMap<String, DataType>,
     ) {
+        let saved_var_types = self.var_types.clone();
         for stmt in &mut block.statements {
             match stmt {
                 IRStmt::Declaration { name, ty, init } => {
@@ -3372,6 +3389,7 @@ impl Monomorphizer {
                 IRStmt::Break | IRStmt::Continue => {}
             }
         }
+        self.var_types = saved_var_types;
     }
 
     fn rewrite_expr(

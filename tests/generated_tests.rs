@@ -42,6 +42,92 @@ fn test_arrays_array_index() {
 }
 
 #[test]
+fn test_byte_array_length() {
+    let result = run_inline_test(
+        r#"func main() {
+    var bytes: byte[] = [65, 66, 67];
+    io::println(bytes.len() as str);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "3");
+}
+
+#[test]
+fn test_tcp_receive_bytes_and_peer_eof() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local TCP test server");
+    let port = listener.local_addr().unwrap().port();
+    listener
+        .set_nonblocking(true)
+        .expect("set local test listener nonblocking");
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept Gobol client: {error}"),
+            }
+        };
+        let mut request = [0; 1024];
+        let request_len = match stream.read(&mut request) {
+            Ok(length) => length,
+            Err(_) => return Some(false),
+        };
+        if request_len == 0 {
+            return Some(false);
+        }
+        Some(
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                )
+                .is_ok(),
+        )
+    });
+
+    let source = r#"import net;
+import result;
+func main() {
+    var socket = net::TcpStream::connect("127.0.0.1", $PORT, 1000).take();
+    socket.send_str("GET / HTTP/1.1\r\nConnection: close\r\n\r\n").take();
+    var response = "";
+    while true {
+        var chunk = socket.recv_bytes(4096).take();
+        io::println(chunk.len() as str);
+        if chunk.len() == 0 { break; }
+        response = response + chunk as str;
+    }
+    io::println(response);
+    socket.close().take();
+}"#
+    .replace("$PORT", &port.to_string());
+    let result = run_inline_test(&source);
+    result.assert_success();
+    assert!(
+        server.join().expect("local TCP server thread") == Some(true),
+        "Gobol client did not send a request. stdout:\n{}\nstderr:\n{}",
+        result.stdout,
+        result.stderr
+    );
+    let output: Vec<_> = result.stdout.lines().collect();
+    assert!(result.stdout.contains("HTTP/1.1 200 OK"));
+    assert_eq!(output.last(), Some(&"hello"));
+    assert!(
+        output.iter().any(|line| *line == "0"),
+        "EOF must yield an empty chunk: {output:?}"
+    );
+}
+
+#[test]
 fn test_string_index() {
     let result = run_inline_test(
         r#"func main() {
@@ -209,6 +295,56 @@ fn test_string_to_int_cast() {
             "-9223372036854775808",
             "9223372036854775807"
         ]
+    );
+}
+
+#[test]
+fn test_string_concatenation_continues_after_operator_newline() {
+    let result = run_inline_test(
+        r#"func main() {
+    var path = "/";
+    var host = "localhost";
+    var request = "GET " + path + " HTTP/1.1 " +
+                  "Host: " + host + " " +
+                  "Connection: close";
+    io::print(request);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout,
+        "GET / HTTP/1.1 Host: localhost Connection: close"
+    );
+}
+
+#[test]
+fn test_variable_shadowing_restores_outer_binding() {
+    let result = run_inline_test(
+        r#"func main() {
+    var value = "outer";
+    if true {
+        var value = 42;
+        io::println(value);
+    }
+    io::println(value);
+
+    var count = 1;
+    if true {
+        count = 2;
+    }
+    io::println(count);
+
+    var i = 9;
+    for i in 0..2 {
+        io::println(i);
+    }
+    io::println(i);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        ["42", "outer", "2", "0", "1", "9"]
     );
 }
 

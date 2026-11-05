@@ -56,6 +56,8 @@ pub struct SemanticAnalyzer {
     current_module: String,
     type_stack: Vec<DataType>,
     struct_fields: HashMap<String, HashMap<String, DataType>>,
+    generic_struct_params: HashMap<String, Vec<String>>,
+    generic_struct_args: HashMap<String, Vec<DataType>>,
     current_impl_struct: Option<String>,
     lib_paths: Vec<String>,
     loaded_modules: HashSet<String>,
@@ -138,6 +140,8 @@ impl SemanticAnalyzer {
             current_module: String::new(),
             type_stack: Vec::new(),
             struct_fields: HashMap::new(),
+            generic_struct_params: HashMap::new(),
+            generic_struct_args: HashMap::new(),
             current_impl_struct: None,
             lib_paths: vec!["lib".to_string()],
             loaded_modules: HashSet::new(),
@@ -533,6 +537,10 @@ impl SemanticAnalyzer {
             } else if let Some(struct_def) = stmt.as_any().downcast_ref::<StructDefinition>() {
                 let prev_generic = self.current_generic_params.clone();
                 self.current_generic_params = struct_def.get_generic_params().clone();
+                self.generic_struct_params.insert(
+                    struct_def.get_name().to_string(),
+                    struct_def.get_generic_params().clone(),
+                );
                 let mut fields = HashMap::new();
                 for field in struct_def.get_fields() {
                     let field_type = self.get_data_type_from_ast(field.field_type.as_deref());
@@ -711,8 +719,21 @@ impl SemanticAnalyzer {
             if base == "tuple" {
                 return DataType::Array(Box::new(DataType::Unknown));
             }
-            // PascalCase generic types (Vec<T>, Result<T, E>, etc.) — treat as struct
-            return DataType::Struct(base.to_string());
+            let args: Vec<DataType> = gt
+                .get_type_args()
+                .iter()
+                .map(|arg| self.get_data_type_from_ast(Some(arg.as_ref())))
+                .collect();
+            let instance_name = format!(
+                "{}<{}>",
+                base,
+                args.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            self.generic_struct_args.insert(instance_name.clone(), args);
+            return DataType::Struct(instance_name);
         }
 
         // Check for NullableType
@@ -903,6 +924,30 @@ impl SemanticAnalyzer {
             }
             _ => dt.clone(),
         }
+    }
+
+    fn resolve_generic_method_type(
+        &self,
+        receiver_type: &DataType,
+        method_type: &DataType,
+    ) -> DataType {
+        let DataType::Struct(instance_name) = receiver_type else {
+            return method_type.clone();
+        };
+        let struct_name = instance_name
+            .split('<')
+            .next()
+            .unwrap_or(instance_name)
+            .trim();
+        let (Some(params), Some(args)) = (
+            self.generic_struct_params.get(struct_name),
+            self.generic_struct_args.get(instance_name),
+        ) else {
+            return method_type.clone();
+        };
+        let bindings: HashMap<String, DataType> =
+            params.iter().cloned().zip(args.iter().cloned()).collect();
+        self.substitute_generic_types(method_type, &bindings)
     }
 
     fn get_current_type(&self) -> DataType {
@@ -1390,6 +1435,8 @@ impl SemanticAnalyzer {
                 let struct_name = struct_def.get_name().to_string();
                 let prev_generic = self.current_generic_params.clone();
                 self.current_generic_params = struct_def.get_generic_params().clone();
+                self.generic_struct_params
+                    .insert(struct_name.clone(), struct_def.get_generic_params().clone());
                 let mut fields = HashMap::new();
                 for field in struct_def.get_fields() {
                     let field_type = self.get_data_type_from_ast(field.field_type.as_deref());
@@ -1652,6 +1699,8 @@ impl AstVisitor for SemanticAnalyzer {
         // Push generic scope so that type params like T are resolved in field types
         let prev_generic = self.current_generic_params.clone();
         self.current_generic_params = node.get_generic_params().clone();
+        self.generic_struct_params
+            .insert(struct_name.clone(), node.get_generic_params().clone());
         let mut fields = HashMap::new();
         for field in node.get_fields() {
             let field_type = self.get_data_type_from_ast(field.field_type.as_deref());
@@ -1675,6 +1724,8 @@ impl AstVisitor for SemanticAnalyzer {
 
         let prev_generic = self.current_generic_params.clone();
         self.current_generic_params = generic_params.clone();
+        self.generic_struct_params
+            .insert(enum_name.clone(), generic_params.clone());
 
         let mut fields = HashMap::new();
         fields.insert("_tag".to_string(), DataType::Int);
@@ -3158,6 +3209,7 @@ impl AstVisitor for SemanticAnalyzer {
 
         let mut func_name = String::new();
         let mut module_name = self.current_module.clone();
+        let mut receiver_type = None;
 
         if let Some(callee) = node.get_callee() {
             if let Some(id) = callee.as_any().downcast_ref::<Identifier>() {
@@ -3188,6 +3240,10 @@ impl AstVisitor for SemanticAnalyzer {
                             // Resolve instance methods from the variable's
                             // declared struct type, rather than using the
                             // variable name as a module name.
+                            receiver_type = self
+                                .env
+                                .lookup_symbol(&obj_name)
+                                .map(|symbol| symbol.data_type.clone());
                             if obj_name == "self" {
                                 if let Some(ref struct_name) = self.current_impl_struct {
                                     module_name = struct_name.clone();
@@ -3199,7 +3255,9 @@ impl AstVisitor for SemanticAnalyzer {
                                     .env
                                     .lookup_symbol(&obj_name)
                                     .and_then(|s| match &s.data_type {
-                                        DataType::Struct(name) => Some(name.clone()),
+                                        DataType::Struct(name) => {
+                                            Some(name.split('<').next().unwrap_or(name).to_string())
+                                        }
                                         _ => None,
                                     })
                                     .unwrap_or(obj_name);
@@ -3216,9 +3274,14 @@ impl AstVisitor for SemanticAnalyzer {
                         obj.accept(self);
                         let obj_dt = self.get_current_type();
                         self.type_stack.pop();
+                        receiver_type = Some(obj_dt.clone());
                         let member_name = member.get_member().to_string();
                         if let DataType::Struct(struct_name) = obj_dt {
-                            module_name = struct_name;
+                            module_name = struct_name
+                                .split('<')
+                                .next()
+                                .unwrap_or(&struct_name)
+                                .to_string();
                         }
                         func_name = member_name;
                     }
@@ -3392,28 +3455,73 @@ impl AstVisitor for SemanticAnalyzer {
             .or_else(|| self.env.lookup_symbol(&func_name))
             .map(|s| s.data_type.clone());
 
-        // `std::` prefix fallback: user code references `std::io::println(...)`.
-        // The module name is "std" and submodule "io" is loaded as its own
-        // module (`io::println`), so when the fully-qualified form is not found
-        // we retry against each progressively-shorter suffix of the module path.
+        // Qualified paths can include module prefixes that are not part of
+        // the symbol's registered name (for example
+        // `net::TcpStream::connect` is registered as `TcpStream::connect`).
         let sym_data_type = sym_data_type.or_else(|| {
-            let mut candidates = Vec::new();
-            let parts: Vec<&str> = resolved_module_bare.split("::").collect();
-            if parts.len() >= 2 && parts.first() == Some(&"std") {
-                for cut in 1..parts.len() {
-                    let suffix = parts[cut..].join("::");
-                    candidates.push(format!("{}::{}", suffix, func_name));
-                }
-            } else if parts.len() == 1 && parts[0] == "std" {
-                // `std::foo(...)` where `foo` is a top-level std export (rare)
-                candidates.push(func_name.clone());
-            }
-            candidates
+            resolved_module_bare
+                .split("::")
+                .enumerate()
+                .skip(1)
+                .map(|(index, _)| {
+                    let suffix = resolved_module_bare
+                        .split("::")
+                        .skip(index)
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    format!("{}::{}", suffix, func_name)
+                })
                 .into_iter()
                 .map(|c| self.env.lookup_symbol(&c).map(|s| s.data_type.clone()))
                 .find(|o| o.is_some())
                 .flatten()
         });
+
+        if sym_data_type.is_none() {
+            if let Some(receiver_type) = &receiver_type {
+                match receiver_type {
+                    DataType::Array(_) if func_name == "len" => {
+                        if let Some(args) = node.get_arguments() {
+                            for arg in args {
+                                arg.accept(self);
+                                self.type_stack.pop();
+                            }
+                        }
+                        self.type_stack.push(DataType::Int);
+                        return;
+                    }
+                    DataType::Array(_) if func_name == "add" => {
+                        if let Some(args) = node.get_arguments() {
+                            for arg in args {
+                                arg.accept(self);
+                                self.type_stack.pop();
+                            }
+                        }
+                        self.type_stack.push(DataType::None_);
+                        return;
+                    }
+                    DataType::Str => {
+                        let result_type = match func_name.as_str() {
+                            "len" | "index_of" | "count" => Some(DataType::Int),
+                            "contains" | "starts_with" | "ends_with" => Some(DataType::Bool),
+                            "trim" | "replace" | "to_upper" | "to_lower" => Some(DataType::Str),
+                            _ => None,
+                        };
+                        if let Some(result_type) = result_type {
+                            if let Some(args) = node.get_arguments() {
+                                for arg in args {
+                                    arg.accept(self);
+                                    self.type_stack.pop();
+                                }
+                            }
+                            self.type_stack.push(result_type);
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // If not found but it's a method call on a variable (e.g. arr.len, arr.add),
         // allow it with sensible return types
@@ -3479,17 +3587,27 @@ impl AstVisitor for SemanticAnalyzer {
         // to be in the current module namespace.
         if sym_data_type.is_none() {
             // Special case: if module_name is "self", use current_impl_struct directly
-            let dispatch_struct = if module_name == "self" {
-                self.current_impl_struct.clone()
-            } else {
-                self.env.lookup_symbol(&module_name).and_then(|s| {
-                    if let DataType::Struct(ref sn) = s.data_type {
-                        Some(sn.clone())
-                    } else {
-                        None
+            let dispatch_struct = receiver_type
+                .as_ref()
+                .and_then(|ty| match ty {
+                    DataType::Struct(name) => {
+                        Some(name.split('<').next().unwrap_or(name).to_string())
                     }
+                    _ => None,
                 })
-            };
+                .or_else(|| {
+                    if module_name == "self" {
+                        self.current_impl_struct.clone()
+                    } else {
+                        self.env.lookup_symbol(&module_name).and_then(|s| {
+                            if let DataType::Struct(ref sn) = s.data_type {
+                                Some(sn.split('<').next().unwrap_or(sn).to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                });
             if let Some(struct_name) = dispatch_struct {
                 let struct_method = format!("{}::{}", struct_name, func_name);
                 let method_type = self
@@ -3503,7 +3621,11 @@ impl AstVisitor for SemanticAnalyzer {
                             self.type_stack.pop();
                         }
                     }
-                    self.type_stack.push(dt);
+                    let resolved = receiver_type
+                        .as_ref()
+                        .map(|receiver| self.resolve_generic_method_type(receiver, &dt))
+                        .unwrap_or(dt);
+                    self.type_stack.push(resolved);
                     return;
                 }
                 // Also try without struct prefix (bare method name) for generic impls
@@ -3518,7 +3640,11 @@ impl AstVisitor for SemanticAnalyzer {
                             self.type_stack.pop();
                         }
                     }
-                    self.type_stack.push(dt);
+                    let resolved = receiver_type
+                        .as_ref()
+                        .map(|receiver| self.resolve_generic_method_type(receiver, &dt))
+                        .unwrap_or(dt);
+                    self.type_stack.push(resolved);
                     return;
                 }
                 // Try looking up in current module with struct name prefix (e.g., vec::push)
@@ -3534,7 +3660,11 @@ impl AstVisitor for SemanticAnalyzer {
                             self.type_stack.pop();
                         }
                     }
-                    self.type_stack.push(dt);
+                    let resolved = receiver_type
+                        .as_ref()
+                        .map(|receiver| self.resolve_generic_method_type(receiver, &dt))
+                        .unwrap_or(dt);
+                    self.type_stack.push(resolved);
                     return;
                 }
                 // Also try with bare struct name (e.g., "Vec" instead of "Vec<T>")
@@ -3554,7 +3684,11 @@ impl AstVisitor for SemanticAnalyzer {
                             self.type_stack.pop();
                         }
                     }
-                    self.type_stack.push(dt);
+                    let resolved = receiver_type
+                        .as_ref()
+                        .map(|receiver| self.resolve_generic_method_type(receiver, &dt))
+                        .unwrap_or(dt);
+                    self.type_stack.push(resolved);
                     return;
                 }
             }
@@ -3577,6 +3711,10 @@ impl AstVisitor for SemanticAnalyzer {
                 let resolved = self
                     .resolve_generic_call_type(&full_name, &func_name, &arg_types)
                     .unwrap_or(dt.clone());
+                let resolved = receiver_type
+                    .as_ref()
+                    .map(|receiver| self.resolve_generic_method_type(receiver, &resolved))
+                    .unwrap_or(resolved);
                 self.type_stack.push(resolved);
             }
             None => {
@@ -4222,6 +4360,40 @@ mod tests {
             Some("true")
         );
         assert!(link.values.is_empty());
+    }
+
+    #[test]
+    fn resolves_methods_after_unwrapping_generic_network_results() {
+        let source = r#"
+            import net;
+            import result;
+
+            func response_size(): int {
+                var socket = net::TcpStream::connect("localhost", 80, 1000).take();
+                socket.send_str("GET / HTTP/1.1\r\n\r\n").take();
+                var chunk = socket.recv_bytes(4096).take();
+                var size = chunk.len();
+                socket.close().take();
+                size
+            }
+        "#;
+        let mut builder = AstBuilder::new(Lexer::new(source.to_string()));
+        builder.set_inject_prelude(true);
+        let program = builder.build().expect("expected AST");
+        assert!(!builder.has_error(), "{:?}", builder.get_error_message());
+
+        let mut analyzer = SemanticAnalyzer::new();
+        analyzer.set_main_file("tests/fixtures/stdlib/net_test.gbl");
+        analyzer.set_source(source);
+        analyzer.set_lib_paths(vec![format!(
+            "{}/std",
+            env!("CARGO_MANIFEST_DIR").replace('\\', "/")
+        )]);
+        assert!(
+            analyzer.analyze(program.as_ref()),
+            "semantic analysis failed: {:?}",
+            analyzer.structured_errors
+        );
     }
 
     // // Regression test for the macOS CI failure on `test_ffi_variadic`:

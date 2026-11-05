@@ -154,6 +154,8 @@ struct SymbolEntry {
 struct FuncSignature {
     name: String,
     is_static: bool,
+    /// Generic type parameters declared on the callable.
+    generic_params: Vec<String>,
     /// Parameter names in declaration order (e.g. `["x", "y"]`).
     param_names: Vec<String>,
     /// Declared types of each parameter, parallel to `param_names`.
@@ -520,42 +522,6 @@ fn format_interpolation_brace_spans(value: &str) -> Vec<(usize, usize)> {
     out
 }
 
-/// Extract `{name}` interpolation identifiers from a format-string literal
-/// value (e.g. `"@{value: {x}}"` → `[(9, "x")]`). Only simple identifier
-/// interpolations produce a binding token. Byte offsets are relative to `value`.
-fn format_interpolation_spans(value: &str) -> Vec<(usize, String)> {
-    format_interpolation_brace_spans(value)
-        .into_iter()
-        .filter_map(|(open, close)| {
-            let inner = value[open + 1..close].trim();
-            // Only simple identifier interpolation (no format spec like `{x:.2}`).
-            if inner.is_empty()
-                || !inner
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':')
-            {
-                return None;
-            }
-            // Take the segment before any `.`/`:` suffix to get the binding.
-            let ident = inner
-                .split(|c| c == '.' || c == ':')
-                .next()
-                .unwrap_or(inner)
-                .trim();
-            if ident
-                .chars()
-                .next()
-                .map(|c| c.is_alphabetic() || c == '_')
-                .unwrap_or(false)
-            {
-                Some((open + 1, ident.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 /// Split the *literal* text of a string/format-string value into non-escape
 /// `(start_offset, length)` spans (byte offsets within `value`). Escape
 /// sequences (`\n`, `\t`, `\x41`, `\u{...}`, `\c`) are excluded so that the
@@ -770,9 +736,8 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                 }
                 continue; // for-loop advances `i`
             }
-            // Format string `@"...{var}..."`: colour literal (non-escape) text
-            // as a string, and emit a `variable`/`type` token for each
-            // interpolation identifier so `{var}` is typed as its binding.
+            // Format string `@"...{expr}..."`: keep literal text styled as a
+            // string, but tokenize each embedded expression like normal code.
             TokenType::FormatString => {
                 let line = (t.line as u32).saturating_sub(1);
                 let start = t.col.max(0) as u32;
@@ -800,30 +765,57 @@ fn build_semantic_tokens(tokens: &[Token], symbols: &[SymbolEntry]) -> Vec<Seman
                             0,
                         ));
                     }
-                }
-                for (off, ident) in format_interpolation_spans(&t.value) {
-                    let var_col = content_base + off as u32;
-                    let (ity, imods) = if ident
-                        .chars()
-                        .next()
-                        .map(|c| c.is_ascii_uppercase())
-                        .unwrap_or(false)
-                    {
-                        (type_index(SemanticTokenType::TYPE), 0)
-                    } else {
-                        // Prefer declared variable type when known via symbol table.
-                        let ty = symbols
-                            .iter()
-                            .find(|s| s.name == ident)
-                            .map(|s| s.type_info.is_some())
-                            .unwrap_or(false);
-                        if ty {
-                            (type_index(SemanticTokenType::TYPE), 0)
-                        } else {
-                            (type_index(SemanticTokenType::VARIABLE), 0)
+                    let expression = &t.value[open + 1..close];
+                    let mut lexer = Lexer::new(expression);
+                    let mut expression_tokens = Vec::new();
+                    loop {
+                        let mut token = lexer.get_next_token();
+                        if token.r#type == TokenType::EndOfFile {
+                            break;
                         }
-                    };
-                    parts.push((var_col, ident.len() as u32, ity, imods));
+                        token.line = t.line;
+                        token.col += (content_base + open as u32 + 1) as i32;
+                        expression_tokens.push(token);
+                    }
+
+                    let empty_namespaces = std::collections::HashSet::new();
+                    for i in 0..expression_tokens.len() {
+                        let token = &expression_tokens[i];
+                        let semantic = match token.r#type {
+                            TokenType::Keyword => Some(match token.value.as_str() {
+                                "int" | "float" | "str" | "bool" | "void" | "char" | "unit" => {
+                                    type_index(SemanticTokenType::TYPE)
+                                }
+                                "func"
+                                    if expression_tokens
+                                        .get(i + 1)
+                                        .map(|next| next.value == "(")
+                                        .unwrap_or(false) =>
+                                {
+                                    type_index(SemanticTokenType::TYPE)
+                                }
+                                _ => type_index(SemanticTokenType::KEYWORD),
+                            }),
+                            TokenType::Number => Some(type_index(SemanticTokenType::NUMBER)),
+                            TokenType::String => Some(type_index(SemanticTokenType::STRING)),
+                            TokenType::Operator => Some(type_index(SemanticTokenType::OPERATOR)),
+                            TokenType::Identifier => Some(
+                                classify_ident(&expression_tokens, i, symbols, &empty_namespaces).0,
+                            ),
+                            TokenType::FormatString
+                            | TokenType::Unknown
+                            | TokenType::EndOfLine
+                            | TokenType::EndOfFile => None,
+                        };
+                        if let Some(ty) = semantic {
+                            parts.push((
+                                token.col as u32,
+                                token.value.encode_utf16().count() as u32,
+                                ty,
+                                0,
+                            ));
+                        }
+                    }
                 }
                 parts.sort_by_key(|p| p.0);
                 for (col, len, ty, md) in parts {
@@ -1528,6 +1520,48 @@ fn scan_extern_block(tokens: &[Token], extern_idx: usize, symbols: &mut Vec<Symb
     }
 }
 
+fn format_type_tokens(tokens: &[Token]) -> Option<String> {
+    let mut formatted = String::new();
+    let mut previous: Option<&str> = None;
+    for token in tokens {
+        if matches!(token.r#type, TokenType::EndOfLine | TokenType::EndOfFile) {
+            continue;
+        }
+        let current = token.value.as_str();
+        if current.is_empty() {
+            continue;
+        }
+        if let Some(previous) = previous {
+            let closes_or_separates = matches!(
+                current,
+                "<" | ">" | "," | "]" | ")" | "?" | "::" | ":" | "[" | "*" | "&"
+            );
+            let follows_prefix = matches!(previous, "<" | "[" | "(" | "::" | "*" | "&");
+            let needs_space = if matches!(previous, "," | ":") {
+                true
+            } else if closes_or_separates || follows_prefix {
+                false
+            } else {
+                let previous_word = previous
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let current_word = current
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                previous_word && current_word
+            };
+            if needs_space {
+                formatted.push(' ');
+            }
+        }
+        formatted.push_str(current);
+        previous = Some(current);
+    }
+    (!formatted.is_empty()).then_some(formatted)
+}
+
 /// Find the return type annotation after `func name(...): Type`.
 fn find_return_type(tokens: &[Token], func_idx: usize) -> Option<String> {
     let mut depth = 0i32;
@@ -1552,36 +1586,25 @@ fn find_return_type(tokens: &[Token], func_idx: usize) -> Option<String> {
     j += 1;
     if j < tokens.len() && tokens[j].value == ":" {
         j += 1;
-        let mut type_str = String::new();
-        let mut paren = 0i32;
+        let start = j;
+        let mut depth = 0i32;
         while j < tokens.len() {
             let t = &tokens[j];
-            if t.value == "(" {
-                paren += 1;
-            }
-            if t.value == ")" {
-                if paren == 0 {
+            if matches!(t.value.as_str(), "<" | "(" | "[") {
+                depth += 1;
+            } else if matches!(t.value.as_str(), ">" | ")" | "]") {
+                if depth == 0 {
                     break;
                 }
-                paren -= 1;
+                depth -= 1;
             }
-            if t.value == "{" || t.value == ";" || t.r#type == TokenType::EndOfLine {
+            if depth == 0 && (t.value == "{" || t.value == ";" || t.r#type == TokenType::EndOfLine)
+            {
                 break;
             }
-            if !type_str.is_empty()
-                && t.r#type != TokenType::Operator
-                && t.value != "["
-                && t.value != "]"
-            {
-                type_str.push(' ');
-            }
-            type_str.push_str(&t.value);
             j += 1;
         }
-        let trimmed = type_str.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
+        return format_type_tokens(&tokens[start..j]);
     }
     None
 }
@@ -1591,26 +1614,15 @@ fn find_type_alias_rhs(tokens: &[Token], type_idx: usize) -> Option<String> {
     let mut j = type_idx + 2; // skip `type` and name
     if j < tokens.len() && tokens[j].value == "=" {
         j += 1;
-        let mut type_str = String::new();
+        let start = j;
         while j < tokens.len() {
             let t = &tokens[j];
             if t.value == ";" || t.value == "{" || t.r#type == TokenType::EndOfLine {
                 break;
             }
-            if !type_str.is_empty()
-                && t.r#type != TokenType::Operator
-                && t.value != "["
-                && t.value != "]"
-            {
-                type_str.push(' ');
-            }
-            type_str.push_str(&t.value);
             j += 1;
         }
-        let trimmed = type_str.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
+        return format_type_tokens(&tokens[start..j]);
     }
     None
 }
@@ -1621,26 +1633,15 @@ fn find_var_type(tokens: &[Token], var_idx: usize) -> Option<String> {
             let mut j = var_idx + 2;
             if j < tokens.len() && tokens[j].value == ":" {
                 j += 1;
-                let mut type_str = String::new();
+                let start = j;
                 while j < tokens.len() {
                     let t = &tokens[j];
                     if t.value == "=" || t.value == ";" || t.r#type == TokenType::EndOfLine {
                         break;
                     }
-                    if !type_str.is_empty()
-                        && t.r#type != TokenType::Operator
-                        && t.value != "["
-                        && t.value != "]"
-                    {
-                        type_str.push(' ');
-                    }
-                    type_str.push_str(&t.value);
                     j += 1;
                 }
-                let trimmed = type_str.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
-                }
+                return format_type_tokens(&tokens[start..j]);
             }
         }
     }
@@ -1659,9 +1660,9 @@ fn extract_parameters(tokens: &[Token], func_idx: usize, symbols: &mut Vec<Symbo
     let mut depth = 0i32;
     while j < tokens.len() {
         let t = &tokens[j];
-        if t.value == "(" || t.value == "[" {
+        if t.value == "(" || t.value == "[" || t.value == "<" {
             depth += 1;
-        } else if t.value == ")" || t.value == "]" {
+        } else if t.value == ")" || t.value == "]" || t.value == ">" {
             if depth == 0 {
                 break;
             }
@@ -1674,33 +1675,31 @@ fn extract_parameters(tokens: &[Token], func_idx: usize, symbols: &mut Vec<Symbo
             }
             if j + 1 < tokens.len() && tokens[j + 1].value == ":" {
                 let mut k = j + 2;
-                let mut type_str = String::new();
+                let type_start = k;
+                let mut type_depth = 0i32;
                 while k < tokens.len() {
                     let tk = &tokens[k];
-                    if tk.value == "," || tk.value == ")" {
+                    if matches!(tk.value.as_str(), "<" | "(" | "[") {
+                        type_depth += 1;
+                    } else if matches!(tk.value.as_str(), ">" | ")" | "]") {
+                        if type_depth == 0 {
+                            break;
+                        }
+                        type_depth -= 1;
+                    }
+                    if type_depth == 0 && (tk.value == "," || tk.value == ")") {
                         break;
                     }
-                    if !type_str.is_empty()
-                        && tk.r#type != TokenType::Operator
-                        && tk.value != "["
-                        && tk.value != "]"
-                    {
-                        type_str.push(' ');
-                    }
-                    type_str.push_str(&tk.value);
                     k += 1;
                 }
+                let type_info = format_type_tokens(&tokens[type_start..k]);
                 symbols.push(SymbolEntry {
                     name: t.value.clone(),
                     kind: SymKind::Parameter,
                     line: t.line,
                     col: t.col,
                     len: t.value.len() as i32,
-                    type_info: if type_str.trim().is_empty() {
-                        None
-                    } else {
-                        Some(type_str.trim().to_string())
-                    },
+                    type_info,
                     parent: None,
                     doc_comment: None,
                     deprecated_msg: None,
@@ -1795,6 +1794,16 @@ fn collect_signatures(
             is_static: cursor.value == "static",
             ..Default::default()
         };
+        let mut generic_idx = func_idx + 2;
+        if tokens.get(generic_idx).map(|token| token.value.as_str()) == Some("<") {
+            generic_idx += 1;
+            while generic_idx < tokens.len() && tokens[generic_idx].value != ">" {
+                if tokens[generic_idx].r#type == TokenType::Identifier {
+                    sig.generic_params.push(tokens[generic_idx].value.clone());
+                }
+                generic_idx += 1;
+            }
+        }
         sig.doc = extract_doc_comment(source, tok.line);
 
         // Parse the parameter list `( ..., ... )`.
@@ -1824,28 +1833,29 @@ fn collect_signatures(
                 let is_param = j + 1 < tokens.len() && tokens[j + 1].value == ":";
                 if is_param {
                     let mut k = j + 2;
-                    let mut ty = String::new();
+                    let type_start = k;
+                    let mut type_depth = 0i32;
                     while k < tokens.len() {
                         let tk = &tokens[k];
-                        if tk.value == "," || tk.value == ")" || tk.r#type == TokenType::EndOfLine {
+                        if matches!(tk.value.as_str(), "<" | "(" | "[") {
+                            type_depth += 1;
+                        } else if matches!(tk.value.as_str(), ">" | ")" | "]") {
+                            if type_depth == 0 {
+                                break;
+                            }
+                            type_depth -= 1;
+                        }
+                        if type_depth == 0
+                            && (tk.value == ","
+                                || tk.value == ")"
+                                || tk.r#type == TokenType::EndOfLine)
+                        {
                             break;
                         }
-                        if !ty.is_empty()
-                            && tk.r#type != TokenType::Operator
-                            && tk.value != "["
-                            && tk.value != "]"
-                        {
-                            ty.push(' ');
-                        }
-                        ty.push_str(&tk.value);
                         k += 1;
                     }
                     let name = t.value.clone();
-                    let ty = if ty.trim().is_empty() {
-                        None
-                    } else {
-                        Some(ty.trim().to_string())
-                    };
+                    let ty = format_type_tokens(&tokens[type_start..k]);
                     let label = match &ty {
                         Some(t) => format!("{}: {}", name, t),
                         None => name.clone(),
@@ -1864,36 +1874,26 @@ fn collect_signatures(
         let mut j2 = j + 1; // skip `)`
         if j2 < tokens.len() && tokens[j2].value == ":" {
             j2 += 1;
-            let mut rt = String::new();
-            let mut paren = 0i32;
+            let type_start = j2;
+            let mut type_depth = 0i32;
             while j2 < tokens.len() {
                 let t = &tokens[j2];
-                if t.value == "(" {
-                    paren += 1;
-                }
-                if t.value == ")" {
-                    if paren == 0 {
+                if matches!(t.value.as_str(), "<" | "(" | "[") {
+                    type_depth += 1;
+                } else if matches!(t.value.as_str(), ">" | ")" | "]") {
+                    if type_depth == 0 {
                         break;
                     }
-                    paren -= 1;
+                    type_depth -= 1;
                 }
-                if t.value == "{" || t.value == ";" || t.r#type == TokenType::EndOfLine {
+                if type_depth == 0
+                    && (t.value == "{" || t.value == ";" || t.r#type == TokenType::EndOfLine)
+                {
                     break;
                 }
-                if !rt.is_empty()
-                    && t.r#type != TokenType::Operator
-                    && t.value != "["
-                    && t.value != "]"
-                {
-                    rt.push(' ');
-                }
-                rt.push_str(&t.value);
                 j2 += 1;
             }
-            let rt = rt.trim().to_string();
-            if !rt.is_empty() {
-                sig.return_type = Some(rt);
-            }
+            sig.return_type = format_type_tokens(&tokens[type_start..j2]);
         }
 
         sigs.insert(sig.name.clone(), sig);
@@ -2040,11 +2040,23 @@ fn parameter_documentation(documentation: Option<&str>, parameter: &str) -> Opti
     None
 }
 
+fn signature_display_name(signature: &FuncSignature) -> String {
+    if signature.generic_params.is_empty() {
+        signature.name.clone()
+    } else {
+        format!(
+            "{}<{}>",
+            signature.name,
+            signature.generic_params.join(", ")
+        )
+    }
+}
+
 /// Build signature help with a complete declaration and parameter-specific
 /// active ranges and documentation.
 fn signature_help_for(sig: &FuncSignature, active_param: u32) -> SignatureHelp {
     let prefix = if sig.is_static { "static func" } else { "func" };
-    let mut label = format!("{} {}(", prefix, sig.name);
+    let mut label = format!("{} {}(", prefix, signature_display_name(sig));
     let mut parameters = Vec::with_capacity(sig.param_labels.len());
     for (index, parameter) in sig.param_labels.iter().enumerate() {
         if index > 0 {
@@ -2110,14 +2122,17 @@ fn hover_declaration(
             let params = signature
                 .map(|sig| sig.param_labels.join(", "))
                 .unwrap_or_default();
+            let name = signature
+                .map(signature_display_name)
+                .unwrap_or_else(|| symbol.name.clone());
             let return_type = signature
                 .and_then(|sig| sig.return_type.as_deref())
                 .or(symbol.type_info.as_deref());
             match return_type {
                 Some(return_type) => {
-                    format!("{} {}({}): {}", prefix, symbol.name, params, return_type)
+                    format!("{} {}({}): {}", prefix, name, params, return_type)
                 }
-                None => format!("{} {}({})", prefix, symbol.name, params),
+                None => format!("{} {}({})", prefix, name, params),
             }
         }
         SymKind::Struct => format!("struct {}", symbol.name),
@@ -2219,6 +2234,9 @@ fn imported_hover_declaration(
             let params = signature
                 .map(|sig| sig.param_labels.join(", "))
                 .unwrap_or_default();
+            let name = signature
+                .map(signature_display_name)
+                .unwrap_or_else(|| name.to_string());
             match signature
                 .and_then(|sig| sig.return_type.as_deref())
                 .or(type_info)
@@ -2349,6 +2367,145 @@ fn brace_folding_ranges(tokens: &[Token]) -> Vec<FoldingRange> {
     ranges
 }
 
+fn matching_token(tokens: &[Token], open_idx: usize, open: &str, close: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open_idx) {
+        if token.value == open {
+            depth += 1;
+        } else if token.value == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn generic_type_parts(ty: &str) -> (String, Vec<String>) {
+    let Some(open) = ty.find('<') else {
+        return (ty.trim().to_string(), Vec::new());
+    };
+    if !ty.ends_with('>') {
+        return (ty.trim().to_string(), Vec::new());
+    }
+
+    let mut args = Vec::new();
+    let mut depth = 0i32;
+    let mut start = open + 1;
+    for (relative_offset, ch) in ty[open + 1..].char_indices() {
+        let offset = open + 1 + relative_offset;
+        match ch {
+            '<' => depth += 1,
+            '>' if depth == 0 => {
+                let arg = ty[start..offset].trim();
+                if !arg.is_empty() {
+                    args.push(arg.to_string());
+                }
+                break;
+            }
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(ty[start..offset].trim().to_string());
+                start = offset + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    (ty[..open].trim().to_string(), args)
+}
+
+fn impl_type_context(tokens: &[Token], func_idx: usize) -> Option<(String, Vec<String>)> {
+    for impl_idx in (0..func_idx)
+        .rev()
+        .filter(|&idx| tokens[idx].value == "impl")
+    {
+        let mut idx = impl_idx + 1;
+        let mut params = Vec::new();
+        if tokens.get(idx).map(|token| token.value.as_str()) == Some("<") {
+            idx += 1;
+            let mut depth = 0usize;
+            let mut expecting_param = true;
+            while idx < func_idx {
+                match tokens[idx].value.as_str() {
+                    "<" => depth += 1,
+                    ">" if depth == 0 => break,
+                    ">" => depth -= 1,
+                    "," if depth == 0 => expecting_param = true,
+                    _ if depth == 0 && expecting_param => {
+                        if tokens[idx].r#type == TokenType::Identifier {
+                            params.push(tokens[idx].value.clone());
+                            expecting_param = false;
+                        }
+                    }
+                    _ => {}
+                }
+                idx += 1;
+            }
+            if tokens.get(idx).map(|token| token.value.as_str()) != Some(">") {
+                continue;
+            }
+            idx += 1;
+        }
+
+        let trait_impl = (idx..func_idx).find(|&index| tokens[index].value == "for");
+        if let Some(for_idx) = trait_impl {
+            idx = for_idx + 1;
+        }
+        while idx < func_idx
+            && tokens[idx].r#type != TokenType::Identifier
+            && tokens[idx].value != "{"
+        {
+            idx += 1;
+        }
+        let Some(receiver) = tokens
+            .get(idx)
+            .filter(|token| token.r#type == TokenType::Identifier)
+            .map(|token| token.value.clone())
+        else {
+            continue;
+        };
+        while idx < func_idx && tokens[idx].value != "{" {
+            idx += 1;
+        }
+        let Some(block_end) = matching_token(tokens, idx, "{", "}") else {
+            continue;
+        };
+        if func_idx > idx && func_idx < block_end {
+            return Some((receiver, params));
+        }
+    }
+    None
+}
+
+fn substitute_type_parameters(ty: &str, params: &[String], args: &[String]) -> String {
+    let replacements: HashMap<_, _> = params
+        .iter()
+        .map(String::as_str)
+        .zip(args.iter().map(String::as_str))
+        .collect();
+    let mut output = String::new();
+    let mut chars = ty.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let mut end = start + ch.len_utf8();
+            while let Some(&(next, next_ch)) = chars.peek() {
+                if next_ch == '_' || next_ch.is_ascii_alphanumeric() {
+                    chars.next();
+                    end = next + next_ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let identifier = &ty[start..end];
+            output.push_str(replacements.get(identifier).copied().unwrap_or(identifier));
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 /// Best-effort inference of a simple expression's type, starting at
 /// `start_idx` of `tokens`. Returns a string type or `None`.
 ///
@@ -2408,31 +2565,62 @@ fn infer_expr_type(
             None
         };
 
-        // `module::member(...)` — cross-module qualified call.
+        // Qualified calls may include both a module and an associated type,
+        // e.g. `net::TcpStream::connect(...)`.
         if tokens.get(idx + 1).map(|n| n.value.as_str()) == Some("::") {
-            let module = t.value.clone();
-            let member = tokens.get(idx + 2).map(|n| n.value.clone());
-            let is_call = tokens.get(idx + 3).map(|n| n.value.as_str()) == Some("(");
-            if let Some(ref m) = member {
-                let rt = ret_type(m);
-                if rt.is_some() {
-                    return rt;
-                }
-                if is_call {
-                    if let (Some(lsp), Some(uri)) = (lsp, uri) {
-                        if let Some(sig) = lsp.imported_method_signature(uri, &module, m) {
-                            return sig.return_type.or(Some("unknown".to_string()));
-                        }
-                    }
-                }
-                if is_call {
-                    if let (Some(lsp), Some(uri)) = (lsp, uri) {
-                        if let Some(sig) = lsp.imported_signature(uri, &module, m) {
-                            return sig.return_type.or(Some("unknown".to_string()));
-                        }
-                    }
+            let mut path = vec![t.value.as_str()];
+            let mut path_idx = idx + 1;
+            while tokens.get(path_idx).map(|token| token.value.as_str()) == Some("::")
+                && tokens
+                    .get(path_idx + 1)
+                    .is_some_and(|token| token.r#type == TokenType::Identifier)
+            {
+                path.push(tokens[path_idx + 1].value.as_str());
+                path_idx += 2;
+            }
+            if tokens.get(path_idx).map(|token| token.value.as_str()) == Some("(") {
+                let Some(close_idx) = matching_token(tokens, path_idx, "(", ")") else {
                     return Some("unknown".to_string());
+                };
+                let call_type = if path.len() >= 3 {
+                    if let (Some(lsp), Some(uri)) = (lsp, uri) {
+                        lsp.imported_method_return_type(
+                            uri,
+                            path[path.len() - 2],
+                            path[path.len() - 1],
+                        )
+                    } else {
+                        None
+                    }
+                } else if path.len() == 2 {
+                    if let (Some(lsp), Some(uri)) = (lsp, uri) {
+                        lsp.imported_signature(uri, path[0], path[1])
+                            .and_then(|signature| signature.return_type)
+                    } else {
+                        None
+                    }
+                } else {
+                    ret_type(path[0])
+                };
+                let mut inferred = call_type.unwrap_or_else(|| "unknown".to_string());
+                let mut chain_idx = close_idx + 1;
+                while tokens.get(chain_idx).map(|token| token.value.as_str()) == Some(".")
+                    && tokens
+                        .get(chain_idx + 1)
+                        .is_some_and(|token| token.r#type == TokenType::Identifier)
+                    && tokens.get(chain_idx + 2).map(|token| token.value.as_str()) == Some("(")
+                {
+                    let method = tokens[chain_idx + 1].value.as_str();
+                    let method_close = matching_token(tokens, chain_idx + 2, "(", ")")?;
+                    inferred = lsp
+                        .zip(uri)
+                        .and_then(|(lsp, uri)| {
+                            lsp.imported_method_return_type(uri, &inferred, method)
+                        })
+                        .unwrap_or_else(|| "unknown".to_string());
+                    chain_idx = method_close + 1;
                 }
+                return Some(inferred);
             }
             return None;
         }
@@ -2440,7 +2628,8 @@ fn infer_expr_type(
         // Plain call `name(...)`.
         if tokens.get(idx + 1).map(|n| n.value.as_str()) == Some("(") {
             // Constructor / function call `f(...)`. Resolve the return type.
-            return Some(ret_type(&t.value).unwrap_or_else(|| {
+            let close_idx = matching_token(tokens, idx + 1, "(", ")")?;
+            let mut inferred = ret_type(&t.value).unwrap_or_else(|| {
                 // Known uppercase type constructor (e.g. `Range(...)`) → itself.
                 if t.value
                     .chars()
@@ -2452,7 +2641,23 @@ fn infer_expr_type(
                 } else {
                     "unknown".to_string()
                 }
-            }));
+            });
+            let mut chain_idx = close_idx + 1;
+            while tokens.get(chain_idx).map(|token| token.value.as_str()) == Some(".")
+                && tokens
+                    .get(chain_idx + 1)
+                    .is_some_and(|token| token.r#type == TokenType::Identifier)
+                && tokens.get(chain_idx + 2).map(|token| token.value.as_str()) == Some("(")
+            {
+                let method = tokens[chain_idx + 1].value.as_str();
+                let method_close = matching_token(tokens, chain_idx + 2, "(", ")")?;
+                inferred = lsp
+                    .zip(uri)
+                    .and_then(|(lsp, uri)| lsp.imported_method_return_type(uri, &inferred, method))
+                    .unwrap_or_else(|| "unknown".to_string());
+                chain_idx = method_close + 1;
+            }
+            return Some(inferred);
         }
 
         if let Some(sym) = state.find_definition(&t.value) {
@@ -4225,6 +4430,61 @@ impl GobolLsp {
         None
     }
 
+    fn imported_method_return_type(
+        &self,
+        uri: &str,
+        receiver_type: &str,
+        method: &str,
+    ) -> Option<String> {
+        let (receiver, type_args) = generic_type_parts(receiver_type);
+        let mut modules = self.imported_module_names_blocking(uri);
+        modules.extend(self.list_std_modules(uri).into_iter().map(|(name, _)| name));
+        modules.sort();
+        modules.dedup();
+
+        let file_path = uri_to_path(uri);
+        let roots = self
+            .workspace_roots
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        for module in modules {
+            let Some(module_path) = resolve_module_file(&file_path, &module, &roots) else {
+                continue;
+            };
+            let Ok(source) = std::fs::read_to_string(module_path) else {
+                continue;
+            };
+            let tokens = lex_source(&source);
+            let Some(func_idx) = (0..tokens.len()).find(|&index| {
+                tokens[index].value == "func"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|name| name.value == method)
+            }) else {
+                continue;
+            };
+            let Some((impl_receiver, params)) = impl_type_context(&tokens, func_idx) else {
+                continue;
+            };
+            if impl_receiver != receiver {
+                continue;
+            }
+            let Some(signature) = collect_signatures(&tokens, &source).remove(method) else {
+                continue;
+            };
+            let Some(return_type) = signature.return_type else {
+                return None;
+            };
+            return Some(substitute_type_parameters(
+                &return_type,
+                &params,
+                &type_args,
+            ));
+        }
+        None
+    }
+
     fn imported_module_names_blocking(&self, uri: &str) -> Vec<String> {
         self.documents
             .try_read()
@@ -5079,6 +5339,7 @@ mod tests {
         let signature = FuncSignature {
             name: "greet".to_string(),
             is_static: false,
+            generic_params: vec![],
             param_names: vec!["name".to_string()],
             param_types: vec![Some("str".to_string())],
             param_labels: vec!["name: str".to_string()],
@@ -5511,18 +5772,34 @@ mod unit_new {
         v
     }
 
+    fn decode(data: &[SemanticToken]) -> Vec<(u32, u32, String)> {
+        let mut line = 0;
+        let mut col = 0;
+        data.iter()
+            .map(|token| {
+                line += token.delta_line;
+                if token.delta_line == 0 {
+                    col += token.delta_start;
+                } else {
+                    col = token.delta_start;
+                }
+                (
+                    line,
+                    col,
+                    SEMANTIC_TYPES[token.token_type as usize]
+                        .as_str()
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn format_interpolation_parses_bindings() {
-        let v = format_interpolation_spans("value: {x}");
-        assert_eq!(v, vec![(8, "x".to_string())]);
-        // escaped braces are not bindings
-        let v2 = format_interpolation_spans("{{literal}} and {y}");
-        assert_eq!(v2, vec![(17, "y".to_string())]);
-        // format spec suffix still resolves to the binding name
-        let v3 = format_interpolation_spans("{n:04} and {p.x}");
-        assert_eq!(v3.len(), 2);
-        assert_eq!(v3[0], (1, "n".to_string()));
-        assert_eq!(v3[1], (12, "p".to_string()));
+    fn format_interpolation_braces_skip_escaped_pairs() {
+        assert_eq!(
+            format_interpolation_brace_spans("{{literal}} and {value + 1}"),
+            vec![(16, 26)]
+        );
     }
 
     #[test]
@@ -5594,44 +5871,34 @@ mod unit_new {
 
     #[test]
     fn semantic_format_string_marks_interpolation_variable() {
-        // `@"hello {name}"` with a local var `name` → interpolation is TYPE
-        // (declared variable) vs a plain undeclared `zzz` → VARIABLE.
+        // Variables in interpolation retain their variable color even when
+        // they have a declared type.
         let source = "var name: str = \"\";\nvar s: str = @\"hi {name} {zzz}\";\n";
         let tokens = lex(source);
         let symbols = build_symbol_index(&tokens, source);
         let data = build_semantic_tokens(&tokens, &symbols);
 
-        // Decode to (line, col, typename).
-        let mut line = 0;
-        let mut col = 0;
-        let mut out = Vec::new();
-        for st in data {
-            line += st.delta_line;
-            if st.delta_line == 0 {
-                col += st.delta_start;
-            } else {
-                col = st.delta_start;
-            }
-            out.push((
-                line,
-                col,
-                SEMANTIC_TYPES[st.token_type as usize].as_str().to_string(),
-            ));
-        }
+        let out = decode(&data);
         // line2: `var s: str = @"hi {name} {zzz}";`
-        // name at content base col=?? content_base = @ col + 2. Find `name` token (TYPE).
-        // Both name(declared) and zzz(undeclared) should appear; assert presence + types.
-        let declared = out.iter().any(|(l, _c, t)| *l == 1 && t == "type");
+        let name_col = source.lines().nth(1).unwrap().find("{name}").unwrap() as u32 + 1;
+        let declared = out
+            .iter()
+            .any(|(l, c, t)| *l == 1 && *c == name_col && t == "variable");
         assert!(
             declared,
-            "expected a `type` token on interpolation of a declared var; got {:?}",
+            "expected a `variable` token on interpolation of a declared var; got {:?}",
             out
         );
-        let has_var = out.iter().any(|(l, _, t)| *l == 1 && t == "variable");
+        let expr_source = "var arr: int = 0;\nvar s: str = @\"{arr[2][1] + 3}\";\n";
+        let tokens = lex(expr_source);
+        let symbols = build_symbol_index(&tokens, expr_source);
+        let out = decode(&build_semantic_tokens(&tokens, &symbols));
+        let expr_col = expr_source.lines().nth(1).unwrap().find("{arr").unwrap() as u32;
+        assert!(out.contains(&(1, expr_col, "operator".to_string())));
+        assert!(out.contains(&(1, expr_col + 1, "variable".to_string())));
         assert!(
-            has_var,
-            "expected a `variable` token for undeclared interpolation; got {:?}",
-            out
+            out.iter()
+                .any(|(line, _, kind)| *line == 1 && kind == "number")
         );
     }
 
@@ -5644,6 +5911,49 @@ mod unit_new {
         assert_eq!(s.param_types[0].as_deref(), Some("int"));
         assert_eq!(s.param_types[1].as_deref(), Some("str"));
         assert_eq!(s.return_type.as_deref(), Some("bool"));
+    }
+
+    #[test]
+    fn generic_return_and_parameter_types_keep_compact_nested_syntax() {
+        let src =
+            "func wrap<T>(value: Option<T>): Result<Option<T>, str> { Result::Err(\"error\") }\n";
+        let tokens = lex(src);
+        let signatures = collect_signatures(&tokens, src);
+        let signature = &signatures["wrap"];
+
+        assert_eq!(signature.param_labels, ["value: Option<T>"]);
+        assert_eq!(
+            signature.return_type.as_deref(),
+            Some("Result<Option<T>, str>")
+        );
+        assert_eq!(signature.generic_params, ["T"]);
+        assert_eq!(
+            signature_help_for(signature, 0).signatures[0].label,
+            "func wrap<T>(value: Option<T>): Result<Option<T>, str>"
+        );
+
+        let symbol = build_symbol_index(&tokens, src)
+            .into_iter()
+            .find(|symbol| symbol.name == "wrap")
+            .expect("find generic function symbol");
+        assert_eq!(symbol.type_info.as_deref(), Some("Result<Option<T>, str>"));
+        let state = DocState {
+            source: src.to_string(),
+            tokens,
+            symbols: vec![symbol.clone()],
+            errors: vec![],
+            signatures: signatures.clone(),
+            func_types: HashMap::new(),
+        };
+        assert_eq!(
+            hover_declaration(
+                &symbol,
+                &state,
+                Some(signature),
+                symbol.type_info.as_deref()
+            ),
+            "func wrap<T>(value: Option<T>): Result<Option<T>, str>"
+        );
     }
 
     #[test]
@@ -5677,6 +5987,7 @@ mod unit_new {
         let sig = FuncSignature {
             name: "f".into(),
             is_static: false,
+            generic_params: vec![],
             param_names: vec!["a".into(), "b".into()],
             param_types: vec![Some("int".into()), Some("str".into())],
             param_labels: vec!["a: int".into(), "b: str".into()],
@@ -6142,6 +6453,102 @@ mod e2e_doc {
         );
 
         std::fs::remove_file(module_path).expect("remove temporary module");
+        std::fs::remove_dir(lib_dir).expect("remove temporary module directory");
+        std::fs::remove_dir(project_dir).expect("remove temporary project directory");
+    }
+
+    #[test]
+    fn infers_type_through_qualified_generic_method_chain() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "gobol_lsp_generic_chain_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let lib_dir = project_dir.join("lib");
+        std::fs::create_dir_all(&lib_dir).expect("create temporary module directory");
+        let net_path = lib_dir.join("net.gbl");
+        std::fs::write(
+            &net_path,
+            "struct TcpStream {}\nimpl TcpStream {\n    func connect(addr: str, port: int, timeout_ms: int): Result<TcpStream, str>;\n}\n",
+        )
+        .expect("write network module");
+        let result_path = lib_dir.join("result.gbl");
+        std::fs::write(
+            &result_path,
+            "enum Result<T, E> { Ok(T), Err(E) }\nimpl<T, E> Result<T, E> {\n    func take(self): T { self._0 }\n}\n",
+        )
+        .expect("write result module");
+
+        let source = "import net;\nimport result;\nfunc main() {\n    var socket = net::TcpStream::connect(\"localhost\", 80, 1000).take();\n}\n";
+        let main_path = project_dir.join("main.gbl");
+        let uri = url::Url::from_file_path(&main_path).expect("convert main path to URI");
+        let state = analyze_document(uri.as_str(), source, &[project_dir.clone()]);
+        let client_holder = Arc::new(std::sync::Mutex::new(None));
+        let holder = client_holder.clone();
+        let (_service, _socket) = LspService::build(move |client| {
+            *holder.lock().unwrap() = Some(client.clone());
+            GobolLsp {
+                client,
+                documents: Arc::new(RwLock::new(HashMap::new())),
+                open_documents: Arc::new(RwLock::new(HashMap::new())),
+                workspace_roots: Arc::new(std::sync::RwLock::new(Vec::new())),
+            }
+        })
+        .finish();
+        let client = client_holder
+            .lock()
+            .unwrap()
+            .take()
+            .expect("capture LSP client");
+        let documents = Arc::new(RwLock::new(HashMap::new()));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("create test runtime")
+            .block_on(async {
+                documents
+                    .write()
+                    .await
+                    .insert(uri.to_string(), state.clone());
+            });
+        let lsp = GobolLsp {
+            client,
+            documents,
+            open_documents: Arc::new(RwLock::new(HashMap::new())),
+            workspace_roots: Arc::new(std::sync::RwLock::new(vec![project_dir.clone()])),
+        };
+        assert_eq!(
+            lsp.imported_method_return_type(uri.as_str(), "TcpStream", "connect")
+                .as_deref(),
+            Some("Result<TcpStream, str>")
+        );
+        assert_eq!(
+            lsp.imported_method_return_type(uri.as_str(), "Result<TcpStream, str>", "take")
+                .as_deref(),
+            Some("TcpStream")
+        );
+        let socket = state
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "socket")
+            .expect("find socket variable");
+        assert_eq!(
+            hover_type_info(socket, &state, Some(&lsp), Some(uri.as_str())).as_deref(),
+            Some("TcpStream")
+        );
+        let hints = lsp.inlay_hints_for(
+            uri.as_str(),
+            &state,
+            Range::new(Position::new(0, 0), Position::new(4, 0)),
+        );
+        assert!(hints.iter().any(|hint| {
+            matches!(&hint.label, InlayHintLabel::String(label) if label == ": TcpStream")
+        }));
+
+        std::fs::remove_file(net_path).expect("remove network module");
+        std::fs::remove_file(result_path).expect("remove result module");
         std::fs::remove_dir(lib_dir).expect("remove temporary module directory");
         std::fs::remove_dir(project_dir).expect("remove temporary project directory");
     }

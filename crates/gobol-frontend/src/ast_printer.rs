@@ -1,5 +1,51 @@
 use crate::ast::*;
 
+fn print_enum_payload_type(printer: &mut AstPrinter, payload: &dyn Type) {
+    print!("{}", payload.get_name());
+    if let Some(array) = payload.as_type_any().downcast_ref::<ArrayType>() {
+        if array.is_multi_dimensional() {
+            print!("{}", "[]".repeat(array.get_dimension()));
+        } else if let Some(size) = array.get_size() {
+            size.accept(printer);
+            print!("]");
+        }
+    }
+}
+
+fn print_match_pattern(pattern: &MatchPattern) {
+    match pattern {
+        MatchPattern::Literal(value) => match value {
+            RtValueSimple::Int(value) => print!("{}", value),
+            RtValueSimple::FloatStr(value) => print!("{}", value),
+            RtValueSimple::Str(value) => print!("\"{}\"", value),
+            RtValueSimple::Bool(value) => print!("{}", value),
+        },
+        MatchPattern::Wildcard => print!("_"),
+        MatchPattern::Variable(name) => print!("{}", name),
+        MatchPattern::EnumVariant {
+            enum_name,
+            variant_name,
+            payloads,
+            ..
+        } => {
+            if !enum_name.is_empty() {
+                print!("{}::", enum_name);
+            }
+            print!("{}", variant_name);
+            if !payloads.is_empty() {
+                print!("(");
+                for (index, payload) in payloads.iter().enumerate() {
+                    if index > 0 {
+                        print!(", ");
+                    }
+                    print_match_pattern(payload);
+                }
+                print!(")");
+            }
+        }
+    }
+}
+
 pub struct AstPrinter {
     indent_level: i32,
 }
@@ -517,20 +563,13 @@ impl AstVisitor for AstPrinter {
         for variant in node.get_variants() {
             self.print_indent();
             print!("variant: {}", variant.name);
-            if let Some(ref payload) = variant.payload_type {
-                print!("({}", payload.get_name());
-                // Check if it's an ArrayType for multi-dim
-                if let Some(arr) = payload.as_type_any().downcast_ref::<ArrayType>() {
-                    if arr.is_multi_dimensional() {
-                        // Already printed base, just print dims
-                        let dim = arr.get_dimension();
-                        print!("{}", "[]".repeat(dim));
-                    } else {
-                        if let Some(size) = arr.get_size() {
-                            size.accept(self);
-                        }
-                        print!("]");
+            if !variant.payload_types.is_empty() {
+                print!("(");
+                for (index, payload) in variant.payload_types.iter().enumerate() {
+                    if index > 0 {
+                        print!(", ");
                     }
+                    print_enum_payload_type(self, payload.as_ref());
                 }
                 print!(")");
             }
@@ -795,47 +834,20 @@ impl AstVisitor for AstPrinter {
                 MatchPattern::EnumVariant {
                     enum_name,
                     variant_name,
-                    variant_index: _,
-                    payload,
+                    payloads,
+                    ..
                 } => {
-                    // 打印枚举变体模式
                     if !enum_name.is_empty() {
                         print!("{}::", enum_name);
                     }
                     print!("{}", variant_name);
-                    if let Some(p) = payload {
+                    if !payloads.is_empty() {
                         print!("(");
-                        match p.as_ref() {
-                            MatchPattern::Literal(val) => match val {
-                                RtValueSimple::Int(v) => print!("{}", v),
-                                RtValueSimple::FloatStr(v) => print!("{}", v),
-                                RtValueSimple::Str(v) => print!("\"{}\"", v),
-                                RtValueSimple::Bool(v) => print!("{}", v),
-                            },
-                            MatchPattern::Wildcard => print!("_"),
-                            MatchPattern::Variable(name) => print!("{}", name),
-                            MatchPattern::EnumVariant {
-                                enum_name: nested_enum,
-                                variant_name: nested_variant,
-                                variant_index: _,
-                                payload: nested_payload,
-                            } => {
-                                // 嵌套枚举：Some(Ok(x))
-                                if !nested_enum.is_empty() {
-                                    print!("{}::", nested_enum);
-                                }
-                                print!("{}", nested_variant);
-                                if let Some(np) = nested_payload {
-                                    print!("(");
-                                    // 这里可以递归调用，但为了简化，直接打印变量名或通配符
-                                    match np.as_ref() {
-                                        MatchPattern::Variable(name) => print!("{}", name),
-                                        MatchPattern::Wildcard => print!("_"),
-                                        _ => print!("..."),
-                                    }
-                                    print!(")");
-                                }
+                        for (index, payload) in payloads.iter().enumerate() {
+                            if index > 0 {
+                                print!(", ");
                             }
+                            print_match_pattern(payload);
                         }
                         print!(")");
                     }

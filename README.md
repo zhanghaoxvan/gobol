@@ -117,8 +117,9 @@ Grape 是 Gobol 的包管理器，类似于 Cargo。
 # Initialize a new project / 初始化新项目
 grape init
 
-# Add a dependency (format: user/repo@tag) / 添加依赖（格式：作者/仓库@标签）
-grape add gobol-org/math@0.1.0
+# Add a dependency (replace with a real GitHub repository and tag)
+# 添加依赖（请替换为真实的 GitHub 仓库和标签）
+grape add <owner>/<repo>@<tag>
 
 # Remove a dependency / 移除依赖
 grape remove math
@@ -132,8 +133,9 @@ grape list
 # Run the project / 运行项目
 grape run
 
-# Build and run with the debug profile / 使用调试配置编译并运行
-grape debug
+# Interactive debugger: starts paused; -b sets source line breakpoints
+grape debug -b 12,20
+# At the prompt: s = step, c = continue, b/d <line> = add/remove breakpoint, q = quit
 
 # Compile to native binary / 编译为原生二进制
 grape run --compile
@@ -164,16 +166,26 @@ build` to disable this cache; `grape clean` removes it with `target/`.
 ## 🏃 Run Gobol Directly / 直接运行 Gobol
 
 ```bash
-# Run a single file / 运行单个文件
-gobol example.gbl
+# Build a single file / 编译单个文件
+gobol build example.gbl
+./example
 
-# Run with verbose output / 带详细输出运行
-gobol example.gbl --verbose
+# Run a single file with verbose build output / 带详细编译输出
+gobol build example.gbl --verbose
+./example
 
 # Compile to native binary / 编译为原生二进制
 gobol example.gbl --compile -o myapp
 ./myapp
 ```
+
+On Windows, run the generated `.exe` instead (for example, `.\example.exe`).
+The shorthand `gobol example.gbl` is a debug-build alias; it does not execute
+the program. Use `grape run` to build and run a project.
+
+在 Windows 上，请运行生成的 `.exe`（例如 `.\example.exe`）。
+简写命令 `gobol example.gbl` 只是 Debug 构建的别名，不会运行程序；项目可使用
+`grape run` 构建并运行。
 
 ---
 

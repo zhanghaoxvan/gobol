@@ -8,13 +8,15 @@ use gobol::error::ErrorFormatter;
 use gobol::lexer::Lexer;
 use gobol::semantic_analyzer::{BuildMode, SemanticAnalyzer};
 use gobol::token;
+use gobol_cli as gobol;
+
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
-const MODULE_IR_CACHE_VERSION: u32 = 1;
+const MODULE_IR_CACHE_VERSION: u32 = 18;
 
 #[derive(Serialize, Deserialize)]
 struct ModuleIrCache {
@@ -284,6 +286,7 @@ fn print_help() {
     println!("  --link-script <path>     Custom linker script (bare-metal / kernel builds)");
     println!("  --no-std                 Don't link the C runtime (no_std / bare-metal)");
     println!("  --no-main                Don't require a main() function (kernel entry)");
+    println!("  --debugger               Instrument statements for grape's interactive debugger");
     println!(
         "  --link-arg <lib>         Append a library base name to the link line (repeatable)."
     );
@@ -312,6 +315,7 @@ struct LinkCli {
     no_std: bool,
     no_main: bool,
     no_gc: bool,
+    debugger: bool,
     /// Extra library base names collected from repeatable `--link-arg <lib>`
     /// flags (e.g. `ws2_32`). These are appended to `LinkOptions::link_libs`
     /// and formatted per linker kind: `ws2_32.lib` for MSVC, `-lws2_32` for
@@ -329,7 +333,18 @@ impl Default for LinkCli {
             no_std: false,
             no_main: false,
             no_gc: false,
+            debugger: false,
             link_args: Vec::new(),
+        }
+    }
+}
+
+fn append_install_lib_paths(lib_paths: &mut Vec<String>, install_dir: &Path) {
+    for path in [install_dir.join("lib"), install_dir.to_path_buf()] {
+        if path.join("std").is_dir() {
+            if let Some(path) = path.to_str() {
+                lib_paths.push(path.to_string());
+            }
         }
     }
 }
@@ -399,6 +414,9 @@ fn main() {
             i += 1;
         } else if args[i] == "--no-gc" {
             link_cli.no_gc = true;
+            i += 1;
+        } else if args[i] == "--debugger" {
+            link_cli.debugger = true;
             i += 1;
         } else if args[i] == "--release" {
             build_mode = BuildMode::Release;
@@ -472,6 +490,14 @@ fn main() {
             process::exit(1);
         }
     };
+
+    if link_cli.debugger && link_cli.no_std {
+        eprintln!(
+            "{}",
+            "Error: --debugger requires the standard runtime".red()
+        );
+        process::exit(1);
+    }
 
     let source = get_source(&filename);
     // A global `--no-gc` (from `grape.toml`'s `build.no_gc` or CLI) injects
@@ -600,17 +626,9 @@ fn main() {
         }
     }
 
-    if let Ok(install_dir) = env::var("GOBOL_INSTALL_DIR") {
-        // lib_paths entries must point at the *parent* of the std/ directory so
-        // that `import std;` resolves to <lib_path>/std/mod.gbl. The installed
-        // layout is <install>/lib/std/mod.gbl (also <install>/std/mod.gbl for
-        // legacy installs). See grape.rs find_std_path() for the same rule.
-        let install = Path::new(&install_dir);
-        if let Some(p) = install.join("lib").to_str() {
-            lib_paths.push(p.to_string());
-        }
-        if let Some(p) = install.to_str() {
-            lib_paths.push(p.to_string());
+    for key in ["GOBOL_INSTALL_DIR", "GOBOL_HOME"] {
+        if let Ok(install_dir) = env::var(key) {
+            append_install_lib_paths(&mut lib_paths, Path::new(&install_dir));
         }
     }
 
@@ -996,6 +1014,7 @@ fn main() {
             .collect(),
         link_script: link_cli.link_script.clone(),
         entry_point: link_cli.entry_point.clone(),
+        debugger: link_cli.debugger,
     };
     if let Err(e) = backend.compile_to_binary(&concrete_ir, &out, &link_opts) {
         eprintln!("{}", format!("AOT compilation failed: {}", e).red());
@@ -1010,11 +1029,39 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        MODULE_IR_CACHE_VERSION, ModuleIrCache, module_cache_path, module_fingerprint,
-        read_module_ir_cache, write_module_ir_cache,
+        MODULE_IR_CACHE_VERSION, ModuleIrCache, append_install_lib_paths, module_cache_path,
+        module_fingerprint, read_module_ir_cache, write_module_ir_cache,
     };
-    use gobol::ir::GobolIR;
+    use gobol_cli::ir::GobolIR;
     use std::{env, fs, process};
+
+    #[test]
+    fn install_lib_paths_find_current_and_legacy_std_layouts() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("gobol-stdlib-paths-{}-{unique}", process::id()));
+        let lib_std = root.join("lib").join("std");
+        fs::create_dir_all(&lib_std).unwrap();
+        fs::create_dir_all(root.join("legacy").join("std")).unwrap();
+
+        let mut current = Vec::new();
+        append_install_lib_paths(&mut current, &root);
+        assert_eq!(
+            current,
+            vec![root.join("lib").to_string_lossy().to_string()]
+        );
+
+        let mut legacy = Vec::new();
+        append_install_lib_paths(&mut legacy, &root.join("legacy"));
+        assert_eq!(
+            legacy,
+            vec![root.join("legacy").to_string_lossy().to_string()]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn module_ir_cache_persists_and_checks_fingerprints() {

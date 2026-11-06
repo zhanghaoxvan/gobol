@@ -158,6 +158,12 @@ pub trait AstNode {
 
 pub trait Statement: AstNode {
     fn as_statement(&self) -> &dyn Statement;
+
+    fn source_line(&self) -> i32 {
+        0
+    }
+
+    fn set_source_line(&mut self, _line: i32) {}
 }
 
 // ==================== Expression ====================
@@ -456,8 +462,8 @@ impl Type for NullableType {
 //
 // A first-class function type, written `func(T1, T2): R`. Used as the type
 // of callback parameters (e.g. `f: func(T): U` in Option::map). The semantic
-// analyser collapses FunctionType to DataType::Unknown — it only needs to
-// know the value is callable, not its precise signature.
+// analyser preserves its parameter and return types so indirect calls can be
+// checked and lowered with the correct ABI.
 
 pub struct FunctionType {
     param_types: Vec<Box<dyn Type>>,
@@ -1262,19 +1268,19 @@ impl_attributable!(TraitDefinition);
 
 // ==================== EnumDefinition ====================
 
-/// A single variant of an enum, e.g. `Some(T)` or `None`.
+/// A single variant of an enum, e.g. `Some(T)`, `Entry(str, int)`, or `None`.
 pub struct EnumVariant {
     pub name: String,
-    /// Optional payload type. `None` means a unit variant like `None`.
-    pub payload_type: Option<Box<dyn Type>>,
+    /// Payload types in declaration order. An empty list means a unit variant.
+    pub payload_types: Vec<Box<dyn Type>>,
     pub attributes: Vec<Attribute>,
 }
 
 impl EnumVariant {
-    pub fn new(name: impl Into<String>, payload_type: Option<Box<dyn Type>>) -> Self {
+    pub fn new(name: impl Into<String>, payload_types: Vec<Box<dyn Type>>) -> Self {
         EnumVariant {
             name: name.into(),
-            payload_type,
+            payload_types,
             attributes: Vec::new(),
         }
     }
@@ -1352,6 +1358,7 @@ pub struct IfStatement {
     then_branch: Option<Box<dyn Statement>>,
     else_branch: Option<Box<dyn Statement>>,
     pub attributes: Vec<Attribute>,
+    source_line: i32,
 }
 
 impl IfStatement {
@@ -1365,6 +1372,7 @@ impl IfStatement {
             then_branch,
             else_branch,
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 
@@ -1396,6 +1404,14 @@ impl Statement for IfStatement {
     fn as_statement(&self) -> &dyn Statement {
         self
     }
+
+    fn source_line(&self) -> i32 {
+        self.source_line
+    }
+
+    fn set_source_line(&mut self, line: i32) {
+        self.source_line = line;
+    }
 }
 
 impl Expression for IfStatement {
@@ -1410,6 +1426,7 @@ pub struct WhileStatement {
     condition: Option<Box<dyn Expression>>,
     body: Option<Box<dyn Statement>>,
     pub attributes: Vec<Attribute>,
+    source_line: i32,
 }
 
 impl WhileStatement {
@@ -1418,6 +1435,7 @@ impl WhileStatement {
             condition,
             body,
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 
@@ -1445,6 +1463,14 @@ impl Statement for WhileStatement {
     fn as_statement(&self) -> &dyn Statement {
         self
     }
+
+    fn source_line(&self) -> i32 {
+        self.source_line
+    }
+
+    fn set_source_line(&mut self, line: i32) {
+        self.source_line = line;
+    }
 }
 
 // ==================== ForStatement ====================
@@ -1454,6 +1480,7 @@ pub struct ForStatement {
     iterable: Option<Box<dyn Expression>>,
     body: Option<Box<Block>>,
     pub attributes: Vec<Attribute>,
+    source_line: i32,
 }
 
 impl ForStatement {
@@ -1467,6 +1494,7 @@ impl ForStatement {
             iterable,
             body,
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 
@@ -1480,6 +1508,7 @@ impl ForStatement {
             iterable,
             body,
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 
@@ -1515,6 +1544,14 @@ impl Statement for ForStatement {
     fn as_statement(&self) -> &dyn Statement {
         self
     }
+
+    fn source_line(&self) -> i32 {
+        self.source_line
+    }
+
+    fn set_source_line(&mut self, line: i32) {
+        self.source_line = line;
+    }
 }
 
 // ==================== ReturnStatement ====================
@@ -1522,6 +1559,7 @@ impl Statement for ForStatement {
 pub struct ReturnStatement {
     value: Option<Box<dyn Expression>>,
     pub attributes: Vec<Attribute>,
+    source_line: i32,
 }
 
 impl ReturnStatement {
@@ -1529,6 +1567,7 @@ impl ReturnStatement {
         ReturnStatement {
             value,
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 
@@ -1552,18 +1591,28 @@ impl Statement for ReturnStatement {
     fn as_statement(&self) -> &dyn Statement {
         self
     }
+
+    fn source_line(&self) -> i32 {
+        self.source_line
+    }
+
+    fn set_source_line(&mut self, line: i32) {
+        self.source_line = line;
+    }
 }
 
 // ==================== BreakStatement ====================
 
 pub struct BreakStatement {
     pub attributes: Vec<Attribute>,
+    source_line: i32,
 }
 
 impl BreakStatement {
     pub fn new() -> Self {
         BreakStatement {
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 }
@@ -1583,18 +1632,28 @@ impl Statement for BreakStatement {
     fn as_statement(&self) -> &dyn Statement {
         self
     }
+
+    fn source_line(&self) -> i32 {
+        self.source_line
+    }
+
+    fn set_source_line(&mut self, line: i32) {
+        self.source_line = line;
+    }
 }
 
 // ==================== ContinueStatement ====================
 
 pub struct ContinueStatement {
     pub attributes: Vec<Attribute>,
+    source_line: i32,
 }
 
 impl ContinueStatement {
     pub fn new() -> Self {
         ContinueStatement {
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 }
@@ -1614,6 +1673,14 @@ impl Statement for ContinueStatement {
     fn as_statement(&self) -> &dyn Statement {
         self
     }
+
+    fn source_line(&self) -> i32 {
+        self.source_line
+    }
+
+    fn set_source_line(&mut self, line: i32) {
+        self.source_line = line;
+    }
 }
 
 // ==================== Declaration ====================
@@ -1624,6 +1691,7 @@ pub struct Declaration {
     r#type: Option<Box<dyn Type>>,
     initializer: Option<Box<dyn Expression>>,
     pub attributes: Vec<Attribute>,
+    source_line: i32,
 }
 
 impl Declaration {
@@ -1639,6 +1707,7 @@ impl Declaration {
             r#type,
             initializer,
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 
@@ -1674,6 +1743,14 @@ impl Statement for Declaration {
     fn as_statement(&self) -> &dyn Statement {
         self
     }
+
+    fn source_line(&self) -> i32 {
+        self.source_line
+    }
+
+    fn set_source_line(&mut self, line: i32) {
+        self.source_line = line;
+    }
 }
 
 // ==================== ExpressionStatement ====================
@@ -1682,6 +1759,7 @@ pub struct ExpressionStatement {
     expression: Option<Box<dyn Expression>>,
     pub tail: bool, // true if no semicolon follows (block return value)
     pub attributes: Vec<Attribute>,
+    source_line: i32,
 }
 
 impl ExpressionStatement {
@@ -1690,6 +1768,7 @@ impl ExpressionStatement {
             expression,
             tail: false,
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 
@@ -1698,6 +1777,7 @@ impl ExpressionStatement {
             expression,
             tail: true,
             attributes: Vec::new(),
+            source_line: 0,
         }
     }
 
@@ -1720,6 +1800,14 @@ impl AstNode for ExpressionStatement {
 impl Statement for ExpressionStatement {
     fn as_statement(&self) -> &dyn Statement {
         self
+    }
+
+    fn source_line(&self) -> i32 {
+        self.source_line
+    }
+
+    fn set_source_line(&mut self, line: i32) {
+        self.source_line = line;
     }
 }
 
@@ -2998,7 +3086,7 @@ pub enum MatchPattern {
         enum_name: String,
         variant_name: String,
         variant_index: i32,
-        payload: Option<Box<MatchPattern>>,
+        payloads: Vec<MatchPattern>,
     },
 }
 

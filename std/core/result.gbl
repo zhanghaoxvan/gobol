@@ -30,7 +30,7 @@ impl<T, E> Result<T, E> {
         if self.is_ok() {
             self._0
         } else {
-            fallback(self._1)
+            fallback(self._0)
         }
     }
 
@@ -38,7 +38,7 @@ impl<T, E> Result<T, E> {
         if self.is_ok() {
             Result<U, E>::Ok(f(self._0))
         } else {
-            Result<U, E>::Err(self._1)
+            Result<U, E>::Err(self._0)
         }
     }
 }

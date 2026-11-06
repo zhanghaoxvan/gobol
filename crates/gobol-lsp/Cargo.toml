@@ -1,0 +1,17 @@
+[package]
+name = "gobol-lsp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gobol-common = { workspace = true }
+gobol-frontend = { workspace = true }
+serde = { workspace = true }
+tower-lsp = { workspace = true }
+tokio = { workspace = true }
+dashmap = { workspace = true }
+url = { workspace = true }
+
+[[bin]]
+name = "gobol-lsp"
+path = "src/main.rs"

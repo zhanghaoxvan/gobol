@@ -1,14 +1,31 @@
-[package]
-name = "gobol"
+[workspace]
+members = [
+    "crates/gobol-common",
+    "crates/gobol-frontend",
+    "crates/gobol-ir",
+    "crates/gobol-codegen",
+    "crates/gobol-cli",
+    "crates/gobol-lsp",
+    "crates/grape",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.2.0"
 edition = "2024"
 
-[dependencies]
-git2 = { version = "0.21", features = ["vendored-libgit2"] }
+[workspace.dependencies]
+gobol-common = { path = "crates/gobol-common" }
+gobol-frontend = { path = "crates/gobol-frontend" }
+gobol-ir = { path = "crates/gobol-ir" }
+gobol-codegen = { path = "crates/gobol-codegen" }
+gobol-cli = { path = "crates/gobol-cli" }
+
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.1.4"
 colored = "3.1"
+git2 = { version = "0.21", features = ["vendored-libgit2"] }
 cranelift-codegen = "0.134"
 cranelift-frontend = "0.134"
 cranelift-module = "0.134"
@@ -18,19 +35,4 @@ tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 dashmap = "6"
 url = "2"
-# Used at runtime (not build-time) by the `gobol::toolchain` module to
-# discover the MSVC/MinGW C toolchain the same way rustc's own build
-# scripts do — replacing hand-written vswhere/vcvarsall/which logic.
 cc = "1.0"
-
-[[bin]]
-name = "gobol"
-path = "src/bin/gobol.rs"
-
-[[bin]]
-name = "grape"
-path = "src/bin/grape.rs"
-
-[[bin]]
-name = "gobol-lsp"
-path = "src/bin/gobol-lsp.rs"

@@ -17,8 +17,13 @@ pub enum DataType {
     Struct(String),
     Nullable(Box<DataType>),
     Array(Box<DataType>),
+    Tuple(Vec<DataType>),
     Reference(Box<DataType>),
     Pointer(Box<DataType>),
+    Function {
+        parameters: Vec<DataType>,
+        return_type: Box<DataType>,
+    },
 }
 
 impl fmt::Display for DataType {
@@ -34,8 +39,27 @@ impl fmt::Display for DataType {
             DataType::Struct(name) => return write!(f, "{}", name),
             DataType::Nullable(inner) => return write!(f, "{}?", inner),
             DataType::Array(elem) => return write!(f, "{}[]", elem),
+            DataType::Tuple(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return write!(f, "({})", elements);
+            }
             DataType::Reference(inner) => return write!(f, "&{}", inner),
             DataType::Pointer(inner) => return write!(f, "*{}", inner),
+            DataType::Function {
+                parameters,
+                return_type,
+            } => {
+                let parameters = parameters
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return write!(f, "func({}): {}", parameters, return_type);
+            }
         };
         write!(f, "{}", s)
     }
@@ -451,6 +475,10 @@ impl Environment {
         }
         // []T 可以接收 *T (指针解引用为数组)
         if let DataType::Array(inner) = target {
+            if let DataType::Array(source_inner) = source {
+                return **source_inner == DataType::Unknown
+                    || Self::is_type_compatible(inner, source_inner);
+            }
             if let DataType::Pointer(ptr_inner) = source {
                 return Self::is_type_compatible(inner, ptr_inner);
             }
@@ -472,6 +500,9 @@ impl Environment {
                 if let DataType::Array(_) = source {
                     return true;
                 }
+            }
+            if name.starts_with("Vec<") && *source == DataType::Struct("Vec".to_string()) {
+                return true;
             }
         }
         if let DataType::Struct(name) = source {

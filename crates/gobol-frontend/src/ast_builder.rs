@@ -499,12 +499,15 @@ impl AstBuilder {
     // ==================== Statement ====================
 
     fn parse_statement(&mut self) -> Option<Box<dyn Statement>> {
-        // Parse attributes first — they can precede struct, impl, func, trait.
-        // Merge in any file-level `#![attr]` so they propagate to this node
-        // (closest-wins: a local attribute overrides the file-level one).
         let raw_attrs = self.parse_attributes();
         let attrs = self.merge_with_file_attributes(raw_attrs);
+        let line = self.current_token().line;
+        let mut statement = self.parse_statement_inner(attrs)?;
+        statement.set_source_line(line);
+        Some(statement)
+    }
 
+    fn parse_statement_inner(&mut self, attrs: Vec<Attribute>) -> Option<Box<dyn Statement>> {
         if self.match_type(&TokenType::Keyword) {
             let keyword = self.current_token().value.clone();
 
@@ -1177,17 +1180,29 @@ impl AstBuilder {
             let variant_name = self.current_token().value.clone();
             self.advance();
 
-            // Optional payload: VariantName(Type)
-            let payload_type = if self.match_value("(") {
+            // Optional payload list: VariantName(Type1, Type2, ...)
+            let payload_types = if self.match_value("(") {
                 self.advance();
-                let ty = self.parse_type();
+                let mut types = Vec::new();
+                while !self.match_value(")") && !self.error_occurred {
+                    if let Some(ty) = self.parse_type() {
+                        types.push(ty);
+                    } else {
+                        break;
+                    }
+                    if self.match_value(",") {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
                 self.consume_value(")", "Expected ')' after variant payload type");
-                ty
+                types
             } else {
-                None
+                Vec::new()
             };
 
-            variants.push(EnumVariant::new(variant_name, payload_type));
+            variants.push(EnumVariant::new(variant_name, payload_types));
 
             if self.match_value(",") {
                 self.advance();
@@ -1584,7 +1599,10 @@ impl AstBuilder {
                 }
                 self.consume_value(")", "Expected ')' after tuple type");
                 self.consume_value("]", "Expected ']' after tuple type");
-                return Some(Box::new(GenericType::new("tuple", args)));
+                return Some(Box::new(ArrayType::new_nested(
+                    Box::new(GenericType::new("tuple", args)),
+                    Box::new(NumberLiteral::new(0.0)),
+                )));
             }
             if !self.match_type(&TokenType::Keyword) && !self.match_type(&TokenType::Identifier) {
                 self.log_error("Expected type name after '['");
@@ -2639,10 +2657,8 @@ impl AstBuilder {
     ///   - `"hello"` → Literal(Str("hello"))
     ///   - `x` → Variable("x")
     ///   - `None` → Variable("None") (语义分析时判断是否为枚举变体)
-    ///   - `Some(x)` → EnumVariant { variant_name: "Some", payload: Some(Variable("x")) }
-    ///   - `Ok(value)` → EnumVariant { variant_name: "Ok", payload: Some(Variable("value")) }
-    ///   - `Err(e)` → EnumVariant { variant_name: "Err", payload: Some(Variable("e")) }
-    ///   - `Some(Ok(x))` → EnumVariant { variant_name: "Some", payload: Some(EnumVariant { ... }) }
+    ///   - `Some(x)` → EnumVariant { variant_name: "Some", payloads: [Variable("x")] }
+    ///   - `Entry(key, value)` → EnumVariant { payloads: [Variable("key"), Variable("value")] }
     fn parse_match_pattern(&mut self) -> Option<MatchPattern> {
         if self.match_value("_") {
             self.advance();
@@ -2676,28 +2692,54 @@ impl AstBuilder {
         }
 
         if self.match_type(&TokenType::Identifier) {
-            let name = self.current_token().value.clone();
+            let first_name = self.current_token().value.clone();
             self.advance();
+            let (enum_name, variant_name, qualified) = if self.match_value("::") {
+                self.advance();
+                if !self.is_name_token() {
+                    self.log_error("Expected enum variant name after '::'");
+                    return None;
+                }
+                let variant_name = self.current_token().value.clone();
+                self.advance();
+                (first_name.clone(), variant_name, true)
+            } else {
+                (String::new(), first_name.clone(), false)
+            };
 
-            // 枚举变体带负载: VariantName(payload)
+            // Enum variant payload patterns: VariantName(first, second, ...)
             if self.match_value("(") {
                 self.advance(); // consume '('
-
-                // 解析负载模式（递归调用自己）
-                let payload = self.parse_match_pattern()?;
-
-                self.consume_value(")", "Expected ')' after enum variant payload");
+                let mut payloads = Vec::new();
+                while !self.match_value(")") && !self.error_occurred {
+                    payloads.push(self.parse_match_pattern()?);
+                    if self.match_value(",") {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.consume_value(")", "Expected ')' after enum variant payloads");
 
                 return Some(MatchPattern::EnumVariant {
-                    enum_name: String::new(), // 语义分析时填充
-                    variant_name: name,
+                    enum_name,
+                    variant_name,
                     variant_index: 0,
-                    payload: Some(Box::new(payload)),
+                    payloads,
+                });
+            }
+
+            if qualified {
+                return Some(MatchPattern::EnumVariant {
+                    enum_name,
+                    variant_name,
+                    variant_index: 0,
+                    payloads: Vec::new(),
                 });
             }
 
             // 普通变量绑定（语义分析时会判断是否为无负载枚举变体）
-            return Some(MatchPattern::Variable(name));
+            return Some(MatchPattern::Variable(first_name));
         }
 
         self.log_error("Expected pattern in match arm");
@@ -2810,14 +2852,16 @@ impl AstBuilder {
         // Array allocation: new T[size] or new T[size]?
         if self.match_value("[") {
             self.advance();
-            let _size = self.parse_expression()?;
+            let size = self.parse_expression()?;
             if !self.match_value("]") {
                 self.log_error("Expected ']' after array size");
                 return None;
             }
             self.advance();
-            // Array allocation marker (handled by cranelift backend)
-            return Some(Box::new(Identifier::new("__new_array")));
+            return Some(Box::new(FunctionCall::new(
+                Some(Box::new(Identifier::new("__new_array"))),
+                Some(vec![size]),
+            )));
         }
 
         // Struct construction: new Type(args) desugars to Type::new(args).

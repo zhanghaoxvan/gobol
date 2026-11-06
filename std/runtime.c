@@ -19,4 +19,5 @@
 #include "runtime/thread.c"
 #include "runtime/channel.c"
 #include "runtime/gc.c"
+#include "runtime/debug.c"
 #include "runtime/entry.c"

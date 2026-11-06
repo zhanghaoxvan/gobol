@@ -70,16 +70,26 @@ impl TestResult {
 /// Path to the prebuilt `gobol` release binary.
 fn gobol_binary() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("..");
+    p.push("..");
     p.push("target");
     p.push("release");
     p.push("gobol");
     p
 }
 
+fn workspace_root() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("..");
+    path.push("..");
+    path
+}
+
 pub fn init_test_env() {
     INIT.call_once(|| {
         let status = Command::new("cargo")
             .args(&["build", "--release", "--bin", "gobol"])
+            .current_dir(workspace_root())
             .status()
             .expect("cargo build --release 编译失败");
         assert!(status.success(), "Gobol Release构建失败");
@@ -110,6 +120,8 @@ fn run_gobol_with_args_and_stdin(
     let _guard = BUILD_LOCK.lock().unwrap();
     let build_output = Command::new(gobol_binary())
         .args(["build", file_path, "-o", temp_bin.to_str().unwrap()])
+        .current_dir(workspace_root())
+        .current_dir(workspace_root())
         .output()
         .expect("failed to run gobol build");
     drop(_guard);
@@ -130,6 +142,8 @@ fn run_gobol_with_args_and_stdin(
 
     let mut command = Command::new(&temp_bin);
     command.args(args);
+    command.current_dir(workspace_root());
+    command.current_dir(workspace_root());
     let run_output = if let Some(input) = stdin {
         let mut child = command
             .stdin(Stdio::piped())

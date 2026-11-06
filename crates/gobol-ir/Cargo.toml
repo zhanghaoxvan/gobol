@@ -1,0 +1,11 @@
+[package]
+name = "gobol-ir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gobol-common = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+gobol-frontend = { workspace = true }

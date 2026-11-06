@@ -1,5 +1,6 @@
 use colored::*;
 use git2::{Repository, ResetType};
+use gobol_cli as gobol;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -262,7 +263,8 @@ fn print_help() {
     println!("  grape update [name]         Update dependencies (use --latest for newest tag)");
     println!("  grape list                  List all dependencies");
     println!("  grape run [--verbose]       Build and run the Gobol program");
-    println!("  grape debug [options]        Build and run with the debug profile");
+    println!("  grape debug [-b <line,...>]  Debug interactively; set source breakpoints");
+    println!("                              Commands: c continue, s step, b/d <line>, q quit");
     println!("  grape build [-o <file>] [--release]  Compile to native binary");
     println!("  grape clean                 Clean build artifacts and cached packages");
     println!("  grape version               Show the version");
@@ -591,6 +593,7 @@ fn with_debug_profile(args: &[String]) -> Vec<String> {
         .position(|arg| arg == "--")
         .unwrap_or(debug_args.len());
     debug_args.insert(insert_at, "--debug".to_string());
+    debug_args.insert(insert_at + 1, "--debugger".to_string());
     debug_args
 }
 
@@ -616,6 +619,8 @@ struct BuildCli {
     no_std: bool,
     no_gc: bool,
     no_main: bool,
+    debugger: bool,
+    breakpoints: Vec<String>,
     /// Optimization level from `-O0`/`-O1`/`-O2` CLI flags.
     opt_level: Option<usize>,
     program_args: Vec<String>,
@@ -673,6 +678,15 @@ fn parse_build_cli(args: &[String]) -> BuildCli {
             "--no-std" => cli.no_std = true,
             "--no-gc" => cli.no_gc = true,
             "--no-main" => cli.no_main = true,
+            "--debugger" => cli.debugger = true,
+            "--break" | "--breakpoint" | "-b" => {
+                if let Some(value) = args.get(i + 1) {
+                    cli.breakpoints.push(value.clone());
+                    i += 1;
+                } else {
+                    cli.breakpoints.push(String::new());
+                }
+            }
             // `grape run --release` etc. handled above; unknown flags are
             // silently ignored here (gobol may know about them later).
             _ => {}
@@ -700,6 +714,7 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     println!("[1/{stage_count}] Checking project configuration");
     let config = read_grape_toml()?;
     let cli = parse_build_cli(args);
+    let breakpoints = normalize_breakpoints(&cli.breakpoints)?;
 
     // Merge the manifest's optional [build] section with CLI overrides.
     let build_cfg = config.build.clone().unwrap_or_default();
@@ -826,6 +841,9 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
         .arg(entry_file)
         .arg("-o")
         .arg(final_out.to_string_lossy().as_ref());
+    if cli.debugger {
+        cmd.arg("--debugger");
+    }
     if resolved.release {
         cmd.arg("--release");
     } else {
@@ -900,7 +918,14 @@ fn build_project(args: &[String], compile_only: bool) -> Result<()> {
     // Execute the compiled binary unless compile-only.
     if !compile_only {
         println!("[5/{stage_count}] Running {}", final_out.display());
-        run_compiled_binary(&final_out, &target_triple, &cli.program_args, cli.verbose)?;
+        run_compiled_binary(
+            &final_out,
+            &target_triple,
+            &cli.program_args,
+            cli.verbose,
+            cli.debugger,
+            &breakpoints,
+        )?;
     }
 
     Ok(())
@@ -915,15 +940,22 @@ fn run_compiled_binary(
     target: &str,
     program_args: &[String],
     verbose: bool,
+    debugger: bool,
+    breakpoints: &[String],
 ) -> Result<()> {
     let host = gobol::cranelift::host_target_string();
     if target == host {
-        let run_status = process::Command::new(exe)
-            .args(program_args)
-            .status()
-            .map_err(|e| {
-                GrapeError::CommandFailed(format!("Failed to execute '{}': {}", exe.display(), e))
-            })?;
+        let mut cmd = process::Command::new(exe);
+        cmd.args(program_args);
+        if debugger {
+            cmd.env("GOBOL_DEBUG_START", "1");
+            if !breakpoints.is_empty() {
+                cmd.env("GOBOL_DEBUG_BREAKPOINTS", breakpoints.join(","));
+            }
+        }
+        let run_status = cmd.status().map_err(|e| {
+            GrapeError::CommandFailed(format!("Failed to execute '{}': {}", exe.display(), e))
+        })?;
         if !run_status.success() {
             process::exit(run_status.code().unwrap_or(1));
         }
@@ -967,6 +999,12 @@ fn run_compiled_binary(
         cmd.arg(exe);
     }
     cmd.args(program_args);
+    if debugger {
+        cmd.env("GOBOL_DEBUG_START", "1");
+        if !breakpoints.is_empty() {
+            cmd.env("GOBOL_DEBUG_BREAKPOINTS", breakpoints.join(","));
+        }
+    }
     let run_status = cmd.status().map_err(|e| {
         GrapeError::CommandFailed(format!(
             "Failed to run '{}' ({}). Is QEMU installed? {}",
@@ -979,6 +1017,29 @@ fn run_compiled_binary(
         process::exit(run_status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+fn normalize_breakpoints(values: &[String]) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    for value in values {
+        for item in value.split(',') {
+            let line = item.parse::<i32>().map_err(|_| {
+                GrapeError::BadConfig(format!(
+                    "invalid breakpoint '{}': expected a positive source line",
+                    item
+                ))
+            })?;
+            if line <= 0 {
+                return Err(GrapeError::BadConfig(
+                    "breakpoint lines must be greater than zero".to_string(),
+                ));
+            }
+            lines.push(line);
+        }
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    Ok(lines.into_iter().map(|line| line.to_string()).collect())
 }
 
 fn cmd_clean() -> Result<()> {
@@ -1350,15 +1411,11 @@ fn find_std_path() -> Option<PathBuf> {
     let candidates: Vec<PathBuf> = (|| {
         let mut v = Vec::new();
 
-        // 1. GOBOL_INSTALL_DIR env var
-        if let Ok(dir) = std::env::var("GOBOL_INSTALL_DIR") {
-            let install_dir = PathBuf::from(&dir);
-            let p = install_dir.join("lib");
-            if p.join("std").exists() {
-                v.push(p);
-            }
-            if install_dir.join("std").exists() {
-                v.push(install_dir);
+        // 1. Explicit install roots. GOBOL_HOME is retained as a supported
+        // alias because the installer has historically used both names.
+        for key in ["GOBOL_INSTALL_DIR", "GOBOL_HOME"] {
+            if let Ok(dir) = std::env::var(key) {
+                v.extend(install_std_paths(&PathBuf::from(dir)));
             }
         }
 
@@ -1408,6 +1465,13 @@ fn find_std_path() -> Option<PathBuf> {
     })();
 
     candidates.into_iter().next()
+}
+
+fn install_std_paths(install_dir: &Path) -> Vec<PathBuf> {
+    [install_dir.join("lib"), install_dir.to_path_buf()]
+        .into_iter()
+        .filter(|path| path.join("std").is_dir())
+        .collect()
 }
 
 fn build_lib_paths(config: &GrapeToml) -> Vec<PathBuf> {
@@ -1496,6 +1560,21 @@ mod tests {
         assert_eq!(comps[1].as_os_str(), "grape");
         assert_eq!(comps[2].as_os_str(), "packages");
         assert_eq!(comps[3].as_os_str(), "my-lib");
+    }
+
+    #[test]
+    fn installed_std_search_paths_include_lib_layout() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("grape-stdlib-paths-{unique}"));
+        let std_dir = root.join("lib").join("std");
+        fs::create_dir_all(&std_dir).unwrap();
+
+        assert_eq!(install_std_paths(&root), vec![root.join("lib")]);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1669,5 +1748,17 @@ mod tests {
 
         assert!(!cli.release);
         assert_eq!(cli.program_args, vec!["--debug"]);
+        assert!(cli.debugger);
+    }
+
+    #[test]
+    fn test_breakpoint_arguments_are_normalized() {
+        let values = vec!["12,4".to_string(), "12".to_string()];
+        assert_eq!(
+            normalize_breakpoints(&values).unwrap(),
+            vec!["4".to_string(), "12".to_string()]
+        );
+        assert!(normalize_breakpoints(&["0".to_string()]).is_err());
+        assert!(normalize_breakpoints(&["line".to_string()]).is_err());
     }
 }

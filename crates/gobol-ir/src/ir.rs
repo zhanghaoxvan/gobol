@@ -68,6 +68,7 @@ pub struct IRBlock {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IRStmt {
+    DebugLocation(i32),
     Declaration {
         name: String,
         ty: DataType,
@@ -149,6 +150,10 @@ pub enum IRExpr {
         expr: Box<IRExpr>,
         target: DataType,
     },
+    Bitcast {
+        expr: Box<IRExpr>,
+        target: DataType,
+    },
     Assignment {
         target: Box<IRExpr>,
         value: Box<IRExpr>,
@@ -202,6 +207,9 @@ pub struct IRBuilder {
 
     /// 枚举变体索引: (enum_name, variant_name) -> variant_index
     variant_indices: HashMap<(String, String), i32>,
+    /// 枚举变体 payload 类型和泛型参数，用于 match 解构时恢复字段类型。
+    enum_payload_types: HashMap<(String, String), Vec<DataType>>,
+    enum_generic_params: HashMap<String, Vec<String>>,
 
     // #[expand] functions: name → (param names, body IR)
     expand_functions: HashMap<String, (Vec<String>, IRBlock)>,
@@ -243,6 +251,8 @@ impl IRBuilder {
             methods: HashMap::new(),
             errors: Vec::new(),
             variant_indices: HashMap::new(),
+            enum_payload_types: HashMap::new(),
+            enum_generic_params: HashMap::new(),
             expand_functions: HashMap::new(),
             current_file: String::new(),
             tmp_counter: 0,
@@ -287,9 +297,12 @@ impl IRBuilder {
     }
 
     pub fn build(mut self, program: &Program) -> Result<GobolIR, Vec<String>> {
-        // 第一遍：收集结构体定义
+        // 第一遍：收集结构体与枚举定义，确保函数体中的类型布局、
+        // 枚举变体构造函数和 match 标签都可解析。
         for stmt in program.get_statements() {
-            if stmt.as_any().downcast_ref::<StructDefinition>().is_some() {
+            if stmt.as_any().downcast_ref::<StructDefinition>().is_some()
+                || stmt.as_any().downcast_ref::<EnumDefinition>().is_some()
+            {
                 stmt.accept(&mut self);
             }
         }
@@ -436,19 +449,28 @@ impl IRBuilder {
             let inner = self.ast_type_to_data_type(Some(reference.get_referent()));
             return DataType::Reference(Box::new(inner));
         }
-        if let Some(binding) = self.lookup_generic(name) {
-            return binding;
-        }
-
         // 检查数组类型 → return Array with element type
         if let Some(arr) = ty.as_type_any().downcast_ref::<ArrayType>() {
             let elem = self.ast_type_to_data_type(Some(arr.get_element_type()));
             return DataType::Array(Box::new(elem));
         }
 
-        // Function type `func(T1, T2): R` → function pointer (i64).
-        if ty.as_type_any().downcast_ref::<FunctionType>().is_some() {
-            return DataType::Unknown;
+        // Preserve callback signatures through IR so indirect calls use the
+        // same parameter and return types as direct calls.
+        if let Some(function) = ty.as_type_any().downcast_ref::<FunctionType>() {
+            let parameters = function
+                .get_param_types()
+                .into_iter()
+                .map(|parameter| self.ast_type_to_data_type(Some(parameter)))
+                .collect();
+            let return_type = function
+                .get_return_type()
+                .map(|return_type| self.ast_type_to_data_type(Some(return_type)))
+                .unwrap_or(DataType::None_);
+            return DataType::Function {
+                parameters,
+                return_type: Box::new(return_type),
+            };
         }
 
         // 检查泛型类型（如 vec<int>）
@@ -460,16 +482,29 @@ impl IRBuilder {
                 return elem;
             }
             if base_name == "tuple" {
-                return DataType::Array(Box::new(DataType::Unknown));
+                return DataType::Tuple(
+                    gt.get_type_args()
+                        .iter()
+                        .map(|ty| self.ast_type_to_data_type(Some(ty.as_ref())))
+                        .collect(),
+                );
             }
-            // 其他泛型类型当作结构体
-            return DataType::Struct(base_name.to_string());
+            let type_args = gt
+                .get_type_args()
+                .iter()
+                .map(|arg| self.ast_type_to_data_type(Some(arg.as_ref())).to_string())
+                .collect::<Vec<_>>();
+            return DataType::Struct(format!("{}<{}>", base_name, type_args.join(", ")));
         }
 
         // 检查可空类型
         if let Some(nullable) = ty.as_type_any().downcast_ref::<NullableType>() {
             let inner = self.ast_type_to_data_type(Some(nullable.get_inner_type()));
             return DataType::Nullable(Box::new(inner));
+        }
+
+        if let Some(binding) = self.lookup_generic(name) {
+            return binding;
         }
 
         // 基本类型
@@ -519,6 +554,16 @@ impl IRBuilder {
         };
 
         let name = ty.get_name();
+        if let Some(function) = ty.as_type_any().downcast_ref::<FunctionType>() {
+            for parameter in function.get_param_types() {
+                self.collect_generic_names(Some(parameter), params);
+            }
+            if let Some(return_type) = function.get_return_type() {
+                self.collect_generic_names(Some(return_type), params);
+            }
+            return;
+        }
+
         // Only treat as generic param if lowercase AND not a built-in type
         let is_builtin = matches!(name, "int" | "float" | "bool" | "str" | "none");
         if !is_builtin && name.chars().next().map_or(false, |c| c.is_lowercase()) {
@@ -619,15 +664,17 @@ impl IRBuilder {
             if let Some(body) = &arm.body {
                 let mut sub_builder = IRBuilder::new();
                 sub_builder.generic_stack = self.generic_stack.clone();
+                sub_builder.structs = self.structs.clone();
+                sub_builder.variant_indices = self.variant_indices.clone();
+                sub_builder.enum_payload_types = self.enum_payload_types.clone();
+                sub_builder.enum_generic_params = self.enum_generic_params.clone();
+                sub_builder.var_types = self.var_types.clone();
                 sub_builder.block_depth = 2;
 
                 // ---- 新增：处理枚举变体模式中的变量绑定 ----
-                if let MatchPattern::EnumVariant { payload, .. } = &arm.pattern {
-                    if let Some(p) = payload {
-                        if let MatchPattern::Variable(bind_name) = p.as_ref() {
-                            // 从 scrutinee 中提取 payload 并绑定到变量
-                            // 这将在 IR 生成中处理
-                            // 暂时在 sub_builder 中声明变量
+                if let MatchPattern::EnumVariant { payloads, .. } = &arm.pattern {
+                    for payload in payloads {
+                        if let MatchPattern::Variable(bind_name) = payload {
                             sub_builder
                                 .var_types
                                 .insert(bind_name.clone(), DataType::Int);
@@ -712,6 +759,11 @@ impl IRBuilder {
             // 使用子构建器处理 body
             let mut sub_builder = IRBuilder::new();
             sub_builder.generic_stack = self.generic_stack.clone();
+            sub_builder.structs = self.structs.clone();
+            sub_builder.variant_indices = self.variant_indices.clone();
+            sub_builder.enum_payload_types = self.enum_payload_types.clone();
+            sub_builder.enum_generic_params = self.enum_generic_params.clone();
+            sub_builder.var_types = self.var_types.clone();
             // Set block_depth > 1 so tail expressions don't generate Returns,
             // but instead leave values on the expression stack for the parent context
             sub_builder.block_depth = 2;
@@ -773,6 +825,15 @@ impl IRBuilder {
                         .get(&(enum_name.clone(), variant_name.clone()))
                     {
                         idx
+                    } else if let [idx] = self
+                        .variant_indices
+                        .iter()
+                        .filter(|((_, name), _)| name == variant_name)
+                        .map(|(_, index)| *index)
+                        .collect::<Vec<_>>()
+                        .as_slice()
+                    {
+                        *idx
                     } else {
                         // Patterns parsed without a resolvable enum path still
                         // retain the conventional standard-library variant
@@ -960,6 +1021,10 @@ impl IRBuilder {
                 expr: Box::new(self.subst_expr(expr, env)),
                 target: target.clone(),
             },
+            IRExpr::Bitcast { expr, target } => IRExpr::Bitcast {
+                expr: Box::new(self.subst_expr(expr, env)),
+                target: target.clone(),
+            },
             IRExpr::Assignment { target, value } => IRExpr::Assignment {
                 target: Box::new(self.subst_expr(target, env)),
                 value: Box::new(self.subst_expr(value, env)),
@@ -1073,6 +1138,10 @@ impl IRBuilder {
                     .collect(),
             },
             IRExpr::Cast { expr, target } => IRExpr::Cast {
+                expr: Box::new(self.expand_nested_macros(expr, depth, max_depth)),
+                target: target.clone(),
+            },
+            IRExpr::Bitcast { expr, target } => IRExpr::Bitcast {
                 expr: Box::new(self.expand_nested_macros(expr, depth, max_depth)),
                 target: target.clone(),
             },
@@ -1299,6 +1368,28 @@ impl IRBuilder {
         attrs.iter().map(|a| a.name.clone()).collect()
     }
 
+    fn ir_function_type(&self, name: &str) -> Option<DataType> {
+        let function = self
+            .ir
+            .functions
+            .iter()
+            .chain(
+                self.ir
+                    .impls
+                    .iter()
+                    .flat_map(|implementation| &implementation.methods),
+            )
+            .find(|function| function.name == name)?;
+        Some(DataType::Function {
+            parameters: function
+                .params
+                .iter()
+                .map(|parameter| parameter.ty.clone())
+                .collect(),
+            return_type: Box::new(function.return_type.clone()),
+        })
+    }
+
     /// Best-effort type inference for an IR expression. Used to infer the
     /// type of `var x = expr;` declarations that omit an explicit type, so
     /// that captured variables in lambdas get a concrete type instead of
@@ -1323,6 +1414,11 @@ impl IRBuilder {
                 for f in &self.ir.functions {
                     if f.name == *func {
                         return f.return_type.clone();
+                    }
+                }
+                for implementation in &self.ir.impls {
+                    if let Some(method) = implementation.methods.iter().find(|f| f.name == *func) {
+                        return method.return_type.clone();
                     }
                 }
                 DataType::Int
@@ -1388,6 +1484,7 @@ impl IRBuilder {
                 _ => self.infer_expr_type(operand),
             },
             IRExpr::Cast { target, .. } => target.clone(),
+            IRExpr::Bitcast { target, .. } => target.clone(),
             IRExpr::ArrayIndex { array, .. } => match self.infer_expr_type(array) {
                 DataType::Str => DataType::Str,
                 DataType::Array(element) => *element,
@@ -1395,18 +1492,67 @@ impl IRBuilder {
             },
             IRExpr::Assignment { target, .. } => self.infer_expr_type(target),
             IRExpr::ArrayLiteral(_) => DataType::Array(Box::new(DataType::Unknown)),
-            IRExpr::MemberAccess { .. } => DataType::Int,
-            IRExpr::FuncRef(name) => {
-                // Look up the referenced function's return type.
-                for f in &self.ir.functions {
-                    if f.name == *name {
-                        return f.return_type.clone();
+            IRExpr::MemberAccess { object, member } => {
+                if let DataType::Tuple(elements) = self.infer_expr_type(object) {
+                    if let Ok(index) = member.parse::<usize>() {
+                        return elements.get(index).cloned().unwrap_or(DataType::Unknown);
                     }
                 }
                 DataType::Int
             }
-            IRExpr::IndirectCall { .. } => DataType::Int,
+            IRExpr::FuncRef(name) => self.ir_function_type(name).unwrap_or(DataType::Unknown),
+            IRExpr::IndirectCall { callee, .. } => match self.infer_expr_type(callee) {
+                DataType::Function { return_type, .. } => *return_type,
+                _ => DataType::Unknown,
+            },
             IRExpr::None => DataType::None_,
+        }
+    }
+
+    fn enum_payload_type(
+        &self,
+        scrutinee_type: &DataType,
+        enum_name: &str,
+        variant_name: &str,
+        payload_index: usize,
+    ) -> DataType {
+        let Some(payload_type) = self
+            .enum_payload_types
+            .get(&(enum_name.to_string(), variant_name.to_string()))
+            .and_then(|types| types.get(payload_index))
+        else {
+            return DataType::Int;
+        };
+        let DataType::Struct(type_param) = payload_type else {
+            return payload_type.clone();
+        };
+        let Some(generic_params) = self.enum_generic_params.get(enum_name) else {
+            return payload_type.clone();
+        };
+        let Some(generic_index) = generic_params.iter().position(|param| param == type_param)
+        else {
+            return payload_type.clone();
+        };
+        let DataType::Struct(scrutinee_name) = scrutinee_type else {
+            return payload_type.clone();
+        };
+        let Some((_, arguments)) = scrutinee_name.split_once('<') else {
+            return payload_type.clone();
+        };
+        let Some(argument) = arguments
+            .trim_end_matches('>')
+            .split(',')
+            .nth(generic_index)
+        else {
+            return payload_type.clone();
+        };
+        match argument.trim() {
+            "int" => DataType::Int,
+            "float" => DataType::Float,
+            "str" => DataType::Str,
+            "bool" => DataType::Bool,
+            "byte" => DataType::Byte,
+            other => DataType::Struct(other.to_string()),
         }
     }
 
@@ -1586,24 +1732,37 @@ impl AstVisitor for IRBuilder {
             ty: DataType::Int,
         }];
 
+        let mut payload_types_by_variant = Vec::new();
         let mut variant_idx = 0i32;
         for variant in node.get_variants() {
-            // ---- 存储变体索引 ----
             self.variant_indices
                 .insert((name.clone(), variant.name.clone()), variant_idx);
-
-            if let Some(ref payload) = variant.payload_type {
-                let payload_ty = self.ast_type_to_data_type(Some(payload.as_ref()));
-                fields.push(IRField {
-                    name: format!("_{}", variant_idx),
-                    ty: payload_ty.clone(),
-                });
-            }
+            let payload_types = variant
+                .payload_types
+                .iter()
+                .map(|payload| self.ast_type_to_data_type(Some(payload.as_ref())))
+                .collect::<Vec<_>>();
+            self.enum_payload_types
+                .insert((name.clone(), variant.name.clone()), payload_types.clone());
+            payload_types_by_variant.push(payload_types);
             variant_idx += 1;
         }
 
-        let enum_attrs = Self::collect_attr_names(node.get_attributes());
+        let payload_count = payload_types_by_variant
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        fields.extend((0..payload_count).map(|index| IRField {
+            name: format!("_{}", index),
+            // Enum payloads share word-sized slots, like other runtime values.
+            ty: DataType::Int,
+        }));
 
+        self.enum_generic_params
+            .insert(name.clone(), generic_params.clone());
+        let mut enum_attrs = Self::collect_attr_names(node.get_attributes());
+        enum_attrs.push("__enum".to_string());
         let ir_struct = IRStruct {
             name: name.clone(),
             generic_params: generic_params.clone(),
@@ -1618,9 +1777,8 @@ impl AstVisitor for IRBuilder {
         // Generate variant constructor methods
         let mut methods = Vec::new();
         variant_idx = 0;
-        for variant in node.get_variants() {
-            let ctor_name = variant.name.clone();
-            let has_payload = variant.payload_type.is_some();
+        for (variant, payload_types) in node.get_variants().iter().zip(payload_types_by_variant) {
+            let ctor_name = format!("{}::{}", name, variant.name);
 
             let mut body_stmts = Vec::new();
 
@@ -1632,29 +1790,26 @@ impl AstVisitor for IRBuilder {
                 value: IRExpr::Literal(LitValue::Int(variant_idx as i64)),
             });
 
-            if has_payload {
-                body_stmts.push(IRStmt::Assignment {
-                    target: IRExpr::MemberAccess {
-                        object: Box::new(IRExpr::Variable("self".to_string())),
-                        member: format!("_{}", variant_idx),
-                    },
-                    value: IRExpr::Variable("_val".to_string()),
-                });
-            }
-
-            body_stmts.push(IRStmt::Return(Some(IRExpr::Variable("self".to_string()))));
-
             let mut params = vec![IRParam {
                 name: "self".to_string(),
                 ty: DataType::Struct(name.clone()),
             }];
-
-            if has_payload {
+            for payload_index in 0..payload_types.len() {
+                let payload_name = format!("__payload_{}", payload_index);
+                body_stmts.push(IRStmt::Assignment {
+                    target: IRExpr::MemberAccess {
+                        object: Box::new(IRExpr::Variable("self".to_string())),
+                        member: format!("_{}", payload_index),
+                    },
+                    value: IRExpr::Variable(payload_name.clone()),
+                });
                 params.push(IRParam {
-                    name: "_val".to_string(),
+                    name: payload_name,
                     ty: DataType::Int,
                 });
             }
+
+            body_stmts.push(IRStmt::Return(Some(IRExpr::Variable("self".to_string()))));
 
             let ir_func = IRFunction {
                 name: ctor_name.clone(),
@@ -1904,46 +2059,47 @@ impl AstVisitor for IRBuilder {
     }
 
     fn visit_declaration(&mut self, node: &Declaration) {
+        if self.in_function && node.source_line() > 0 {
+            self.current_block
+                .push(IRStmt::DebugLocation(node.source_line()));
+        }
         let name = node.get_name().to_string();
         let orig_type = node.get_type();
         let ty = self.ast_type_to_data_type(orig_type);
 
         // Extract fixed-size array size if applicable
         // Extract fixed-size array sizes for multi-dimensional arrays
-        let (arr_size, inner_size): (Option<i64>, Option<i64>) = if let Some(tp) = orig_type {
-            if let Some(arr) = tp.as_type_any().downcast_ref::<ArrayType>() {
-                let outer_size = if let Some(size_expr) = arr.get_size() {
-                    if let Some(num) = size_expr.as_any().downcast_ref::<NumberLiteral>() {
-                        Some(num.get_value() as i64)
+        let (arr_size, inner_size): (Option<IRExpr>, Option<IRExpr>) =
+            if node.get_initializer().is_none()
+                && let Some(tp) = orig_type
+            {
+                if let Some(arr) = tp.as_type_any().downcast_ref::<ArrayType>() {
+                    let outer_size = if let Some(size_expr) = arr.get_size() {
+                        size_expr.accept(self);
+                        Some(self.pop_expr())
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
-                // Check if element type is also an array (for 2D)
-                let inner_arr = arr.get_element_type();
-                let inner_size =
-                    if let Some(inner) = inner_arr.as_type_any().downcast_ref::<ArrayType>() {
-                        if let Some(size_expr) = inner.get_size() {
-                            if let Some(num) = size_expr.as_any().downcast_ref::<NumberLiteral>() {
-                                Some(num.get_value() as i64)
+                    };
+                    // Check if element type is also an array (for 2D)
+                    let inner_arr = arr.get_element_type();
+                    let inner_size =
+                        if let Some(inner) = inner_arr.as_type_any().downcast_ref::<ArrayType>() {
+                            if let Some(size_expr) = inner.get_size() {
+                                size_expr.accept(self);
+                                Some(self.pop_expr())
                             } else {
                                 None
                             }
                         } else {
                             None
-                        }
-                    } else {
-                        None
-                    };
-                (outer_size, inner_size)
+                        };
+                    (outer_size, inner_size)
+                } else {
+                    (None, None)
+                }
             } else {
                 (None, None)
-            }
-        } else {
-            (None, None)
-        };
+            };
 
         let init = if let Some(init_expr) = node.get_initializer() {
             // The initializer may be a control-flow expression (if/match/block)
@@ -1965,6 +2121,11 @@ impl AstVisitor for IRBuilder {
                 let mut sub = IRBuilder::new();
                 sub.generic_stack = self.generic_stack.clone();
                 sub.structs = self.structs.clone();
+                sub.variant_indices = self.variant_indices.clone();
+                sub.enum_payload_types = self.enum_payload_types.clone();
+                sub.enum_generic_params = self.enum_generic_params.clone();
+                sub.methods = self.methods.clone();
+                sub.var_types = self.var_types.clone();
                 sub.in_function = self.in_function;
                 // If it's a Block, iterate its statements. Otherwise run the
                 // `accept` on the node directly (it already implements
@@ -2011,17 +2172,14 @@ impl AstVisitor for IRBuilder {
                     // 2D array: gobol_array_new_2d(rows, cols)
                     Some(IRExpr::Call {
                         func: "gobol_array_new_2d".to_string(),
-                        args: vec![
-                            IRExpr::Literal(LitValue::Int(size)),
-                            IRExpr::Literal(LitValue::Int(inner)),
-                        ],
+                        args: vec![size, inner],
                         generic_args: vec![],
                     })
                 } else {
                     // 1D array: gobol_array_new_with_size(size)
                     Some(IRExpr::Call {
                         func: "gobol_array_new_with_size".to_string(),
-                        args: vec![IRExpr::Literal(LitValue::Int(size))],
+                        args: vec![size],
                         generic_args: vec![],
                     })
                 }
@@ -2067,6 +2225,10 @@ impl AstVisitor for IRBuilder {
     }
 
     fn visit_expression_statement(&mut self, node: &ExpressionStatement) {
+        if node.source_line() > 0 {
+            self.current_block
+                .push(IRStmt::DebugLocation(node.source_line()));
+        }
         if let Some(expr) = node.get_expression() {
             expr.accept(self);
             let ir_expr = self.pop_expr();
@@ -2080,6 +2242,10 @@ impl AstVisitor for IRBuilder {
     }
 
     fn visit_return_statement(&mut self, node: &ReturnStatement) {
+        if node.source_line() > 0 {
+            self.current_block
+                .push(IRStmt::DebugLocation(node.source_line()));
+        }
         let value = if let Some(expr) = node.get_value() {
             expr.accept(self);
             Some(self.pop_expr())
@@ -2090,6 +2256,10 @@ impl AstVisitor for IRBuilder {
     }
 
     fn visit_if_statement(&mut self, node: &IfStatement) {
+        if node.source_line() > 0 {
+            self.current_block
+                .push(IRStmt::DebugLocation(node.source_line()));
+        }
         // 条件
         let cond = if let Some(c) = node.get_condition() {
             c.accept(self);
@@ -2130,6 +2300,10 @@ impl AstVisitor for IRBuilder {
     }
 
     fn visit_while_statement(&mut self, node: &WhileStatement) {
+        if node.source_line() > 0 {
+            self.current_block
+                .push(IRStmt::DebugLocation(node.source_line()));
+        }
         let cond = if let Some(c) = node.get_condition() {
             c.accept(self);
             self.pop_expr()
@@ -2137,7 +2311,7 @@ impl AstVisitor for IRBuilder {
             IRExpr::Literal(LitValue::Bool(false))
         };
 
-        let body = if let Some(b) = node.get_body() {
+        let mut body = if let Some(b) = node.get_body() {
             let saved = std::mem::take(&mut self.current_block);
             b.accept(self);
             IRBlock {
@@ -2147,14 +2321,26 @@ impl AstVisitor for IRBuilder {
             IRBlock { statements: vec![] }
         };
 
+        if node.source_line() > 0 {
+            body.statements
+                .insert(0, IRStmt::DebugLocation(node.source_line()));
+        }
         self.current_block.push(IRStmt::While { cond, body });
     }
 
-    fn visit_break_statement(&mut self, _node: &BreakStatement) {
+    fn visit_break_statement(&mut self, node: &BreakStatement) {
+        if node.source_line() > 0 {
+            self.current_block
+                .push(IRStmt::DebugLocation(node.source_line()));
+        }
         self.current_block.push(IRStmt::Break);
     }
 
-    fn visit_continue_statement(&mut self, _node: &ContinueStatement) {
+    fn visit_continue_statement(&mut self, node: &ContinueStatement) {
+        if node.source_line() > 0 {
+            self.current_block
+                .push(IRStmt::DebugLocation(node.source_line()));
+        }
         self.current_block.push(IRStmt::Continue);
     }
 
@@ -2605,14 +2791,16 @@ impl AstVisitor for IRBuilder {
 
         // 2. Evaluate the scrutinee once; arm conditions may otherwise repeat
         // side-effecting calls such as socket bind/connect.
+        let scrutinee_type = self.infer_expr_type(&scrutinee);
         let scrutinee_name = format!("__match_value_{}", self.tmp_counter);
         self.tmp_counter += 1;
         self.current_block.push(IRStmt::Declaration {
             name: scrutinee_name.clone(),
-            ty: DataType::Int,
+            ty: scrutinee_type.clone(),
             init: Some(scrutinee),
         });
-        self.var_types.insert(scrutinee_name.clone(), DataType::Int);
+        self.var_types
+            .insert(scrutinee_name.clone(), scrutinee_type.clone());
         let scrutinee = IRExpr::Variable(scrutinee_name);
 
         // 3. Create temp variable for match result
@@ -2649,25 +2837,61 @@ impl AstVisitor for IRBuilder {
             if let Some(body) = &arm.body {
                 let mut sub_builder = IRBuilder::new();
                 sub_builder.generic_stack = self.generic_stack.clone();
+                sub_builder.structs = self.structs.clone();
+                sub_builder.variant_indices = self.variant_indices.clone();
+                sub_builder.enum_payload_types = self.enum_payload_types.clone();
+                sub_builder.enum_generic_params = self.enum_generic_params.clone();
+                sub_builder.methods = self.methods.clone();
+                sub_builder.var_types = self.var_types.clone();
                 sub_builder.block_depth = 2;
 
                 if let MatchPattern::EnumVariant {
-                    payload: Some(payload),
+                    enum_name,
+                    variant_name,
+                    payloads,
                     ..
                 } = &arm.pattern
                 {
-                    if let MatchPattern::Variable(bind_name) = payload.as_ref() {
+                    let enum_name = if enum_name.is_empty() {
+                        match &scrutinee_type {
+                            DataType::Struct(name) => {
+                                name.split('<').next().unwrap_or(name).to_string()
+                            }
+                            _ => String::new(),
+                        }
+                    } else {
+                        enum_name.split('<').next().unwrap_or(enum_name).to_string()
+                    };
+                    for (payload_index, payload) in payloads.iter().enumerate() {
+                        let MatchPattern::Variable(bind_name) = payload else {
+                            continue;
+                        };
+                        let binding_type = self.enum_payload_type(
+                            &scrutinee_type,
+                            &enum_name,
+                            variant_name,
+                            payload_index,
+                        );
+                        let field = IRExpr::MemberAccess {
+                            object: Box::new(scrutinee.clone()),
+                            member: format!("_{}", payload_index),
+                        };
+                        let init = if binding_type == DataType::Float {
+                            IRExpr::Bitcast {
+                                expr: Box::new(field),
+                                target: DataType::Float,
+                            }
+                        } else {
+                            field
+                        };
                         sub_builder.current_block.push(IRStmt::Declaration {
                             name: bind_name.clone(),
-                            ty: DataType::Int,
-                            init: Some(IRExpr::MemberAccess {
-                                object: Box::new(scrutinee.clone()),
-                                member: "_0".to_string(),
-                            }),
+                            ty: binding_type.clone(),
+                            init: Some(init),
                         });
                         sub_builder
                             .var_types
-                            .insert(bind_name.clone(), DataType::Int);
+                            .insert(bind_name.clone(), binding_type);
                     }
                 }
 
@@ -2910,12 +3134,16 @@ impl AstVisitor for IRBuilder {
     fn visit_pointer_type(&mut self, _node: &PointerType) {}
     fn visit_array_type(&mut self, _node: &ArrayType) {}
     fn visit_for_statement(&mut self, node: &ForStatement) {
+        if node.source_line() > 0 {
+            self.current_block
+                .push(IRStmt::DebugLocation(node.source_line()));
+        }
         let vars = node.get_loop_variables().clone();
         if !vars.is_empty() {
             if let Some(iterable) = node.get_iterable() {
                 iterable.accept(self);
                 let iter_expr = self.pop_expr();
-                let body = if let Some(b) = node.get_body() {
+                let mut body = if let Some(b) = node.get_body() {
                     let saved = std::mem::take(&mut self.current_block);
                     b.accept(self);
                     IRBlock {
@@ -2924,6 +3152,10 @@ impl AstVisitor for IRBuilder {
                 } else {
                     IRBlock { statements: vec![] }
                 };
+                if node.source_line() > 0 {
+                    body.statements
+                        .insert(0, IRStmt::DebugLocation(node.source_line()));
+                }
                 self.current_block.push(IRStmt::For {
                     vars,
                     iterable: iter_expr,
@@ -3190,6 +3422,16 @@ pub struct Monomorphizer {
     /// 无法被实例化的泛型模板名（推断失败，或实例化到达深度上限）。这些
     /// 名字对应的原模板会被保留到输出作为兜底，避免调用点悬空。
     deferred: HashSet<String>,
+    generic_methods: HashMap<String, GenericMethodTemplate>,
+    struct_templates: HashMap<String, IRStruct>,
+    specialized_structs: Vec<IRStruct>,
+}
+
+#[derive(Clone)]
+struct GenericMethodTemplate {
+    function: IRFunction,
+    struct_params: Vec<String>,
+    method_params: Vec<String>,
 }
 
 /// 单态化递归展开的最大嵌套深度。超过该深度的泛型调用不再展开，改为保留
@@ -3205,6 +3447,9 @@ impl Monomorphizer {
             used_names: HashSet::new(),
             expand_depth: 0,
             deferred: HashSet::new(),
+            generic_methods: HashMap::new(),
+            struct_templates: HashMap::new(),
+            specialized_structs: Vec::new(),
         }
     }
 
@@ -3215,6 +3460,7 @@ impl Monomorphizer {
         // 收集需要单态化的泛型模板（按名字索引），以及所有函数的返回类型
         //（供调用点实参推断使用）。泛型模板必须是顶层、带函数体。
         let mut generic_by_name: HashMap<String, IRFunction> = HashMap::new();
+        let mut generic_methods: HashMap<String, GenericMethodTemplate> = HashMap::new();
         let mut returns_by_name: HashMap<String, DataType> = HashMap::new();
         for f in &ir.functions {
             returns_by_name.insert(f.name.clone(), f.return_type.clone());
@@ -3229,6 +3475,38 @@ impl Monomorphizer {
                 returns_by_name
                     .entry(prefixed_name)
                     .or_insert_with(|| method.return_type.clone());
+
+                let mut method_params: Vec<String> = method
+                    .generic_params
+                    .iter()
+                    .filter(|param| !imp.generic_params.contains(param))
+                    .cloned()
+                    .collect();
+                method_params.dedup();
+                let mut all_params = imp.generic_params.clone();
+                for param in &method_params {
+                    if !all_params.contains(param) {
+                        all_params.push(param.clone());
+                    }
+                }
+                if !all_params.is_empty() && method.body.is_some() {
+                    let mut function = method.clone();
+                    function.generic_params = all_params;
+                    let base_name = imp
+                        .struct_name
+                        .split('<')
+                        .next()
+                        .unwrap_or(&imp.struct_name);
+                    let method_name = method.name.rsplit("::").next().unwrap_or(&method.name);
+                    generic_methods.insert(
+                        format!("{}::{}#{}", base_name, method_name, method.params.len()),
+                        GenericMethodTemplate {
+                            function,
+                            struct_params: imp.generic_params.clone(),
+                            method_params,
+                        },
+                    );
+                }
             }
         }
 
@@ -3239,6 +3517,24 @@ impl Monomorphizer {
         self.used_names.clear();
         self.expand_depth = 0;
         self.deferred.clear();
+        self.generic_methods = generic_methods;
+        self.struct_templates = ir
+            .structs
+            .iter()
+            .filter(|definition| !definition.generic_params.is_empty())
+            .map(|definition| {
+                (
+                    definition
+                        .name
+                        .split('<')
+                        .next()
+                        .unwrap_or(&definition.name)
+                        .to_string(),
+                    definition.clone(),
+                )
+            })
+            .collect();
+        self.specialized_structs.clear();
 
         // 输出：非泛型函数原样保留；无函数体的运行时泛型（println 等）保留
         // 原名、清空泛型信息。泛型模板本身不输出，只输出它派生的实例。
@@ -3253,9 +3549,28 @@ impl Monomorphizer {
             }
             if let Some(body) = &mut f.body {
                 self.var_types.clear();
+                for parameter in &f.params {
+                    self.var_types
+                        .insert(parameter.name.clone(), parameter.ty.clone());
+                }
                 self.rewrite_block(body, &generic_by_name, &mut returns_by_name);
             }
             out.push(f);
+        }
+
+        for implementation in &mut result.impls {
+            if implementation.generic_params.is_empty() {
+                for method in &mut implementation.methods {
+                    if let Some(body) = &mut method.body {
+                        self.var_types.clear();
+                        for parameter in &method.params {
+                            self.var_types
+                                .insert(parameter.name.clone(), parameter.ty.clone());
+                        }
+                        self.rewrite_block(body, &generic_by_name, &mut returns_by_name);
+                    }
+                }
+            }
         }
 
         // 兜底：对于「至少有一个调用点无法被实例化」的泛型模板（推断失败，
@@ -3268,6 +3583,9 @@ impl Monomorphizer {
         }
 
         out.extend(std::mem::take(&mut self.generated));
+        result
+            .structs
+            .extend(std::mem::take(&mut self.specialized_structs));
         result.functions = out;
         result
     }
@@ -3283,27 +3601,48 @@ impl Monomorphizer {
         let saved_var_types = self.var_types.clone();
         for stmt in &mut block.statements {
             match stmt {
+                IRStmt::DebugLocation(_) => {}
                 IRStmt::Declaration { name, ty, init } => {
                     if let Some(init) = init {
                         self.rewrite_expr(init, generic_by_name, returns_by_name);
                         let t = self.infer_concrete_type(init, &*returns_by_name);
                         if !matches!(t, DataType::Unknown) {
-                            self.var_types.insert(name.clone(), t.clone());
+                            let declared_instance = matches!(
+                                (&*ty, &t),
+                                (DataType::Struct(declared), DataType::Struct(inferred))
+                                    if declared.contains('<') && inferred.contains('<')
+                            );
+                            let declared_array = matches!(&*ty, DataType::Array(_));
+                            let effective_type = if declared_instance || declared_array {
+                                ty.clone()
+                            } else {
+                                t.clone()
+                            };
+                            self.var_types.insert(name.clone(), effective_type);
                             // 若声明类型仍是悬空的泛型占位符（`Struct("T")`，来自
                             // 泛型模板的返回类型，在调用方没有具体含义）而推断出的是
                             // 具体基础类型，则用后者替换 `ty`，避免 Cranelift
                             // “声明类型与值类型不符”的失配。
                             let inferred_non_numeric = matches!(
                                 t,
-                                DataType::Str | DataType::Struct(_) | DataType::Array(_)
+                                DataType::Str
+                                    | DataType::Struct(_)
+                                    | DataType::Array(_)
+                                    | DataType::Tuple(_)
+                                    | DataType::Function { .. }
                             );
-                            if (matches!(*ty, DataType::Struct(_))
-                                && !matches!(t, DataType::Struct(_) | DataType::None_))
-                                || (*ty == DataType::Int && inferred_non_numeric)
+                            if !declared_instance
+                                && ((matches!(*ty, DataType::Struct(_))
+                                    && !matches!(t, DataType::Struct(_) | DataType::None_))
+                                    || (*ty == DataType::Int && inferred_non_numeric))
                             {
                                 *ty = t;
                             }
+                        } else if !matches!(*ty, DataType::Unknown | DataType::None_) {
+                            self.var_types.insert(name.clone(), ty.clone());
                         }
+                    } else if !matches!(*ty, DataType::Unknown | DataType::None_) {
+                        self.var_types.insert(name.clone(), ty.clone());
                     }
                 }
                 IRStmt::Expression(e) => {
@@ -3329,9 +3668,25 @@ impl Monomorphizer {
                     self.rewrite_expr(cond, generic_by_name, returns_by_name);
                     self.rewrite_block(body, generic_by_name, returns_by_name);
                 }
-                IRStmt::For { iterable, body, .. } => {
+                IRStmt::For {
+                    vars,
+                    iterable,
+                    body,
+                } => {
                     self.rewrite_expr(iterable, generic_by_name, returns_by_name);
+                    let saved_var_types = self.var_types.clone();
+                    if let DataType::Array(element_type) =
+                        self.infer_concrete_type(iterable, returns_by_name)
+                    {
+                        if vars.len() >= 2 {
+                            self.var_types.insert(vars[0].clone(), DataType::Int);
+                            self.var_types.insert(vars[1].clone(), *element_type);
+                        } else if let Some(value_name) = vars.first() {
+                            self.var_types.insert(value_name.clone(), *element_type);
+                        }
+                    }
                     self.rewrite_block(body, generic_by_name, returns_by_name);
+                    self.var_types = saved_var_types;
                 }
                 IRStmt::Assignment { target, value } => {
                     self.rewrite_expr(target, generic_by_name, returns_by_name);
@@ -3352,6 +3707,13 @@ impl Monomorphizer {
                         generic_by_name,
                         returns_by_name,
                     );
+                    self.maybe_rewrite_static_method_call(
+                        func,
+                        args,
+                        generic_args,
+                        generic_by_name,
+                        returns_by_name,
+                    );
                 }
                 IRStmt::MethodCall {
                     object,
@@ -3363,28 +3725,14 @@ impl Monomorphizer {
                     for a in args.iter_mut() {
                         self.rewrite_expr(a, generic_by_name, returns_by_name);
                     }
-                    // 方法调用若能解析为结构体方法，则形如 S::method。
-                    let target = if let IRExpr::Variable(sname) = object.as_ref() {
-                        format!("{}::{}", sname, method)
-                    } else {
-                        method.clone()
-                    };
-                    if generic_by_name.contains_key(&target) {
-                        let args2: Vec<IRExpr> = args.clone();
-                        let mut target = target;
-                        self.maybe_rewrite_call(
-                            &mut target,
-                            &args2,
-                            generic_args,
-                            generic_by_name,
-                            returns_by_name,
-                        );
-                        *method = target
-                            .rsplit("::")
-                            .next()
-                            .map(|m| m.to_string())
-                            .unwrap_or(target);
-                    }
+                    self.maybe_rewrite_method_call(
+                        object,
+                        method,
+                        args,
+                        generic_args,
+                        generic_by_name,
+                        returns_by_name,
+                    );
                 }
                 IRStmt::Break | IRStmt::Continue => {}
             }
@@ -3415,6 +3763,13 @@ impl Monomorphizer {
                     generic_by_name,
                     returns_by_name,
                 );
+                self.maybe_rewrite_static_method_call(
+                    func,
+                    args,
+                    generic_args,
+                    generic_by_name,
+                    returns_by_name,
+                );
             }
             IRExpr::MethodCall {
                 object,
@@ -3426,27 +3781,14 @@ impl Monomorphizer {
                 for a in args.iter_mut() {
                     self.rewrite_expr(a, generic_by_name, returns_by_name);
                 }
-                let args2 = args.clone();
-                let target = if let IRExpr::Variable(sname) = object.as_ref() {
-                    format!("{}::{}", sname, method)
-                } else {
-                    method.clone()
-                };
-                if generic_by_name.contains_key(&target) {
-                    let mut target = target;
-                    self.maybe_rewrite_call(
-                        &mut target,
-                        &args2,
-                        generic_args,
-                        generic_by_name,
-                        returns_by_name,
-                    );
-                    *method = target
-                        .rsplit("::")
-                        .next()
-                        .map(|m| m.to_string())
-                        .unwrap_or(target);
-                }
+                self.maybe_rewrite_method_call(
+                    object,
+                    method,
+                    args,
+                    generic_args,
+                    generic_by_name,
+                    returns_by_name,
+                );
             }
             IRExpr::Binary { left, right, .. } => {
                 self.rewrite_expr(left, generic_by_name, returns_by_name);
@@ -3472,7 +3814,7 @@ impl Monomorphizer {
                     self.rewrite_expr(e, generic_by_name, returns_by_name);
                 }
             }
-            IRExpr::Cast { expr, .. } => {
+            IRExpr::Cast { expr, .. } | IRExpr::Bitcast { expr, .. } => {
                 self.rewrite_expr(expr, generic_by_name, returns_by_name);
             }
             IRExpr::Assignment { target, value } => {
@@ -3522,6 +3864,218 @@ impl Monomorphizer {
             return;
         };
         *func = instance_name;
+    }
+
+    fn maybe_rewrite_method_call(
+        &mut self,
+        object: &IRExpr,
+        method: &mut String,
+        args: &[IRExpr],
+        generic_args: &[DataType],
+        generic_by_name: &HashMap<String, IRFunction>,
+        returns_by_name: &mut HashMap<String, DataType>,
+    ) {
+        let receiver_type = self.infer_concrete_type(object, returns_by_name);
+        let DataType::Struct(receiver_name) = receiver_type else {
+            return;
+        };
+        let (base_name, struct_args) =
+            parse_generic_type_name(&receiver_name).unwrap_or((receiver_name.clone(), Vec::new()));
+        let method_name = method.rsplit("::").next().unwrap_or(method);
+        let template_key = format!("{}::{}#{}", base_name, method_name, args.len() + 1);
+        let Some(generic_method) = self.generic_methods.get(&template_key).cloned() else {
+            return;
+        };
+        if generic_method.struct_params.len() != struct_args.len() {
+            return;
+        }
+
+        let struct_bindings: HashMap<String, DataType> = generic_method
+            .struct_params
+            .iter()
+            .cloned()
+            .zip(struct_args.iter().cloned())
+            .collect();
+        let mut method_template = generic_method.function.clone();
+        for parameter in &mut method_template.params {
+            parameter.ty = if parameter.name == "self" {
+                DataType::Struct(receiver_name.clone())
+            } else {
+                self.substitute_type(&parameter.ty, &struct_bindings)
+            };
+        }
+        method_template.return_type =
+            self.substitute_type(&method_template.return_type, &struct_bindings);
+        method_template.generic_params = generic_method.method_params.clone();
+
+        let mut call_args = Vec::with_capacity(args.len() + 1);
+        call_args.push(object.clone());
+        call_args.extend_from_slice(args);
+        let Some(method_args) =
+            self.infer_type_args(&method_template, &call_args, generic_args, returns_by_name)
+        else {
+            return;
+        };
+        let mut type_args = struct_args.clone();
+        type_args.extend(method_args.iter().cloned());
+        let instance_key = (template_key.clone(), type_args.clone());
+        if let Some(instance_name) = self.instances.get(&instance_key) {
+            *method = instance_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(method)
+                .to_string();
+            return;
+        }
+        if self.expand_depth >= MAX_INSTANCE_DEPTH {
+            return;
+        }
+
+        let specialized_method = if method_args.is_empty() {
+            method_name.to_string()
+        } else {
+            format!(
+                "{}__{}",
+                method_name,
+                method_args
+                    .iter()
+                    .map(sanitize_type_name)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            )
+        };
+        let instance_name = format!("{}::{}", receiver_name, specialized_method);
+        self.instances.insert(instance_key, instance_name.clone());
+        self.used_names.insert(instance_name.clone());
+
+        if !generic_method.struct_params.is_empty()
+            && !self
+                .specialized_structs
+                .iter()
+                .any(|definition| definition.name == receiver_name)
+        {
+            if let Some(template) = self.struct_templates.get(&base_name) {
+                let mut definition = template.clone();
+                definition.name = receiver_name.clone();
+                definition.generic_params.clear();
+                for field in &mut definition.fields {
+                    field.ty = self.substitute_type(&field.ty, &struct_bindings);
+                }
+                self.specialized_structs.push(definition);
+            }
+        }
+
+        let mut type_bindings = struct_bindings;
+        type_bindings.extend(
+            generic_method
+                .method_params
+                .iter()
+                .cloned()
+                .zip(method_args),
+        );
+        let specialized_owner = receiver_name.clone();
+        let mut instance = generic_method.function;
+        instance.name = instance_name.clone();
+        instance.struct_name = Some(specialized_owner.clone());
+        instance.generic_params.clear();
+        for parameter in &mut instance.params {
+            parameter.ty = if parameter.name == "self" {
+                DataType::Struct(specialized_owner.clone())
+            } else {
+                self.substitute_type(&parameter.ty, &type_bindings)
+            };
+        }
+        instance.return_type = self.substitute_type(&instance.return_type, &type_bindings);
+        if let Some(body) = &mut instance.body {
+            self.substitute_in_block(body, &type_bindings);
+            let saved_var_types = self.var_types.clone();
+            self.expand_depth += 1;
+            self.var_types.clear();
+            for parameter in &instance.params {
+                self.var_types
+                    .insert(parameter.name.clone(), parameter.ty.clone());
+            }
+            self.rewrite_block(body, generic_by_name, returns_by_name);
+            self.expand_depth -= 1;
+            self.var_types = saved_var_types;
+        }
+        returns_by_name.insert(instance_name.clone(), instance.return_type.clone());
+        self.generated.push(instance);
+        *method = specialized_method;
+    }
+
+    fn maybe_rewrite_static_method_call(
+        &mut self,
+        function: &mut String,
+        args: &[IRExpr],
+        generic_args: &[DataType],
+        generic_by_name: &HashMap<String, IRFunction>,
+        returns_by_name: &mut HashMap<String, DataType>,
+    ) {
+        let (owner, method_name) = function
+            .rsplit_once("::")
+            .unwrap_or(("", function.as_str()));
+        if let Some((object, method_args)) = args.split_first() {
+            if let DataType::Struct(receiver_name) =
+                self.infer_concrete_type(object, returns_by_name)
+            {
+                let receiver_base = receiver_name
+                    .split('<')
+                    .next()
+                    .unwrap_or(&receiver_name)
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&receiver_name);
+                let owner_base = owner.rsplit("::").next().unwrap_or(owner);
+                if owner.is_empty() || receiver_base == owner_base {
+                    let mut specialized_method = method_name.to_string();
+                    self.maybe_rewrite_method_call(
+                        object,
+                        &mut specialized_method,
+                        method_args,
+                        generic_args,
+                        generic_by_name,
+                        returns_by_name,
+                    );
+                    if specialized_method != method_name {
+                        *function = format!("{}::{}", receiver_name, specialized_method);
+                    }
+                    return;
+                }
+            }
+        }
+        if owner.is_empty() {
+            return;
+        }
+        let specialized_owner = if !owner.contains('<') && !generic_args.is_empty() {
+            format!(
+                "{}<{}>",
+                owner,
+                generic_args
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            owner.to_string()
+        };
+        let mut method_name = method_name.to_string();
+        let type_object = IRExpr::StructLiteral {
+            name: specialized_owner.clone(),
+            fields: Vec::new(),
+        };
+        self.maybe_rewrite_method_call(
+            &type_object,
+            &mut method_name,
+            args,
+            generic_args,
+            generic_by_name,
+            returns_by_name,
+        );
+        if method_name != function.rsplit("::").next().unwrap_or(function) {
+            *function = format!("{}::{}", specialized_owner, method_name);
+        }
     }
 
     /// 为泛型模板在某一组具体类型下的调用求实例；若已存在则直接返回其实例名。
@@ -3774,7 +4328,17 @@ impl Monomorphizer {
                 }
                 DataType::Unknown
             }
+            IRExpr::MemberAccess { object, member } => {
+                if let DataType::Tuple(elements) = self.infer_concrete_type(object, returns_by_name)
+                {
+                    if let Ok(index) = member.parse::<usize>() {
+                        return elements.get(index).cloned().unwrap_or(DataType::Unknown);
+                    }
+                }
+                DataType::Unknown
+            }
             IRExpr::Cast { target, .. } => target.clone(),
+            IRExpr::Bitcast { target, .. } => target.clone(),
             IRExpr::ArrayLiteral(items) => {
                 let elem = items
                     .first()
@@ -3820,6 +4384,14 @@ impl Monomorphizer {
             DataType::Struct(name) => {
                 if let Some(actual) = type_map.get(name) {
                     actual.clone()
+                } else if let Some((base_name, arguments)) = parse_generic_type_name(name) {
+                    let arguments = arguments
+                        .iter()
+                        .map(|argument| self.substitute_type(argument, type_map))
+                        .map(|argument| argument.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    DataType::Struct(format!("{}<{}>", base_name, arguments))
                 } else {
                     dt.clone()
                 }
@@ -3830,6 +4402,28 @@ impl Monomorphizer {
             DataType::Array(inner) => {
                 DataType::Array(Box::new(self.substitute_type(inner, type_map)))
             }
+            DataType::Tuple(elements) => DataType::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.substitute_type(element, type_map))
+                    .collect(),
+            ),
+            DataType::Reference(inner) => {
+                DataType::Reference(Box::new(self.substitute_type(inner, type_map)))
+            }
+            DataType::Pointer(inner) => {
+                DataType::Pointer(Box::new(self.substitute_type(inner, type_map)))
+            }
+            DataType::Function {
+                parameters,
+                return_type,
+            } => DataType::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| self.substitute_type(parameter, type_map))
+                    .collect(),
+                return_type: Box::new(self.substitute_type(return_type, type_map)),
+            },
             _ => dt.clone(),
         }
     }
@@ -3839,6 +4433,7 @@ impl Monomorphizer {
     fn substitute_in_block(&self, block: &mut IRBlock, type_map: &HashMap<String, DataType>) {
         for stmt in &mut block.statements {
             match stmt {
+                IRStmt::DebugLocation(_) => {}
                 IRStmt::Declaration { ty, init, .. } => {
                     *ty = self.substitute_type(ty, type_map);
                     if let Some(init) = init {
@@ -3941,12 +4536,25 @@ impl Monomorphizer {
                     self.substitute_in_expr(it, type_map);
                 }
             }
-            IRExpr::StructLiteral { fields, .. } => {
+            IRExpr::StructLiteral { name, fields } => {
+                if let Some((base_name, arguments)) = parse_generic_type_name(name) {
+                    let arguments = arguments
+                        .iter()
+                        .map(|argument| self.substitute_type(argument, type_map))
+                        .map(|argument| argument.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    *name = format!("{}<{}>", base_name, arguments);
+                }
                 for (_, e) in fields.iter_mut() {
                     self.substitute_in_expr(e, type_map);
                 }
             }
             IRExpr::Cast { expr, target } => {
+                self.substitute_in_expr(expr, type_map);
+                *target = self.substitute_type(target, type_map);
+            }
+            IRExpr::Bitcast { expr, target } => {
                 self.substitute_in_expr(expr, type_map);
                 *target = self.substitute_type(target, type_map);
             }
@@ -3962,6 +4570,61 @@ impl Monomorphizer {
             }
             _ => {}
         }
+    }
+}
+
+fn parse_generic_type_name(name: &str) -> Option<(String, Vec<DataType>)> {
+    let open = name.find('<')?;
+    if !name.ends_with('>') {
+        return None;
+    }
+    let base_name = name[..open].trim().to_string();
+    let arguments = &name[open + 1..name.len() - 1];
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in arguments.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(arguments[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if !arguments.trim().is_empty() {
+        parts.push(arguments[start..].trim());
+    }
+    Some((
+        base_name,
+        parts.into_iter().map(parse_data_type_name).collect(),
+    ))
+}
+
+fn parse_data_type_name(name: &str) -> DataType {
+    let name = name.trim();
+    if let Some(inner) = name.strip_suffix("[]") {
+        return DataType::Array(Box::new(parse_data_type_name(inner)));
+    }
+    if let Some(inner) = name.strip_suffix('?') {
+        return DataType::Nullable(Box::new(parse_data_type_name(inner)));
+    }
+    if let Some(inner) = name.strip_prefix('&') {
+        return DataType::Reference(Box::new(parse_data_type_name(inner)));
+    }
+    if let Some(inner) = name.strip_prefix('*') {
+        return DataType::Pointer(Box::new(parse_data_type_name(inner)));
+    }
+    match name {
+        "int" => DataType::Int,
+        "float" => DataType::Float,
+        "str" => DataType::Str,
+        "bool" => DataType::Bool,
+        "byte" => DataType::Byte,
+        "none" | "()" => DataType::None_,
+        _ => DataType::Struct(name.to_string()),
     }
 }
 

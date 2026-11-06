@@ -1,0 +1,17 @@
+[package]
+name = "gobol-codegen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gobol-common = { workspace = true }
+gobol-ir = { workspace = true }
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-object = { workspace = true }
+target-lexicon = { workspace = true }
+cc = { workspace = true }
+
+[dev-dependencies]
+gobol-frontend = { workspace = true }

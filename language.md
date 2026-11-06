@@ -243,11 +243,12 @@ Lambda type parameters may be written after `lambda`, for example
 func identity<T>(x: T): T {
     x
 }
-
-func max<T: Comparable>(a: T, b: T): T {
-    if a > b { a } else { b }
-}
 ```
+
+Generic functions currently support type parameters without trait bounds. The
+`T: Trait` constraint syntax is not implemented yet.
+
+泛型函数目前支持不带 trait 约束的类型参数；`T: Trait` 约束语法尚未实现。
 
 ---
 
@@ -351,9 +352,9 @@ var dist = p.distance();
 
 ### 7.1 Enum Definition / 枚举定义
 
-Enums are lowered to tagged structs at compile time. Each variant becomes a constructor function in the enum's namespace. Variants can carry an optional payload type.
+Enums are lowered to tagged structs at compile time. Each variant becomes a constructor function in the enum's namespace. Variants can carry zero or more positional payload types.
 
-枚举在编译时被降级为标记结构体。每个变体成为枚举命名空间中的构造函数。变体可以携带可选的负载类型。
+枚举在编译时被降级为标记结构体。每个变体成为枚举命名空间中的构造函数。变体可以携带零个或多个位置负载类型。
 
 ```gobol
 // Unit enum — no payload / 无负载枚举
@@ -382,21 +383,33 @@ enum Result<T, E> {
 
 var ok = Result::Ok(100);
 var err = Result::Err("not found");
+
+// Multiple payloads / 多个负载
+enum Entry {
+    KeyValue(str, int),
+    Empty,
+}
+
+var entry = Entry::KeyValue("answer", 42);
+var count = match entry {
+    Entry::KeyValue(key, value) => value,
+    Entry::Empty => 0,
+};
 ```
 
-The compiler lowers each enum to a tagged struct with a `_tag` field (integer discriminant) and indexed payload fields (`_0`, `_1`, …). Variant constructors are generated as methods that set the tag and payload, then return `self`.
+The compiler lowers each enum to a tagged struct with a `_tag` field (integer discriminant) and word-sized payload slots (`_0`, `_1`, …). Slots are reused by position across variants. Variant constructors set the tag and each payload slot, then return `self`. In a `match`, payload patterns must bind one variable or wildcard per declared payload, for example `Entry::KeyValue(key, value)`.
 
-编译器将每个枚举降级为标记结构体，包含 `_tag` 字段（整数判别值）和索引负载字段（`_0`、`_1`……）。变体构造函数被生成为设置 tag 和负载并返回 `self` 的方法。
+编译器将每个枚举降级为标记结构体，包含 `_tag` 字段（整数判别值）和按位置复用的机器字负载槽（`_0`、`_1`……）。变体构造函数设置 tag 和每个负载槽后返回 `self`。`match` 模式必须为每个负载提供一个变量或通配符，例如 `Entry::KeyValue(key, value)`。
 
-> **Note on named fields**: The planned syntax `Variant(name: Type)` with named fields is not yet supported; variants currently carry a single anonymous payload type: `Variant(Type)`.
+> **Note on named fields**: The syntax `Variant(name: Type)` with named fields is not yet supported; payloads are positional and anonymous.
 
-> **关于命名字段**: 规划中的 `Variant(name: Type)` 命名字段语法尚未支持；变体目前仅携带单一匿名负载类型：`Variant(Type)`。
+> **关于命名字段**: `Variant(name: Type)` 命名字段语法尚未支持；负载按位置传递且不命名。
 
 ### 7.2 Result Type / Result 类型
 
-The `Result<T, E>` type (`std/result.gbl`) provides error handling via a tagged struct pattern. It has a `_tag` field (0 = Ok, 1 = Err) and `_value`/`_error` payloads.
+The `Result<T, E>` type (`std/result.gbl`) provides error handling via a tagged struct pattern. It has a `_tag` field (0 = Ok, 1 = Err) and a shared payload slot containing the active variant's value.
 
-`Result<T, E>` 类型（`std/result.gbl`）通过标记结构体模式提供错误处理。它包含 `_tag` 字段（0 = Ok，1 = Err）以及 `_value`/`_error` 负载。
+`Result<T, E>` 类型（`std/result.gbl`）通过标记结构体模式提供错误处理。它包含 `_tag` 字段（0 = Ok，1 = Err）以及存放当前变体值的共享负载槽。
 
 | Method / 方法 | Signature / 签名 | Description / 描述 |
 |:---|:---|:---|

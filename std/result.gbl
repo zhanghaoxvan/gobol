@@ -1,7 +1,7 @@
 // std/result.gbl — Error handling via Result<T, E>.
 //
 // Result is declared as a native enum. The compiler lowers it to a tagged
-// struct with _tag (0 = Ok, 1 = Err) and payload fields _0, _1.
+// struct with _tag (0 = Ok, 1 = Err) and a shared _0 payload slot.
 // Variant constructors Ok(value) and Err(error) are auto-generated.
 //
 // The ? operator desugars at the IR level to:
@@ -43,7 +43,7 @@ impl<T, E> Result<T, E> {
         if self._tag == 0 {
             self._0
         } else {
-            fallback(self._1)
+            fallback(self._0)
         }
     }
 
@@ -55,7 +55,7 @@ impl<T, E> Result<T, E> {
         if self._tag == 0 {
             Result<U, E>::Ok(f(self._0))
         } else {
-            Result<U, E>::Err(self._1)
+            Result<U, E>::Err(self._0)
         }
     }
 }

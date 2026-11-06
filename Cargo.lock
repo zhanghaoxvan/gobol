@@ -458,24 +458,80 @@ dependencies = [
 ]
 
 [[package]]
-name = "gobol"
+name = "gobol-cli"
+version = "0.2.0"
+dependencies = [
+ "colored",
+ "gobol-codegen",
+ "gobol-common",
+ "gobol-frontend",
+ "gobol-ir",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "gobol-codegen"
 version = "0.2.0"
 dependencies = [
  "cc",
- "colored",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-module",
  "cranelift-object",
- "dashmap 6.2.1",
- "git2",
- "serde",
- "serde_json",
+ "gobol-common",
+ "gobol-frontend",
+ "gobol-ir",
  "target-lexicon",
+]
+
+[[package]]
+name = "gobol-common"
+version = "0.2.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "gobol-frontend"
+version = "0.2.0"
+dependencies = [
+ "gobol-common",
+]
+
+[[package]]
+name = "gobol-ir"
+version = "0.2.0"
+dependencies = [
+ "gobol-common",
+ "gobol-frontend",
+ "serde",
+]
+
+[[package]]
+name = "gobol-lsp"
+version = "0.2.0"
+dependencies = [
+ "dashmap 6.2.1",
+ "gobol-common",
+ "gobol-frontend",
+ "serde",
  "tokio",
- "toml",
  "tower-lsp",
  "url",
+]
+
+[[package]]
+name = "grape"
+version = "0.2.0"
+dependencies = [
+ "colored",
+ "git2",
+ "gobol-cli",
+ "gobol-codegen",
+ "serde",
+ "toml",
 ]
 
 [[package]]

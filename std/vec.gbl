@@ -32,7 +32,7 @@ impl<T> New<T> for Vec<T> {
         v
     }
     
-    func new(capacity: int): Vec<T> {
+    func with_capacity(capacity: int): Vec<T> {
         Vec {
             _data: new T[capacity],
             _len: 0,

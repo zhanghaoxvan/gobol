@@ -22,11 +22,11 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use gobol::ast_builder::AstBuilder;
-use gobol::error::ErrorFormatter;
-use gobol::lexer::Lexer;
-use gobol::semantic_analyzer::SemanticAnalyzer;
-use gobol::token::{Token, TokenType};
+use gobol_common::token::{Token, TokenType};
+use gobol_frontend::ast_builder::AstBuilder;
+use gobol_frontend::error::ErrorFormatter;
+use gobol_frontend::lexer::Lexer;
+use gobol_frontend::semantic_analyzer::SemanticAnalyzer;
 
 // ==================== Semantic Tokens ====================
 // rust-analyzer-style automatic semantic highlighting. The LSP
@@ -2993,17 +2993,16 @@ fn build_lib_paths(file_path: &str, workspace_roots: &[PathBuf]) -> Vec<String> 
         }
     }
 
-    if let Ok(install_dir) = std::env::var("GOBOL_INSTALL_DIR") {
-        // lib_paths entries must point at the *parent* of the std/ directory so
-        // that `import std;` resolves to <lib_path>/std/mod.gbl. The installed
-        // layout is <install>/lib/std/mod.gbl (also <install>/std/mod.gbl for
-        // legacy installs). See grape.rs find_std_path() for the same rule.
-        let install = PathBuf::from(&install_dir);
-        if let Some(p) = install.join("lib").to_str() {
-            paths.push(p.to_string());
-        }
-        if let Some(p) = install.to_str() {
-            paths.push(p.to_string());
+    for key in ["GOBOL_INSTALL_DIR", "GOBOL_HOME"] {
+        if let Ok(install_dir) = std::env::var(key) {
+            let install = PathBuf::from(&install_dir);
+            for path in [install.join("lib"), install] {
+                if path.join("std").is_dir() {
+                    if let Some(path) = path.to_str() {
+                        paths.push(path.to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -6295,6 +6294,8 @@ mod e2e_doc {
     #[test]
     fn analyzes_header_relative_to_open_document() {
         let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("gobol-cli")
             .join("tests")
             .join("fixtures")
             .join("ffi");

@@ -54,6 +54,282 @@ fn test_byte_array_length() {
 }
 
 #[test]
+fn test_vec_generic_constructor_forms() {
+    let result = run_inline_test(
+        r#"import vec;
+func main() {
+    var typed: Vec<int> = Vec<int>::new([1, 2, 3]);
+    var inferred: Vec<int> = Vec::new([4, 5]);
+    var empty: Vec<int> = Vec::new();
+    var dotted = Vec.new();
+    io::println((typed.len() + inferred.len() + empty.len()) as str);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "5");
+}
+
+#[test]
+fn test_higher_order_function_signatures_and_abi() {
+    let result = run_inline_test(
+        r#"func apply_float(f: func(float, float): float, a: float, b: float): float {
+    f(a, b)
+}
+func sum_float(a: float, b: float): float {
+    a + b
+}
+func apply_bool(f: func(int): bool, value: int): bool {
+    f(value)
+}
+func is_positive(value: int): bool {
+    value > 0
+}
+func apply_void(f: func(int), value: int) {
+    f(value);
+}
+func noop(value: int) {}
+func main() {
+    var sum = apply_float(&sum_float, 1.5, 2.25);
+    var positive = apply_bool(&is_positive, 1);
+    apply_void(&noop, 7);
+    io::println(sum as str);
+    io::println(positive as str);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.lines().collect::<Vec<_>>(), ["3.75", "true"]);
+}
+
+#[test]
+fn test_generic_struct_method_specializes_by_receiver_type() {
+    let result = run_inline_test(
+        r#"import vec;
+func main() {
+    var raw: float[] = [1.25, 2.5];
+    io::println(raw[0] as str);
+    var values: Vec<float> = Vec<float>::new([1.25, 2.5]);
+    io::println(values.len() as str);
+    values.set(0, 3.5);
+    io::println(values.get(0) as str);
+    io::println(values.get(1) as str);
+    var counts: Vec<int> = Vec<int>::new([4, 7]);
+    io::println(counts.get(1) as str);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        ["1.25", "2", "3.5", "2.5", "7"]
+    );
+}
+
+#[test]
+fn test_enum_qualified_match_patterns() {
+    let result = run_inline_test(
+        r#"enum Color {
+    Red,
+    Green,
+    Blue,
+}
+func main() {
+    var color = Color::Green;
+    var value = match color {
+        Color::Red => 1,
+        Color::Green => 2,
+        _ => 3,
+    };
+    io::println(value as str);
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "2");
+}
+
+#[test]
+fn test_enum_multiple_payload_construction_and_match_binding() {
+    let result = run_inline_test(
+        r#"enum Entry {
+    KeyValue(str, int),
+            Pair(int, int),
+            Measure(float),
+            Empty,
+        }
+        func main() {
+            var entry = Entry::KeyValue("answer", 42);
+            var value = match entry {
+                Entry::KeyValue(key, count) => {
+                    io::println(key);
+                    count
+                },
+                Entry::Pair(_, count) => count,
+                Entry::Empty => 0,
+            };
+    io::println(value as str);
+            var measurement = Entry::Measure(1.5);
+            match measurement {
+                Entry::Measure(number) => {
+                    io::println(number as str);
+                    0
+                },
+                _ => 0,
+            };
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(
+        result.stdout.trim().replace("\r\n", "\n"),
+        "answer\n42\n1.5"
+    );
+}
+
+#[test]
+fn test_enum_payload_pattern_arity_mismatch_is_rejected() {
+    let result = run_inline_test(
+        r#"enum Entry {
+    KeyValue(str, int),
+}
+func main() {
+    var entry = Entry::KeyValue("answer", 42);
+    match entry {
+        Entry::KeyValue(value) => value,
+    };
+}"#,
+    );
+    result.assert_failure(ExitCode::CompileError);
+    assert!(
+        result.stderr.contains("pattern provides 1"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn test_generic_enum_single_payload_remains_compatible() {
+    let result = run_inline_test(
+        r#"enum Maybe<T> {
+    Some(T),
+    None,
+}
+func main() {
+    var maybe: Maybe<int> = Maybe<int>::Some(42);
+    var value = match maybe {
+        Maybe::Some(payload) => payload,
+        Maybe::None => 0,
+    };
+    io::println(value as str);
+    var decimal: Maybe<float> = Maybe<float>::Some(1.25);
+    match decimal {
+        Maybe::Some(payload) => {
+            io::println(payload as str);
+            0
+        },
+        Maybe::None => 0,
+    };
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim().replace("\r\n", "\n"), "42\n1.25");
+}
+
+#[test]
+fn test_semantic_diagnostics_report_source_lines() {
+    let result = run_inline_test(
+        "func main() {\n    var value = 1;\n    missing();\n    for item in true {\n        item;\n    }\n}\n",
+    );
+    result.assert_failure(ExitCode::CompileError);
+    assert!(result.stderr.contains(":3:"), "{}", result.stderr);
+    assert!(result.stderr.contains(":4:"), "{}", result.stderr);
+}
+
+#[test]
+fn test_debugger_breakpoint_and_single_step() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    init_test_env();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "gobol_debug_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).expect("create debugger test directory");
+    let source_path = temp_dir.join("main.gbl");
+    std::fs::write(
+        temp_dir.join("grape.toml"),
+        "[project]\nname = \"debug_test\"\nversion = \"0.1.0\"\nentry = \"main.gbl\"\n\n[dependencies]\n",
+    )
+    .expect("write debugger test manifest");
+    std::fs::write(
+        &source_path,
+        "func main() {\n    var value = 1;\n    value = value + 1;\n    io::println(value as str);\n}\n",
+    )
+    .expect("write debugger test source");
+
+    let compiler_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target")
+        .join("release");
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let build_status = Command::new("cargo")
+        .args(["build", "--release", "--bin", "grape"])
+        .current_dir(&workspace_root)
+        .status()
+        .expect("build grape binary");
+    assert!(build_status.success(), "grape binary build failed");
+    let mut search_paths = vec![compiler_dir];
+    search_paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(search_paths).expect("build compiler PATH");
+    let mut grape = workspace_root.join("target").join("release").join("grape");
+    if cfg!(windows) {
+        grape.set_extension("exe");
+    }
+    let mut command = Command::new(grape);
+    command
+        .current_dir(&temp_dir)
+        .args(["debug", "-b", "4"])
+        .env("PATH", path)
+        .env_remove("GOBOL_INSTALL_DIR")
+        .env_remove("GOBOL_HOME")
+        .env_remove("GOBOL_RUNTIME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().expect("launch grape debug");
+    child
+        .stdin
+        .as_mut()
+        .expect("debugger stdin")
+        .write_all(b"s\nc\nc\n")
+        .expect("send debugger step and continue commands");
+    drop(child.stdin.take());
+    let output = child
+        .wait_with_output()
+        .expect("collect debugger test program output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "grape debug failed:\n{}\n{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("Stopped at line 2"), "{stdout}");
+    assert!(stdout.contains("Stopped at line 3"), "{stdout}");
+    assert!(stdout.contains("Stopped at line 4"), "{stdout}");
+    assert!(stdout.contains("> 2"), "{stdout}");
+
+    std::fs::remove_dir_all(&temp_dir).expect("remove debugger test directory");
+}
+
+#[test]
 fn test_tcp_receive_bytes_and_peer_eof() {
     use std::io::{Read, Write};
     use std::net::TcpListener;

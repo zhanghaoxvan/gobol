@@ -88,6 +88,15 @@ impl CraneliftBackend {
                 }
                 Ok(arr)
             }
+            IRExpr::TupleLiteral(elems) => {
+                let tuple = self.call_runtime(bcx, "gobol_array_new", &[]);
+                for element in elems {
+                    let value = self.translate_expr(bcx, element)?;
+                    let value = self.to_storage_word(bcx, value, element);
+                    self.call_runtime(bcx, "gobol_array_add", &[tuple, value]);
+                }
+                Ok(tuple)
+            }
             IRExpr::StructLiteral { name, fields } => {
                 self.translate_struct_literal(bcx, name, fields)
             }

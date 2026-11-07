@@ -2,7 +2,7 @@
 // Option<T> — 表示可能存在或不存在的值
 // 这个文件实现了标准的 Option 类型和常用方法
 
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 import result;
 

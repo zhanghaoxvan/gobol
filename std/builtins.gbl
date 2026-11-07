@@ -10,7 +10,7 @@
 //
 // The signatures below mirror std/runtime.h; the actual C implementations
 // live in std/runtime.c / std/runtime/*.c and are linked into every program.
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 #[header("std/runtime.h")]
 extern "C" {

@@ -1,4 +1,4 @@
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 import iterator::Iterator;
 
@@ -85,15 +85,17 @@ impl New for RangeIterator {
     }
 }
 
-impl RangeIterator {
-    func next(self): (int, bool) {
+impl Iterator<int> for RangeIterator {
+    type Value = int;
+
+    func next(self): Option<int> {
         if self._step > 0 {
-            if self._current >= self._end { return (0, false); }
+            if self._current >= self._end { return Option<int>::new(); }
         } else {
-            if self._current <= self._end { return (0, false); }
+            if self._current <= self._end { return Option<int>::new(); }
         }
         var value: int = self._current;
         self._current = self._current + self._step;
-        (value, true)
+        Option::Some(value)
     }
 }

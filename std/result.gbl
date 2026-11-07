@@ -9,7 +9,7 @@
 //   if __tmp._tag == 1 { return __tmp; }
 //   __tmp.take()
 
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 enum Result<T, E> {
     Ok(T),

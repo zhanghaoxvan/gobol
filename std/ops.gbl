@@ -3,7 +3,7 @@
 // are desugared to method calls on the corresponding trait.
 // Traits are namespaced with :: paths.
 // 
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 trait Add<T> {
     func add(self, other: T): T

@@ -14,7 +14,7 @@ import result;
 // `gobol_thread_join`, `gobol_chan_*`) are declared once in
 // std/builtins.gbl, which every Gobol program auto-imports.
 
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 struct Thread {
     _id: int

@@ -1,0 +1,25 @@
+import std::range;
+
+func main(): int {
+    var iter = RangeIterator::new(1, 3, 1);
+    var first = iter.next();
+    var second = iter.next();
+    var done = iter.next();
+
+    match first {
+        Option::Some(value) => {
+            if value != 1 { return 1; }
+        },
+        Option::None => return 2,
+    }
+    match second {
+        Option::Some(value) => {
+            if value != 2 { return 3; }
+        },
+        Option::None => return 4,
+    }
+    if done.is_some() {
+        return 5;
+    }
+    0
+}

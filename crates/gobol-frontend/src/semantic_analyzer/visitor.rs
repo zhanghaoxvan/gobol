@@ -999,21 +999,17 @@ impl AstVisitor for SemanticAnalyzer {
 
         // A bare enum variant like `Option::None` or `Color::Red` is a value,
         // not a function call, so resolve it via the enum metadata even when
-        // the zero-arg form is written without parentheses.
-        if let Some((variant_names, _)) = node
-            .get_path()
-            .last()
-            .and_then(|path| self.enum_info.get(path.split('<').next().unwrap_or(path)))
-        {
-            if variant_names.iter().any(|name| name == &member) {
-                let enum_name = node
-                    .get_path()
-                    .last()
-                    .map(|s| s.split('<').next().unwrap_or(s).to_string())
-                    .unwrap_or_default();
-                if !enum_name.is_empty() {
-                    self.type_stack.push(DataType::Struct(enum_name));
-                    return;
+        // the zero-arg form is written without parentheses. Keep the generic
+        // suffix on the enum instance itself (e.g. `Option<T>`) so return
+        // checks compare against `Option<T>`, not the base name `Option`.
+        if let Some(last_path) = node.get_path().last() {
+            let enum_key = last_path.split('<').next().unwrap_or(last_path).to_string();
+            if let Some((variant_names, _)) = self.enum_info.get(&enum_key) {
+                if variant_names.iter().any(|name| name == &member) {
+                    if !last_path.is_empty() {
+                        self.type_stack.push(DataType::Struct(last_path.clone()));
+                        return;
+                    }
                 }
             }
         }
@@ -1045,6 +1041,17 @@ impl AstVisitor for SemanticAnalyzer {
     }
 
     fn visit_array_literal(&mut self, node: &ArrayLiteral) {
+        if node.is_tuple() {
+            let mut elements = Vec::with_capacity(node.get_elements().len());
+            for elem in node.get_elements() {
+                elem.accept(self);
+                elements.push(self.get_current_type());
+                self.type_stack.pop();
+            }
+            self.type_stack.push(DataType::Tuple(elements));
+            return;
+        }
+
         let mut first = true;
         let mut elem_type = DataType::Unknown;
         let contains_nested_array = node
@@ -2536,10 +2543,13 @@ impl AstVisitor for SemanticAnalyzer {
         self.type_stack.pop();
 
         if node.get_member().parse::<usize>().is_ok() {
-            if let DataType::Array(element_type) = obj_type {
-                self.type_stack.push(*element_type);
-            } else {
-                self.type_stack.push(DataType::Unknown);
+            let index = node.get_member().parse::<usize>().unwrap();
+            match obj_type {
+                DataType::Array(element_type) => self.type_stack.push(*element_type),
+                DataType::Tuple(elements) => self
+                    .type_stack
+                    .push(elements.get(index).cloned().unwrap_or(DataType::Unknown)),
+                _ => self.type_stack.push(DataType::Unknown),
             }
             return;
         }

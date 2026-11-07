@@ -29,21 +29,38 @@ class Colors:
 def clear_screen():
     subprocess.run('cls' if os.name == 'nt' else 'clear', shell=True)
 
+def _print_menu_option(options, index, selected):
+    prefix = ">" if index == selected else " "
+    color = Colors.OKGREEN if index == selected else Colors.OKBLUE
+    sys.stdout.write(f"{color}{prefix} {index + 1:>2}. {options[index]}{Colors.ENDC}")
+
+
 def print_menu(title, options, selected=0, footer=""):
     clear_screen()
     print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.OKCYAN}{Colors.BOLD}{title:^60}{Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print()
-    for i, option in enumerate(options, 1):
-        prefix = ">" if i - 1 == selected else " "
-        color = Colors.OKGREEN if i - 1 == selected else Colors.OKBLUE
-        print(f"{color}{prefix} {i:>2}. {option}{Colors.ENDC}")
+    for i in range(len(options)):
+        _print_menu_option(options, i, selected)
+        print()
     print()
     if footer:
         print(f"{Colors.GREY}{footer}{Colors.ENDC}")
     print(f"{Colors.HEADER}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.GREY}Use ↑/↓, Enter to select, or press 'q' to quit{Colors.ENDC}")
+
+
+def redraw_menu_selection(options, previous, selected, footer=""):
+    """Update only the old and new selected rows, leaving the rest untouched."""
+    footer_rows = 1 if footer else 0
+    cursor_up_to_option = len(options) + 3 + footer_rows
+
+    for index in (previous, selected):
+        sys.stdout.write(f"\033[s\033[{cursor_up_to_option - index}A\r\033[2K")
+        _print_menu_option(options, index, selected)
+        sys.stdout.write("\033[u")
+    sys.stdout.flush()
 
 
 def choose_menu(title, options, footer=""):
@@ -52,10 +69,10 @@ def choose_menu(title, options, footer=""):
         return int(input("Select an option: ").strip()) - 1
 
     selected = 0
+    print_menu(title, options, selected, footer)
     if is_windows():
         import msvcrt
         while True:
-            print_menu(title, options, selected, footer)
             key = msvcrt.getwch()
             if key in ("\r", "\n"):
                 return selected
@@ -68,9 +85,13 @@ def choose_menu(title, options, footer=""):
             if key == "\x00" or key == "\xe0":
                 key = msvcrt.getwch()
                 if key == "H":
+                    previous = selected
                     selected = (selected - 1) % len(options)
+                    redraw_menu_selection(options, previous, selected, footer)
                 elif key == "P":
+                    previous = selected
                     selected = (selected + 1) % len(options)
+                    redraw_menu_selection(options, previous, selected, footer)
     else:
         import termios
         import tty
@@ -78,7 +99,6 @@ def choose_menu(title, options, footer=""):
         try:
             tty.setcbreak(sys.stdin.fileno()) # type: ignore[attr-defined]
             while True:
-                print_menu(title, options, selected, footer)
                 key = sys.stdin.read(1)
                 if key in ("\r", "\n"):
                     return selected
@@ -91,9 +111,13 @@ def choose_menu(title, options, footer=""):
                 if key == "\x1b":
                     sequence = sys.stdin.read(2)
                     if sequence == "[A":
+                        previous = selected
                         selected = (selected - 1) % len(options)
+                        redraw_menu_selection(options, previous, selected, footer)
                     elif sequence == "[B":
+                        previous = selected
                         selected = (selected + 1) % len(options)
+                        redraw_menu_selection(options, previous, selected, footer)
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings) # type: ignore[attr-defined]
 

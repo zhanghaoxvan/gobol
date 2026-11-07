@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
-const MODULE_IR_CACHE_VERSION: u32 = 18;
+const MODULE_IR_CACHE_VERSION: u32 = 19;
 
 #[derive(Serialize, Deserialize)]
 struct ModuleIrCache {

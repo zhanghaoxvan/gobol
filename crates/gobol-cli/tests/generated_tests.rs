@@ -232,6 +232,30 @@ func main() {
 }
 
 #[test]
+fn test_generic_enum_variant_return_keeps_type_arguments() {
+    let result = run_inline_test(
+        r#"enum Option<T> {
+    Some(T),
+    None,
+}
+
+func make_none(): Option<int> {
+    Option<int>::None
+}
+
+func main() {
+    var value = make_none();
+    match value {
+        Option::None => io::println("ok"),
+        Option::Some(v) => io::println(v as str),
+    };
+}"#,
+    );
+    result.assert_success();
+    assert_eq!(result.stdout.trim(), "ok");
+}
+
+#[test]
 fn test_semantic_diagnostics_report_source_lines() {
     let result = run_inline_test(
         "func main() {\n    var value = 1;\n    missing();\n    for item in true {\n        item;\n    }\n}\n",
@@ -1037,6 +1061,14 @@ fn test_stdlib_math_test() {
 #[test]
 fn test_stdlib_net_test() {
     let path = fixture_path("fixtures/stdlib/net_test.gbl");
+    let result = run_gobol(path.to_str().unwrap(), false);
+    result.assert_success();
+}
+
+/// The standard range iterator implements Iterator and returns Option values.
+#[test]
+fn test_stdlib_range_iterator_trait() {
+    let path = fixture_path("fixtures/stdlib/range_test.gbl");
     let result = run_gobol(path.to_str().unwrap(), false);
     result.assert_success();
 }

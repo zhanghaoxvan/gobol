@@ -4,7 +4,7 @@
 // like var v: int[] => var v: new vec<int>()
 // or var v1: int[32] => var v1: new vec<int>()
 // it calls this library
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 import ref;
 import iterator;
@@ -147,10 +147,10 @@ impl<T> Iterator<T> for VecIterator<T> {
     type Value = T;
     func next(self): Option<T> {
         if self._index >= self._len {
-            return Option::None;
+            return Option<T>::None;
         }
         var value: T = self._data[self._index];
         self._index = self._index + 1;
-        Option::Some(value)
+        Option<T>::Some(value)
     }
 };

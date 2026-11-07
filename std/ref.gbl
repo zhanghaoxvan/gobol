@@ -9,7 +9,7 @@
 // `gobol_mem_store`, `gobol_array_elem_addr`) are declared once in
 // std/builtins.gbl, which every Gobol program auto-imports.
 
-#[library_features(hidden = true)]
+#![library_features(hidden = true)]
 
 struct Ref<T> {
     _addr: int

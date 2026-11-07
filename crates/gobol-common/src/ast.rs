@@ -2988,6 +2988,7 @@ impl Expression for RangeExpression {
 
 pub struct ArrayLiteral {
     elements: Vec<Box<dyn Expression>>,
+    is_tuple: bool,
     pub attributes: Vec<Attribute>,
 }
 
@@ -2995,12 +2996,25 @@ impl ArrayLiteral {
     pub fn new(elements: Vec<Box<dyn Expression>>) -> Self {
         ArrayLiteral {
             elements,
+            is_tuple: false,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn new_tuple(elements: Vec<Box<dyn Expression>>) -> Self {
+        ArrayLiteral {
+            elements,
+            is_tuple: true,
             attributes: Vec::new(),
         }
     }
 
     pub fn get_elements(&self) -> &Vec<Box<dyn Expression>> {
         &self.elements
+    }
+
+    pub fn is_tuple(&self) -> bool {
+        self.is_tuple
     }
 }
 

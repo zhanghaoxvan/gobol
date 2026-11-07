@@ -789,7 +789,9 @@ impl AstBuilder {
             }
             parser.advance(); // consume '<'
             loop {
-                if !parser.match_type(&TokenType::Identifier) {
+                if !parser.match_type(&TokenType::Identifier)
+                    && !parser.match_type(&TokenType::Keyword)
+                {
                     return false;
                 }
                 parser.advance();
@@ -810,7 +812,8 @@ impl AstBuilder {
             self.advance(); // consume '<'
             let mut params = Vec::new();
             loop {
-                if !self.match_type(&TokenType::Identifier) {
+                if !self.match_type(&TokenType::Identifier) && !self.match_type(&TokenType::Keyword)
+                {
                     break;
                 }
                 params.push(self.current_token().value.clone());
@@ -1362,18 +1365,7 @@ impl AstBuilder {
         let mut return_type = None;
         if self.match_value(":") {
             self.advance();
-            if self.match_value("(") {
-                // Tuple return type - skip for now
-                self.advance();
-                return_type = self.parse_type();
-                while self.match_value(",") {
-                    self.advance();
-                    self.parse_type();
-                }
-                self.consume_value(")", "Expected ')' closing tuple type");
-            } else {
-                return_type = self.parse_type();
-            }
+            return_type = self.parse_type();
         }
 
         // If { follows, parse body; otherwise just declaration
@@ -1562,6 +1554,29 @@ impl AstBuilder {
         // Used as the type of callback parameters (e.g. `f: func(T): U`).
         if self.match_type(&TokenType::Keyword) && self.current_token().value == "func" {
             return self.parse_function_type();
+        }
+
+        if self.match_value("(") {
+            self.advance();
+            if self.match_value(")") {
+                self.advance();
+                return Some(Box::new(BasicType::new("()")));
+            }
+            let first = self.parse_type()?;
+            if !self.match_value(",") {
+                self.consume_value(")", "Expected ')' after parenthesized type");
+                return Some(first);
+            }
+            let mut elements = vec![first];
+            while self.match_value(",") {
+                self.advance();
+                if self.match_value(")") {
+                    break;
+                }
+                elements.push(self.parse_type()?);
+            }
+            self.consume_value(")", "Expected ')' after tuple type");
+            return Some(Box::new(GenericType::new("tuple", elements)));
         }
 
         if self.match_value("&") {
@@ -2452,7 +2467,7 @@ impl AstBuilder {
                     elements.push(self.parse_expression()?);
                 }
                 self.consume_value(")", "Expected ')' after tuple expression");
-                return Some(Box::new(ArrayLiteral::new(elements)));
+                return Some(Box::new(ArrayLiteral::new_tuple(elements)));
             }
             let expr = first;
             while self.match_value(",") {

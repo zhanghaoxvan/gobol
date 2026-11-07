@@ -142,6 +142,7 @@ pub enum IRExpr {
         index: Box<IRExpr>,
     },
     ArrayLiteral(Vec<IRExpr>),
+    TupleLiteral(Vec<IRExpr>),
     StructLiteral {
         name: String,
         fields: Vec<(String, IRExpr)>,
@@ -1010,6 +1011,9 @@ impl IRBuilder {
             IRExpr::ArrayLiteral(elems) => {
                 IRExpr::ArrayLiteral(elems.iter().map(|a| self.subst_expr(a, env)).collect())
             }
+            IRExpr::TupleLiteral(elems) => {
+                IRExpr::TupleLiteral(elems.iter().map(|a| self.subst_expr(a, env)).collect())
+            }
             IRExpr::StructLiteral { name, fields } => IRExpr::StructLiteral {
                 name: name.clone(),
                 fields: fields
@@ -1116,6 +1120,15 @@ impl IRBuilder {
                 index: Box::new(self.expand_nested_macros(index, depth, max_depth)),
             },
             IRExpr::ArrayLiteral(elems) => IRExpr::ArrayLiteral(
+                elems
+                    .iter()
+                    .map(|a| {
+                        let mut a = a.clone();
+                        self.expand_nested_macros(&mut a, depth, max_depth)
+                    })
+                    .collect(),
+            ),
+            IRExpr::TupleLiteral(elems) => IRExpr::TupleLiteral(
                 elems
                     .iter()
                     .map(|a| {
@@ -1492,6 +1505,12 @@ impl IRBuilder {
             },
             IRExpr::Assignment { target, .. } => self.infer_expr_type(target),
             IRExpr::ArrayLiteral(_) => DataType::Array(Box::new(DataType::Unknown)),
+            IRExpr::TupleLiteral(elements) => DataType::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.infer_expr_type(element))
+                    .collect(),
+            ),
             IRExpr::MemberAccess { object, member } => {
                 if let DataType::Tuple(elements) = self.infer_expr_type(object) {
                     if let Ok(index) = member.parse::<usize>() {
@@ -2751,7 +2770,11 @@ impl AstVisitor for IRBuilder {
             elem.accept(self);
             elements.push(self.pop_expr());
         }
-        self.push_expr(IRExpr::ArrayLiteral(elements));
+        if node.is_tuple() {
+            self.push_expr(IRExpr::TupleLiteral(elements));
+        } else {
+            self.push_expr(IRExpr::ArrayLiteral(elements));
+        }
     }
 
     fn visit_struct_literal(&mut self, node: &StructLiteral) {
@@ -3809,6 +3832,11 @@ impl Monomorphizer {
                     self.rewrite_expr(it, generic_by_name, returns_by_name);
                 }
             }
+            IRExpr::TupleLiteral(items) => {
+                for it in items.iter_mut() {
+                    self.rewrite_expr(it, generic_by_name, returns_by_name);
+                }
+            }
             IRExpr::StructLiteral { fields, .. } => {
                 for (_, e) in fields.iter_mut() {
                     self.rewrite_expr(e, generic_by_name, returns_by_name);
@@ -4346,6 +4374,12 @@ impl Monomorphizer {
                     .unwrap_or(DataType::Unknown);
                 DataType::Array(Box::new(elem))
             }
+            IRExpr::TupleLiteral(items) => DataType::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.infer_concrete_type(item, returns_by_name))
+                    .collect(),
+            ),
             IRExpr::Assignment { value, .. } => self.infer_concrete_type(value, returns_by_name),
             _ => DataType::Unknown,
         }
@@ -4532,6 +4566,11 @@ impl Monomorphizer {
                 self.substitute_in_expr(index, type_map);
             }
             IRExpr::ArrayLiteral(items) => {
+                for it in items.iter_mut() {
+                    self.substitute_in_expr(it, type_map);
+                }
+            }
+            IRExpr::TupleLiteral(items) => {
                 for it in items.iter_mut() {
                     self.substitute_in_expr(it, type_map);
                 }

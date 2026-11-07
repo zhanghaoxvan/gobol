@@ -776,14 +776,19 @@ impl AstVisitor for AstPrinter {
     }
 
     fn visit_array_literal(&mut self, node: &ArrayLiteral) {
-        print!("[");
+        let (open, close) = if node.is_tuple() {
+            ("(", ")")
+        } else {
+            ("[", "]")
+        };
+        print!("{}", open);
         for (i, elem) in node.get_elements().iter().enumerate() {
             if i > 0 {
                 print!(", ");
             }
             elem.accept(self);
         }
-        print!("]");
+        print!("{}", close);
     }
 
     fn visit_struct_literal(&mut self, node: &StructLiteral) {

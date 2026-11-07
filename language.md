@@ -865,7 +865,6 @@ func main() {
 #[dynamic_args]
 #[expand]
 #[header("std/runtime.h")]
-#[library_features(hidden = true)]
 #[internal]
 #[debug]
 #[intrinsic("runtime_name")]
@@ -878,7 +877,6 @@ func main() {
 | `#[dynamic]` | Trait method / Trait 方法 | Allow impls to define arbitrary functions / 允许实现者自由定义函数 |
 | `#[expand]` | Function / 函数 | AST-level macro; inline body at every call site (see §14) / AST 级宏；在每个调用点内联函数体（见 §14） |
 | `#[header("path")]` | `extern "C"` block / 外部块 | C header for function validation / 用于函数验证的 C 头文件 |
-| `#[library_features(hidden = true)]` | Module / 模块 | Hide module prefix in qualified names / 隐藏模块前缀 |
 | `#[internal]` | Function, Struct, Trait | Not exported; module-private / 不导出，模块私有 |
 | `#[debug]` | Function / 函数 | Remove in release mode (zero overhead) / Release 模式下移除（零开销） |
 | `#[intrinsic("name")]` | Function / 函数 | Map to named C runtime function / 映射到指定 C 运行时函数 |

@@ -433,9 +433,62 @@ impl Environment {
             .unwrap_or(DataType::Unknown)
     }
 
+    fn split_generic_name(name: &str) -> (String, Vec<String>) {
+        let name = name.trim();
+        let Some(open) = name.find('<') else {
+            return (name.to_string(), Vec::new());
+        };
+        let base = name[..open].trim().to_string();
+        let inner = &name[open + 1..name.len() - 1];
+        let mut args = Vec::new();
+        let mut current = String::new();
+        let mut depth = 0usize;
+        for ch in inner.chars() {
+            match ch {
+                '<' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                '>' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    let item = current.trim();
+                    if !item.is_empty() {
+                        args.push(item.to_string());
+                    }
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
+        }
+        let item = current.trim();
+        if !item.is_empty() {
+            args.push(item.to_string());
+        }
+        (base, args)
+    }
+
     pub fn is_type_compatible(target: &DataType, source: &DataType) -> bool {
         if target == source {
             return true;
+        }
+        if let (DataType::Struct(target_name), DataType::Struct(source_name)) = (target, source) {
+            let (target_base, target_args) = Self::split_generic_name(target_name);
+            let (source_base, source_args) = Self::split_generic_name(source_name);
+            if target_base == source_base {
+                if target_args.is_empty() || source_args.is_empty() {
+                    return true;
+                }
+                if target_args.len() == source_args.len()
+                    && target_args.iter().zip(source_args.iter()).all(|(a, b)| a == b)
+                {
+                    return true;
+                }
+            }
         }
         // None_ is compatible with Nullable<T>
         if let DataType::Nullable(inner) = target {

@@ -60,6 +60,7 @@ impl CraneliftBackend {
                     DataType::Str
                         | DataType::Struct(_)
                         | DataType::Array(_)
+                        | DataType::Tuple(_)
                         | DataType::Reference(_)
                         | DataType::Pointer(_)
                 );

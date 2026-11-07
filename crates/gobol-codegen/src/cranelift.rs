@@ -347,6 +347,12 @@ impl TypeResolver {
                 let _ = elems.first().map(|e| self.infer_type(e));
                 DataType::Unknown
             }
+            IRExpr::TupleLiteral(elements) => DataType::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.infer_type(element))
+                    .collect(),
+            ),
             IRExpr::MethodCall {
                 object,
                 method,
@@ -1592,7 +1598,16 @@ impl CraneliftBackend {
         if let Ok(index) = member.parse::<i64>() {
             let arr = self.translate_expr(bcx, object)?;
             let idx = bcx.ins().iconst(types::I64, index);
-            return Ok(self.call_runtime(bcx, "gobol_array_get", &[arr, idx]));
+            let value = self.call_runtime(bcx, "gobol_array_get", &[arr, idx]);
+            let element_type = match obj_ty {
+                DataType::Array(element) => *element,
+                DataType::Tuple(elements) => usize::try_from(index)
+                    .ok()
+                    .and_then(|index| elements.get(index).cloned())
+                    .unwrap_or(DataType::Unknown),
+                _ => DataType::Unknown,
+            };
+            return Ok(self.coerce_array_element(bcx, value, &element_type));
         }
         if let DataType::Struct(sname) = &obj_ty {
             let obj_val = self.translate_expr(bcx, object)?;
@@ -2216,7 +2231,7 @@ impl CraneliftBackend {
                 DataType::Unknown | DataType::Array(_)
             )
         } else {
-            matches!(expr, IRExpr::ArrayLiteral(_))
+            matches!(expr, IRExpr::ArrayLiteral(_) | IRExpr::TupleLiteral(_))
         }
     }
 

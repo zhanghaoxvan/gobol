@@ -484,7 +484,10 @@ impl Environment {
                     return true;
                 }
                 if target_args.len() == source_args.len()
-                    && target_args.iter().zip(source_args.iter()).all(|(a, b)| a == b)
+                    && target_args
+                        .iter()
+                        .zip(source_args.iter())
+                        .all(|(a, b)| a == b)
                 {
                     return true;
                 }
